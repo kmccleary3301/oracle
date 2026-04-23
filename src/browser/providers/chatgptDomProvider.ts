@@ -1,7 +1,11 @@
 import type { BrowserLogger, ChromeClient } from "../types.js";
 import type { ProviderDomAdapter, ProviderDomFlowContext } from "../providerDomFlow.js";
 import { ensurePromptReady } from "../actions/navigation.js";
-import { submitPrompt, type AttachmentReadyExpectation } from "../actions/promptComposer.js";
+import {
+  submitPreparedPrompt,
+  submitPrompt,
+  type AttachmentReadyExpectation,
+} from "../actions/promptComposer.js";
 import { waitForAssistantResponse } from "../actions/assistantResponse.js";
 
 interface ChatgptDomProviderState {
@@ -15,6 +19,7 @@ interface ChatgptDomProviderState {
   attachmentNames?: AttachmentReadyExpectation[];
   committedTurns?: number | null;
   onPromptSubmitted?: () => Promise<void> | void;
+  promptAlreadyInserted?: boolean;
 }
 
 function requireState(ctx: ProviderDomFlowContext): ChatgptDomProviderState {
@@ -36,7 +41,8 @@ async function typePrompt(_ctx: ProviderDomFlowContext): Promise<void> {
 
 async function submitPromptViaAdapter(ctx: ProviderDomFlowContext): Promise<void> {
   const state = requireState(ctx);
-  const committedTurns = await submitPrompt(
+  const submit = state.promptAlreadyInserted ? submitPreparedPrompt : submitPrompt;
+  const committedTurns = await submit(
     {
       runtime: state.runtime,
       input: state.input,
@@ -49,6 +55,7 @@ async function submitPromptViaAdapter(ctx: ProviderDomFlowContext): Promise<void
     ctx.prompt,
     state.logger,
   );
+  state.promptAlreadyInserted = false;
   state.committedTurns =
     typeof committedTurns === "number" && Number.isFinite(committedTurns) ? committedTurns : null;
   if (

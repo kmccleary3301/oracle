@@ -38,6 +38,7 @@ export interface BrowserDefaultsOptions {
   browserArchive?: BrowserArchiveMode;
   browserManualLogin?: boolean;
   browserManualLoginProfileDir?: string | null;
+  remoteChrome?: string;
 }
 
 type SourceGetter = (key: keyof BrowserDefaultsOptions) => string | undefined;
@@ -85,6 +86,8 @@ export function applyBrowserDefaultsFromConfig(
   }
   if (isUnset("browserAttachRunning") && browser.attachRunning !== undefined) {
     options.browserAttachRunning = browser.attachRunning;
+  if (isUnset("remoteChrome") && browser.remoteChrome !== undefined && browser.remoteChrome !== null) {
+    options.remoteChrome = `${browser.remoteChrome.host}:${browser.remoteChrome.port}`;
   }
   if (isUnset("browserUrl") && options.browserUrl === undefined && browser.url !== undefined) {
     options.browserUrl = browser.url;

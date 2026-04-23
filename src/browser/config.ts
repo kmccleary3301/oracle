@@ -13,6 +13,7 @@ import type { BrowserAutomationConfig, ResolvedBrowserConfig } from "./types.js"
 import { normalizeChatgptUrl } from "./utils.js";
 import os from "node:os";
 import path from "node:path";
+import { DEFAULT_REMOTE_CHROME_MAX_TABS } from "./remoteChromeTabs.js";
 
 export const DEFAULT_CHATGPT_COOKIE_NAMES = [
   "__Secure-next-auth.session-token",
@@ -61,12 +62,14 @@ export const DEFAULT_BROWSER_CONFIG: ResolvedBrowserConfig = {
   remoteChrome: null,
   remoteChromeBrowserWSEndpoint: null,
   remoteChromeProfileRoot: null,
+  remoteChromeMaxTabs: DEFAULT_REMOTE_CHROME_MAX_TABS,
   manualLogin: false,
   manualLoginProfileDir: null,
   manualLoginCookieSync: false,
   researchMode: "off",
   archiveConversations: "auto",
   resumeConversationUrl: null,
+  sandboxArtifactsOutputDir: null,
 };
 
 export function resolveBrowserConfig(
@@ -150,6 +153,8 @@ export function resolveBrowserConfig(
       config?.remoteChromeBrowserWSEndpoint ?? DEFAULT_BROWSER_CONFIG.remoteChromeBrowserWSEndpoint,
     remoteChromeProfileRoot:
       config?.remoteChromeProfileRoot ?? DEFAULT_BROWSER_CONFIG.remoteChromeProfileRoot,
+    remoteChromeMaxTabs:
+      config?.remoteChromeMaxTabs ?? DEFAULT_BROWSER_CONFIG.remoteChromeMaxTabs,
     thinkingTime: config?.thinkingTime,
     researchMode,
     archiveConversations,
@@ -159,6 +164,8 @@ export function resolveBrowserConfig(
     manualLoginProfileDir: manualLogin ? resolvedProfileDir : null,
     manualLoginCookieSync:
       config?.manualLoginCookieSync ?? DEFAULT_BROWSER_CONFIG.manualLoginCookieSync,
+    sandboxArtifactsOutputDir:
+      config?.sandboxArtifactsOutputDir ?? DEFAULT_BROWSER_CONFIG.sandboxArtifactsOutputDir,
   };
 }
 

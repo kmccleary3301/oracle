@@ -77,6 +77,7 @@ export interface BrowserSessionConfig {
   manualLoginCookieSync?: boolean;
   /** Copy this signed-in Chrome user-data dir to a throwaway profile and run against it (login-free). */
   copyProfileSource?: string | null;
+  sandboxArtifactsOutputDir?: string | null;
   /** Thinking time intensity: 'light', 'standard', 'extended', 'heavy' */
   thinkingTime?: ThinkingTimeLevel;
   /** Browser-only research mode. "deep" activates ChatGPT Deep Research. */

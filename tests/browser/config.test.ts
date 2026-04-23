@@ -55,6 +55,7 @@ describe("resolveBrowserConfig", () => {
       chromeProfile: "Profile 1",
       chromePath: "/Applications/Chrome",
       browserTabRef: "current",
+      sandboxArtifactsOutputDir: "/tmp/oracle-artifacts",
       debug: true,
       maxConcurrentTabs: 5,
       researchMode: "deep",
@@ -70,6 +71,7 @@ describe("resolveBrowserConfig", () => {
     expect(resolved.chromeProfile).toBe("Profile 1");
     expect(resolved.chromePath).toBe("/Applications/Chrome");
     expect(resolved.browserTabRef).toBe("current");
+    expect(resolved.sandboxArtifactsOutputDir).toBe("/tmp/oracle-artifacts");
     expect(resolved.debug).toBe(true);
     expect(resolved.maxConcurrentTabs).toBe(5);
     expect(resolved.researchMode).toBe("deep");

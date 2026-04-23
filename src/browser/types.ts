@@ -7,6 +7,10 @@ import type {
 } from "../sessionStore.js";
 import type { SessionArtifact } from "../sessionStore.js";
 import type { ThinkingTimeLevel } from "../oracle/types.js";
+import type {
+  ChatgptDownloadedSandboxArtifact,
+  ChatgptSandboxArtifactRef,
+} from "./chatgpt/types.js";
 
 export type ChromeClient = Awaited<ReturnType<typeof CDP>>;
 export type CookieParam = Protocol.Network.CookieParam;
@@ -105,11 +109,14 @@ export interface BrowserAutomationConfig {
   remoteChrome?: { host: string; port: number } | null;
   remoteChromeBrowserWSEndpoint?: string | null;
   remoteChromeProfileRoot?: string | null;
+  /** Max number of Oracle-managed remote Chrome tabs to keep open concurrently. */
+  remoteChromeMaxTabs?: number;
   manualLogin?: boolean;
   manualLoginProfileDir?: string | null;
   manualLoginCookieSync?: boolean;
   /** Copy this signed-in Chrome user-data dir to a throwaway profile and run against it (login-free). */
   copyProfileSource?: string | null;
+  sandboxArtifactsOutputDir?: string | null;
   /** Thinking time intensity level for Thinking/Pro models: light, standard, extended, heavy */
   thinkingTime?: ThinkingTimeLevel;
   /** Browser-only research mode. "deep" activates ChatGPT Deep Research. */
@@ -189,6 +196,10 @@ export interface BrowserRunResult {
   conversationId?: string;
   promptSubmitted?: boolean;
   controllerPid?: number;
+  sandboxArtifacts?: ChatgptSandboxArtifactRef[];
+  newSandboxArtifacts?: ChatgptSandboxArtifactRef[];
+  downloadedSandboxArtifacts?: ChatgptDownloadedSandboxArtifact[];
+  warnings?: string[];
 }
 
 export type ResolvedBrowserConfig = Required<
@@ -221,6 +232,7 @@ export type ResolvedBrowserConfig = Required<
   remoteChrome?: { host: string; port: number } | null;
   remoteChromeBrowserWSEndpoint?: string | null;
   remoteChromeProfileRoot?: string | null;
+  remoteChromeMaxTabs?: number;
   manualLogin?: boolean;
   manualLoginProfileDir?: string | null;
   manualLoginCookieSync?: boolean;
@@ -228,4 +240,5 @@ export type ResolvedBrowserConfig = Required<
   maxConcurrentTabs: number;
   researchMode: BrowserResearchMode;
   archiveConversations: BrowserArchiveMode;
+  sandboxArtifactsOutputDir?: string | null;
 };

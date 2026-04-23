@@ -117,6 +117,194 @@ export async function transferAttachmentViaDataTransfer(
   };
 }
 
+export async function transferAttachmentViaCdpDrag(
+  deps: { runtime: ChromeClient["Runtime"]; input?: ChromeClient["Input"] },
+  attachment: BrowserAttachment,
+  hostPathCandidates: string[],
+): Promise<{ fileName: string; size: number; path: string }> {
+  const { runtime, input } = deps;
+  if (!input || typeof input.dispatchDragEvent !== "function") {
+    throw new Error("Chrome Input domain unavailable for CDP drag/drop upload.");
+  }
+  const fileName = path.basename(attachment.path);
+  const fileContent = await readFile(attachment.path);
+  const { result } = await runtime.evaluate({
+    expression: `(() => {
+      const prompt = document.querySelector('#prompt-textarea,[contenteditable="true"],textarea');
+      const target =
+        prompt?.closest('form') ||
+        prompt?.closest('[data-testid*="composer"]') ||
+        prompt?.parentElement ||
+        document.querySelector('main') ||
+        document.body;
+      if (!(target instanceof Element)) return null;
+      const rect = target.getBoundingClientRect();
+      return {
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+      };
+    })()`,
+    returnByValue: true,
+  });
+  const point = result?.value as { x?: number; y?: number } | null | undefined;
+  if (typeof point?.x !== "number" || typeof point?.y !== "number") {
+    throw new Error("Unable to locate a CDP drag/drop target.");
+  }
+  let lastError: unknown;
+  for (const candidate of hostPathCandidates) {
+    try {
+      const data = {
+        items: [{ mimeType: guessMimeType(fileName), data: "" }],
+        files: [candidate],
+        dragOperationsMask: 1,
+      };
+      await input.dispatchDragEvent({ type: "dragEnter", x: point.x, y: point.y, data });
+      await new Promise((resolve) => setTimeout(resolve, 650));
+      await input.dispatchDragEvent({ type: "dragOver", x: point.x, y: point.y, data });
+      await new Promise((resolve) => setTimeout(resolve, 650));
+      await input.dispatchDragEvent({ type: "drop", x: point.x, y: point.y, data });
+      await new Promise((resolve) => setTimeout(resolve, 8_000));
+      return { fileName, size: fileContent.length, path: candidate };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error(
+    `CDP drag/drop upload failed: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+  );
+}
+
+export async function transferAttachmentViaDrop(
+  runtime: ChromeClient["Runtime"],
+  attachment: BrowserAttachment,
+): Promise<{ fileName: string; size: number; duplicate?: boolean }> {
+  const fileContent = await readFile(attachment.path);
+  if (fileContent.length > MAX_DATA_TRANSFER_BYTES) {
+    throw new Error(
+      `Attachment ${path.basename(attachment.path)} is too large for drag transfer (${fileContent.length} bytes). Maximum size is ${MAX_DATA_TRANSFER_BYTES} bytes.`,
+    );
+  }
+
+  const fileName = path.basename(attachment.path);
+  const mimeType = guessMimeType(fileName);
+  const expression = `async () => {
+    if (!('File' in window) || !('Blob' in window) || !('DataTransfer' in window) || typeof atob !== 'function') {
+      return { success: false, error: 'Required drag/drop file APIs are not available in this browser' };
+    }
+
+    const base64Data = ${JSON.stringify(fileContent.toString("base64"))};
+    const binaryString = atob(base64Data);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i += 1) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    const file = new File(
+      [new Blob([bytes], { type: ${JSON.stringify(mimeType)} })],
+      ${JSON.stringify(fileName)},
+      { type: ${JSON.stringify(mimeType)}, lastModified: Date.now() },
+    );
+    const makeTransfer = () => {
+      const dataTransfer = new DataTransfer();
+      dataTransfer.items.add(file);
+      dataTransfer.effectAllowed = 'copy';
+      dataTransfer.dropEffect = 'copy';
+      return dataTransfer;
+    };
+    const promptSelectors = [
+      '#prompt-textarea',
+      '[contenteditable="true"]',
+      'textarea',
+    ];
+    let prompt = null;
+    for (const selector of promptSelectors) {
+      prompt = document.querySelector(selector);
+      if (prompt) break;
+    }
+    const roots = [
+      prompt?.closest('form'),
+      prompt?.closest('[data-testid*="composer"]'),
+      prompt?.parentElement,
+      document.querySelector('main'),
+      document.body,
+      document.documentElement,
+    ].filter(Boolean);
+    if (roots.length === 0) {
+      return { success: false, error: 'Unable to locate a drop target' };
+    }
+    const dispatch = (target, type) => {
+      const dataTransfer = makeTransfer();
+      let event;
+      try {
+        event = new DragEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          dataTransfer,
+        });
+      } catch {
+        event = new Event(type, { bubbles: true, cancelable: true, composed: true });
+        Object.defineProperty(event, 'dataTransfer', {
+          configurable: true,
+          value: dataTransfer,
+        });
+      }
+      target.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    for (const target of roots) {
+      dispatch(target, 'dragenter');
+      dispatch(target, 'dragover');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    for (const target of roots) {
+      dispatch(target, 'drop');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 8000));
+    const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+    const expected = normalize(file.name);
+    const duplicate = Array.from(document.querySelectorAll('[data-testid*="duplicate"],[role="dialog"],[data-testid*="modal"]')).some((node) =>
+      /already uploaded|duplicate/i.test(node.textContent || ''),
+    );
+    const foundChip = Array.from(document.querySelectorAll('[data-testid*="attachment"],[data-testid*="upload"],[data-testid*="file"],[data-testid*="chip"],[aria-label*="Remove"],[aria-label*="remove"],button')).some((node) => {
+      const values = [
+        node.textContent || '',
+        node.getAttribute?.('aria-label') || '',
+        node.getAttribute?.('title') || '',
+        node.getAttribute?.('data-testid') || '',
+      ];
+      return values.some((value) => normalize(value).includes(expected));
+    });
+    const foundInput = Array.from(document.querySelectorAll('input[type="file"]')).some((input) =>
+      Array.from(input.files || []).some((item) => normalize(item?.name).includes(expected)),
+    );
+    if (!foundChip && !foundInput && !duplicate) {
+      return { success: false, error: 'Drop did not produce an attachment signal' };
+    }
+    return { success: true, fileName: file.name, size: file.size, duplicate };
+  }`;
+
+  const evalResult = await runtime.evaluate({
+    expression: `(${expression})()`,
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  if (evalResult.exceptionDetails) {
+    const description = evalResult.exceptionDetails.text ?? "JS evaluation failed";
+    throw new Error(`Failed to drop file in browser: ${description}`);
+  }
+  const uploadResult = evalResult.result?.value as
+    | { success?: boolean; error?: string; fileName?: string; size?: number; duplicate?: boolean }
+    | undefined;
+  if (!uploadResult?.success) {
+    throw new Error(`Failed to drop file in browser: ${uploadResult?.error || "Unknown error"}`);
+  }
+  return {
+    fileName: uploadResult.fileName ?? fileName,
+    size: typeof uploadResult.size === "number" ? uploadResult.size : fileContent.length,
+    duplicate: Boolean(uploadResult.duplicate),
+  };
+}
+
 export function guessMimeType(fileName: string): string {
   const ext = path.extname(fileName).toLowerCase();
   const mimeTypes: Record<string, string> = {

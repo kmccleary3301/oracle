@@ -36,6 +36,7 @@ import {
   installJavaScriptDialogAutoDismissal,
   ensureModelSelection,
   clearPromptComposer,
+  insertPromptText,
   waitForAssistantResponse,
   captureAssistantMarkdown,
   clearComposerAttachments,
@@ -45,7 +46,6 @@ import {
   readAssistantSnapshot,
 } from "./pageActions.js";
 import { INPUT_SELECTORS } from "./constants.js";
-import { uploadAttachmentViaDataTransfer } from "./actions/remoteFileTransfer.js";
 import { ensureThinkingTime } from "./actions/thinkingTime.js";
 import { startThinkingStatusMonitor } from "./actions/thinkingStatus.js";
 import {
@@ -117,6 +117,12 @@ import {
   extractStableConversationIdFromUrl as extractConversationIdFromUrl,
   isStableConversationUrl as isConversationUrl,
 } from "./conversationUrl.js";
+import {
+  downloadSandboxArtifacts,
+  extractSandboxArtifactRefsFromRuntime,
+  resolveSandboxArtifactOutputDir,
+  waitForNewSandboxArtifactRefsFromRuntime,
+} from "./chatgpt/sandboxArtifacts.js";
 
 export type { BrowserAutomationConfig, BrowserRunOptions, BrowserRunResult } from "./types.js";
 export { CHATGPT_URL, DEFAULT_MODEL_STRATEGY, DEFAULT_MODEL_TARGET } from "./constants.js";
@@ -909,7 +915,6 @@ function buildSkippedModelSelectionEvidence(
     capturedAt: new Date().toISOString(),
   };
 }
-
 export async function runBrowserMode(options: BrowserRunOptions): Promise<BrowserRunResult> {
   const promptText = options.prompt?.trim();
   if (!promptText) {
@@ -944,6 +949,11 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
   }
   if (logger.sessionLog === undefined && options.log?.sessionLog) {
     logger.sessionLog = options.log.sessionLog;
+  }
+  if (attachments.length > 0) {
+    logger(
+      `Resolved ${attachments.length} browser attachment${attachments.length === 1 ? "" : "s"}`,
+    );
   }
   const runtimeHintCb = options.runtimeHintCb;
   let lastTargetId: string | undefined;
@@ -1533,6 +1543,9 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     };
     const submitOnce = async (prompt: string, submissionAttachments: BrowserAttachment[]) => {
       const baselineSnapshot = await readAssistantSnapshot(Runtime).catch(() => null);
+      const baselineSandboxArtifacts = await extractSandboxArtifactRefsFromRuntime(Runtime).catch(
+        () => [],
+      );
       const baselineAssistantText =
         typeof baselineSnapshot?.text === "string" ? baselineSnapshot.text.trim() : "";
       const attachmentNames = submissionAttachments.map((a) => path.basename(a.path));
@@ -1548,25 +1561,17 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
           throw new Error("Chrome DOM domain unavailable while uploading attachments.");
         }
         await clearComposerAttachments(Runtime, 5_000, logger);
-        for (
-          let attachmentIndex = 0;
-          attachmentIndex < submissionAttachments.length;
-          attachmentIndex += 1
-        ) {
-          const attachment = submissionAttachments[attachmentIndex];
-          logger(`Uploading attachment: ${attachment.displayPath}`);
-          const uiConfirmed = await uploadAttachmentFile(
-            { runtime: Runtime, dom: DOM, input: Input },
-            attachment,
-            logger,
-            { expectedCount: attachmentIndex + 1 },
-          );
-          if (!uiConfirmed) {
-            inputOnlyAttachments = true;
-          }
-          await delay(500);
-        }
-        // Scale timeout based on number of files: base 45s + 20s per additional file.
+        await clearPromptComposer(Runtime, logger);
+        await insertPromptText(
+          {
+            runtime: Runtime,
+            input: Input,
+            inputTimeoutMs: config.inputTimeoutMs ?? undefined,
+          },
+          prompt,
+          logger,
+        );
+        promptAlreadyInserted = true;
         const baseTimeout = config.inputTimeoutMs ?? 30_000;
         const perFileTimeout = 20_000;
         const waitBudget =
@@ -2252,6 +2257,11 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     const durationMs = Date.now() - startedAt;
     const answerChars = answerText.length;
     const answerTokens = estimateTokenCount(answerMarkdown);
+    const sandboxArtifactResult = await collectPostTurnSandboxArtifacts(Runtime, logger, {
+      baselineArtifacts: baselineSandboxArtifacts,
+      conversationUrl: lastUrl,
+      outputDir: config.sandboxArtifactsOutputDir,
+    });
     return {
       answerText,
       answerMarkdown,
@@ -2275,6 +2285,10 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       conversationId: lastUrl ? extractConversationIdFromUrl(lastUrl) : undefined,
       promptSubmitted,
       controllerPid: process.pid,
+      sandboxArtifacts: sandboxArtifactResult.sandboxArtifacts,
+      newSandboxArtifacts: sandboxArtifactResult.newSandboxArtifacts,
+      downloadedSandboxArtifacts: sandboxArtifactResult.downloadedSandboxArtifacts,
+      warnings: sandboxArtifactResult.warnings,
     };
   } catch (error) {
     const normalizedError = error instanceof Error ? error : new Error(String(error));
@@ -3123,6 +3137,9 @@ async function runRemoteBrowserMode(
     }
     const submitOnce = async (prompt: string, submissionAttachments: BrowserAttachment[]) => {
       const baselineSnapshot = await readAssistantSnapshot(Runtime).catch(() => null);
+      const baselineSandboxArtifacts = await extractSandboxArtifactRefsFromRuntime(Runtime).catch(
+        () => [],
+      );
       const baselineAssistantText =
         typeof baselineSnapshot?.text === "string" ? baselineSnapshot.text.trim() : "";
       const attachmentNames = submissionAttachments.map((a) => path.basename(a.path));
@@ -3137,13 +3154,17 @@ async function runRemoteBrowserMode(
           throw new Error("Chrome DOM domain unavailable while uploading attachments.");
         }
         await clearComposerAttachments(Runtime, 5_000, logger);
-        // Use remote file transfer for remote Chrome (reads local files and injects via CDP)
-        for (const attachment of submissionAttachments) {
-          logger(`Uploading attachment: ${attachment.displayPath}`);
-          await uploadAttachmentViaDataTransfer({ runtime: Runtime, dom: DOM }, attachment, logger);
-          await delay(500);
-        }
-        // Scale timeout based on number of files: base 30s + 15s per additional file
+        await clearPromptComposer(Runtime, logger);
+        await insertPromptText(
+          {
+            runtime: Runtime,
+            input: Input,
+            inputTimeoutMs: config.inputTimeoutMs ?? undefined,
+          },
+          prompt,
+          logger,
+        );
+        promptAlreadyInserted = true;
         const baseTimeout = config.inputTimeoutMs ?? 30_000;
         const perFileTimeout = 15_000;
         const waitBudget =
@@ -3740,6 +3761,11 @@ async function runRemoteBrowserMode(
     const durationMs = Date.now() - startedAt;
     const answerChars = answerText.length;
     const answerTokens = estimateTokenCount(answerMarkdown);
+    const sandboxArtifactResult = await collectPostTurnSandboxArtifacts(Runtime, logger, {
+      baselineArtifacts: baselineSandboxArtifacts,
+      conversationUrl: lastUrl,
+      outputDir: config.sandboxArtifactsOutputDir,
+    });
 
     runStatus = "complete";
     return {
@@ -3768,6 +3794,10 @@ async function runRemoteBrowserMode(
       archive,
       modelSelection: modelSelectionEvidence,
       controllerPid: process.pid,
+      sandboxArtifacts: sandboxArtifactResult.sandboxArtifacts,
+      newSandboxArtifacts: sandboxArtifactResult.newSandboxArtifacts,
+      downloadedSandboxArtifacts: sandboxArtifactResult.downloadedSandboxArtifacts,
+      warnings: sandboxArtifactResult.warnings,
     };
   } catch (error) {
     const normalizedError = error instanceof Error ? error : new Error(String(error));
