@@ -83,6 +83,8 @@ export function shouldPreserveBrowserOnErrorForTest(error: unknown, headless: bo
   return shouldPreserveBrowserOnError(error, headless);
 }
 
+const MARKDOWN_CAPTURE_TIMEOUT_MS = 10_000;
+
 async function uploadBrowserAttachmentsWithRetry(
   deps: {
     runtime: ChromeClient["Runtime"];
@@ -158,22 +160,30 @@ function shouldRetryAttachmentUploadError(message: string): boolean {
 }
 
 function canRelaxSentAttachmentVerification(attachments: BrowserAttachment[]): boolean {
-  if (attachments.length === 0) return false;
-  const relaxedExtensions = new Set([
-    ".avif",
-    ".bmp",
-    ".gif",
-    ".heic",
-    ".heif",
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".svg",
-    ".webp",
-  ]);
-  return attachments.every((attachment) =>
-    relaxedExtensions.has(path.extname(attachment.path).toLowerCase()),
-  );
+  return attachments.length > 0;
+}
+
+function shouldSkipMarkdownCopyForAssistantResponse(answer: {
+  text?: string;
+  html?: string;
+}): boolean {
+  const html = answer.html ?? "";
+  if (html.includes("group/imagegen-image") || html.includes("image-gen-overlay-actions")) {
+    return true;
+  }
+  const normalized = (answer.text ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+  return normalized === "edit" || normalized === "stopped thinking edit";
+}
+
+async function terminateRuntimeExecution(Runtime: ChromeClient["Runtime"]): Promise<void> {
+  if (typeof Runtime.terminateExecution !== "function") {
+    return;
+  }
+  try {
+    await Runtime.terminateExecution();
+  } catch {
+    // Ignore cleanup failures after markdown-copy timeout.
+  }
 }
 
 async function collectPostTurnSandboxArtifacts(
@@ -749,7 +759,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
           if (!verified) {
             if (canRelaxSentAttachmentVerification(submissionAttachments)) {
               logger(
-                "Sent user message did not expose image attachment filenames; continuing because upload readiness was verified before send.",
+                "Sent user message did not expose attachment UI; continuing because upload readiness was verified before send.",
               );
             } else {
               throw new Error("Sent user message did not expose attachment UI after upload.");
@@ -958,28 +968,37 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     }
     answerText = answer.text;
     answerHtml = answer.html ?? "";
-    const copiedMarkdown = await raceWithDisconnect(
-      withRetries(
-        async () => {
-          const attempt = await captureAssistantMarkdown(Runtime, answer.meta, logger);
-          if (!attempt) {
-            throw new Error("copy-missing");
-          }
-          return attempt;
-        },
-        {
-          retries: 2,
-          delayMs: 350,
-          onRetry: (attempt, error) => {
-            if (options.verbose) {
-              logger(
-                `[retry] Markdown capture attempt ${attempt + 1}: ${error instanceof Error ? error.message : error}`,
-              );
-            }
-          },
-        },
-      ),
-    ).catch(() => null);
+    const copiedMarkdown = shouldSkipMarkdownCopyForAssistantResponse(answer)
+      ? null
+      : await Promise.race([
+          raceWithDisconnect(
+            withRetries(
+              async () => {
+                const attempt = await captureAssistantMarkdown(Runtime, answer.meta, logger);
+                if (!attempt) {
+                  throw new Error("copy-missing");
+                }
+                return attempt;
+              },
+              {
+                retries: 2,
+                delayMs: 350,
+                onRetry: (attempt, error) => {
+                  if (options.verbose) {
+                    logger(
+                      `[retry] Markdown capture attempt ${attempt + 1}: ${error instanceof Error ? error.message : error}`,
+                    );
+                  }
+                },
+              },
+            ),
+          ).catch(() => null),
+          delay(MARKDOWN_CAPTURE_TIMEOUT_MS).then(async () => {
+            logger("Markdown capture timed out; falling back to DOM assistant text.");
+            await terminateRuntimeExecution(Runtime);
+            return null;
+          }),
+        ]);
     answerMarkdown = copiedMarkdown ?? answerText;
 
     const promptEchoMatcher = buildPromptEchoMatcher(promptText);
@@ -1641,7 +1660,7 @@ async function runRemoteBrowserMode(
           if (!verified) {
             if (canRelaxSentAttachmentVerification(submissionAttachments)) {
               logger(
-                "Sent user message did not expose image attachment filenames; continuing because upload readiness was verified before send.",
+                "Sent user message did not expose attachment UI; continuing because upload readiness was verified before send.",
               );
             } else {
               throw new Error("Sent user message did not expose attachment UI after upload.");
@@ -1850,26 +1869,35 @@ async function runRemoteBrowserMode(
     answerText = answer.text;
     answerHtml = answer.html ?? "";
 
-    const copiedMarkdown = await withRetries(
-      async () => {
-        const attempt = await captureAssistantMarkdown(Runtime, answer.meta, logger);
-        if (!attempt) {
-          throw new Error("copy-missing");
-        }
-        return attempt;
-      },
-      {
-        retries: 2,
-        delayMs: 350,
-        onRetry: (attempt, error) => {
-          if (options.verbose) {
-            logger(
-              `[retry] Markdown capture attempt ${attempt + 1}: ${error instanceof Error ? error.message : error}`,
-            );
-          }
-        },
-      },
-    ).catch(() => null);
+    const copiedMarkdown = shouldSkipMarkdownCopyForAssistantResponse(answer)
+      ? null
+      : await Promise.race([
+          withRetries(
+            async () => {
+              const attempt = await captureAssistantMarkdown(Runtime, answer.meta, logger);
+              if (!attempt) {
+                throw new Error("copy-missing");
+              }
+              return attempt;
+            },
+            {
+              retries: 2,
+              delayMs: 350,
+              onRetry: (attempt, error) => {
+                if (options.verbose) {
+                  logger(
+                    `[retry] Markdown capture attempt ${attempt + 1}: ${error instanceof Error ? error.message : error}`,
+                  );
+                }
+              },
+            },
+          ).catch(() => null),
+          delay(MARKDOWN_CAPTURE_TIMEOUT_MS).then(async () => {
+            logger("Markdown capture timed out; falling back to DOM assistant text.");
+            await terminateRuntimeExecution(Runtime);
+            return null;
+          }),
+        ]);
 
     answerMarkdown = copiedMarkdown ?? answerText;
     ({ answerText, answerMarkdown } = await maybeRecoverLongAssistantResponse({

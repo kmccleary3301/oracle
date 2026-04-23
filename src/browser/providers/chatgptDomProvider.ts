@@ -50,11 +50,8 @@ async function submitPromptViaAdapter(ctx: ProviderDomFlowContext): Promise<void
   state.promptAlreadyInserted = false;
   state.committedTurns =
     typeof committedTurns === "number" && Number.isFinite(committedTurns) ? committedTurns : null;
-  if (
-    state.committedTurns != null &&
-    (state.baselineTurns == null || state.committedTurns > state.baselineTurns)
-  ) {
-    state.baselineTurns = Math.max(0, state.committedTurns - 1);
+  if (state.committedTurns != null && state.baselineTurns == null) {
+    state.baselineTurns = Math.max(0, state.committedTurns - 2);
   }
 }
 
