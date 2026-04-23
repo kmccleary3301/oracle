@@ -125,3 +125,39 @@ describe("connectWithNewTab", () => {
     expect(cdpMock).toHaveBeenCalledWith({ host: "127.0.0.1", port: 9222, target: "target-2" });
   });
 });
+
+describe("WSL Windows Chrome bridging helpers", () => {
+  test("detects Windows Chrome paths under WSL host forwarding", async () => {
+    vi.stubEnv("WSL_DISTRO_NAME", "Ubuntu");
+
+    const lifecycle = await import("../../src/browser/chromeLifecycle.js");
+
+    expect(
+      lifecycle.__test__.shouldBridgeWslWindowsChrome(
+        "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe",
+        "172.25.16.1",
+      ),
+    ).toBe(true);
+    expect(
+      lifecycle.__test__.shouldBridgeWslWindowsChrome("/usr/bin/google-chrome", "172.25.16.1"),
+    ).toBe(false);
+    expect(
+      lifecycle.__test__.shouldBridgeWslWindowsChrome(
+        "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe",
+        "127.0.0.1",
+      ),
+    ).toBe(false);
+  });
+
+  test("builds a bridge script bound to the host boundary and Chrome pid", async () => {
+    const lifecycle = await import("../../src/browser/chromeLifecycle.js");
+
+    const script = lifecycle.__test__.buildWindowsChromeBridgeScript("172.25.16.1", 34235, 17088);
+
+    expect(script).toContain("$listenAddress = '172.25.16.1'");
+    expect(script).toContain("$port = 34235");
+    expect(script).toContain("$chromePid = 17088");
+    expect(script).toContain("127.0.0.1");
+    expect(script).toContain("TcpListener");
+  });
+});

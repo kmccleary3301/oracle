@@ -2,6 +2,10 @@ import type CDP from "chrome-remote-interface";
 import type Protocol from "devtools-protocol";
 import type { BrowserRuntimeMetadata } from "../sessionStore.js";
 import type { ThinkingTimeLevel } from "../oracle/types.js";
+import type {
+  ChatgptDownloadedSandboxArtifact,
+  ChatgptSandboxArtifactRef,
+} from "./chatgpt/types.js";
 
 export type ChromeClient = Awaited<ReturnType<typeof CDP>>;
 export type CookieParam = Protocol.Network.CookieParam;
@@ -16,6 +20,7 @@ export interface BrowserAttachment {
   path: string;
   displayPath: string;
   sizeBytes?: number;
+  hostPaths?: string[];
 }
 
 export interface BrowserAutomationConfig {
@@ -54,9 +59,12 @@ export interface BrowserAutomationConfig {
   debug?: boolean;
   allowCookieErrors?: boolean;
   remoteChrome?: { host: string; port: number } | null;
+  /** Max number of Oracle-managed remote Chrome tabs to keep open concurrently. */
+  remoteChromeMaxTabs?: number;
   manualLogin?: boolean;
   manualLoginProfileDir?: string | null;
   manualLoginCookieSync?: boolean;
+  sandboxArtifactsOutputDir?: string | null;
   /** Thinking time intensity level for Thinking/Pro models: light, standard, extended, heavy */
   thinkingTime?: ThinkingTimeLevel;
 }
@@ -91,6 +99,10 @@ export interface BrowserRunResult {
   chromeTargetId?: string;
   tabUrl?: string;
   controllerPid?: number;
+  sandboxArtifacts?: ChatgptSandboxArtifactRef[];
+  newSandboxArtifacts?: ChatgptSandboxArtifactRef[];
+  downloadedSandboxArtifacts?: ChatgptDownloadedSandboxArtifact[];
+  warnings?: string[];
 }
 
 export type ResolvedBrowserConfig = Required<
@@ -114,7 +126,9 @@ export type ResolvedBrowserConfig = Required<
   debugPort?: number | null;
   inlineCookiesSource?: string | null;
   remoteChrome?: { host: string; port: number } | null;
+  remoteChromeMaxTabs?: number;
   manualLogin?: boolean;
   manualLoginProfileDir?: string | null;
   manualLoginCookieSync?: boolean;
+  sandboxArtifactsOutputDir?: string | null;
 };

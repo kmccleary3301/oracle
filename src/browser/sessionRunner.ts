@@ -167,6 +167,11 @@ export async function runBrowserSessionExecution(
       chromePort: browserResult.chromePort,
       chromeHost: browserResult.chromeHost,
       userDataDir: browserResult.userDataDir,
+      chromeTargetId: browserResult.chromeTargetId,
+      tabUrl: browserResult.tabUrl,
+      conversationId: browserResult.tabUrl
+        ? browserResult.tabUrl.match(/\/c\/([a-zA-Z0-9-]+)/)?.[1]
+        : undefined,
       controllerPid: browserResult.controllerPid ?? process.pid,
     },
     answerText,

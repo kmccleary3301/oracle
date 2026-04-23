@@ -3,6 +3,7 @@ import "dotenv/config";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
+import { createInterface } from "node:readline/promises";
 import { Command, Option } from "commander";
 import type { OptionValues } from "commander";
 // Allow `npx @steipete/oracle oracle-mcp` to resolve the MCP server even though npx runs the default binary.
@@ -83,6 +84,32 @@ import { applyBrowserDefaultsFromConfig } from "../src/cli/browserDefaults.js";
 import { shouldBlockDuplicatePrompt } from "../src/cli/duplicatePromptGuard.js";
 import { resolveRemoteServiceConfig } from "../src/remote/remoteServiceConfig.js";
 import { resolveConfiguredMaxFileSizeBytes } from "../src/cli/fileSize.js";
+import { extractChatgptImagesFromConfiguredBrowser } from "../src/browser/chatgpt/imageArtifacts.js";
+import { extractChatgptSandboxArtifactsFromConfiguredBrowser } from "../src/browser/chatgpt/sandboxArtifacts.js";
+import {
+  beginChatgptTerminalLogin,
+  clearChatgptLoginState,
+  loadChatgptLoginState,
+  submitChatgptLoginOtp,
+} from "../src/browser/chatgpt/login.js";
+import {
+  createChatgptSession,
+  probeChatgptAttachments,
+  readChatgptBrowserStatus,
+  readChatgptConversationSnapshot,
+  sendChatgptTurn,
+} from "../src/browser/chatgpt/session.js";
+import {
+  createChatgptProject,
+  deleteChatgptConversation,
+  listChatgptProjects,
+  moveChatgptConversationToProject,
+  planChatgptConversationDelete,
+  readChatgptProject,
+  renameChatgptProject,
+} from "../src/browser/chatgpt/projects.js";
+import type { BrowserAttachment } from "../src/browser/types.js";
+import { resolveBrowserAttachments as resolveChatgptBrowserAttachments } from "../src/browser/attachmentResolver.js";
 
 interface CliOptions extends OptionValues {
   prompt?: string;
@@ -132,6 +159,9 @@ interface CliOptions extends OptionValues {
   browserProfileLockTimeout?: string;
   browserCookieWait?: string;
   browserNoCookieSync?: boolean;
+  otp?: string;
+  otpStdin?: boolean;
+  promptOtp?: boolean;
   browserInlineCookiesFile?: string;
   browserCookieNames?: string;
   browserInlineCookies?: string;
@@ -210,8 +240,10 @@ const isTty = process.stdout.isTTY;
 
 const program = new Command();
 let introPrinted = false;
-program.hook("preAction", () => {
+program.hook("preAction", (_thisCommand, actionCommand) => {
   if (introPrinted) return;
+  const actionOptions = actionCommand?.optsWithGlobals?.() as { json?: boolean } | undefined;
+  if (actionOptions?.json) return;
   console.log(formatIntroLine(VERSION, { env: process.env, richTty: isTty }));
   introPrinted = true;
 });
@@ -813,6 +845,958 @@ program
     await launchTui({ version: VERSION, printIntro: false });
   });
 
+const imageCommand = program
+  .command("image")
+  .description("ChatGPT browser image utilities.");
+
+const DEFAULT_CHATGPT_IMAGE_TURN_TIMEOUT_MS = 30 * 60_000;
+
+imageCommand
+  .command("download <conversationUrl>")
+  .description("Extract and download generated images from an existing ChatGPT conversation.")
+  .option("-o, --output-dir <dir>", "Directory for downloaded images and JSON sidecars.")
+  .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
+  .option("--timeout <ms|s|m|h>", "Read-only extraction timeout.", (value) =>
+    parseDurationOption(value, "Image extraction timeout"),
+  )
+  .option("--no-download", "Only report generated image references; do not download bytes.")
+  .option("--keep-tab", "Leave the opened conversation tab attached to Chrome.", false)
+  .option("--json", "Print structured JSON.", false)
+  .action(async (conversationUrl: string, commandOptions) => {
+    const { config: userConfig } = await loadUserConfig();
+    const cliBrowserConfig = commandOptions.remoteChrome
+      ? await buildBrowserConfig({
+          model: DEFAULT_MODEL,
+          remoteChrome: commandOptions.remoteChrome,
+        })
+      : {};
+    const result = await extractChatgptImagesFromConfiguredBrowser({
+      conversationUrl,
+      outputDir: commandOptions.outputDir,
+      download: commandOptions.download,
+      timeoutMs: commandOptions.timeout,
+      keepTab: commandOptions.keepTab,
+      config: {
+        ...(userConfig.browser ?? {}),
+        ...cliBrowserConfig,
+        remoteChrome: cliBrowserConfig.remoteChrome ?? userConfig.browser?.remoteChrome ?? null,
+      },
+      log: (message) => {
+        if (!commandOptions.json) {
+          console.log(chalk.dim(message));
+        }
+      },
+    });
+    if (commandOptions.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log(`Conversation: ${result.page.href}`);
+    console.log(`Unique generated images: ${result.images.length}`);
+    if (result.artifacts.length > 0) {
+      console.log(`Downloaded artifacts: ${result.artifacts.length}`);
+      for (const artifact of result.artifacts) {
+        const size = `${artifact.byteSize} bytes`;
+        const dimensions =
+          artifact.width && artifact.height ? ` ${artifact.width}x${artifact.height}` : "";
+        console.log(`- ${artifact.downloadedPath} (${size}${dimensions})`);
+      }
+    }
+  });
+
+imageCommand
+  .command("generate")
+  .description("Send an image-generation prompt through the current ChatGPT browser mode.")
+  .requiredOption("--turn-message <text>", "Image generation prompt text to send.")
+  .option("-f, --file <paths...>", "Files, directories, or globs to attach.", collectPaths, [])
+  .option("-o, --output-dir <dir>", "Directory for downloaded generated images and JSON sidecars.")
+  .option("--project-url <url>", "Start from a ChatGPT project URL.")
+  .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
+  .option("--timeout <ms|s|m|h>", "Generation timeout.", (value) =>
+    parseDurationOption(value, "Image generation timeout"),
+  )
+  .option(
+    "--browser-model-strategy <mode>",
+    "Model picker strategy for this generation.",
+    "current",
+  )
+  .option("--browser-model-label <label>", "Exact/fuzzy ChatGPT model picker label to use.")
+  .option(
+    "--browser-thinking-time <level>",
+    "Thinking time intensity for image generation: light, standard, extended, heavy.",
+  )
+  .option("--no-download", "Only report generated image references; do not download bytes.")
+  .option("--json", "Print structured JSON.", false)
+  .action(async (commandOptions, command: Command) => {
+    const config = await resolveChatgptCliBrowserConfig(commandOptions.remoteChrome);
+    const attachments = await resolveBrowserAttachments(
+      resolveCommandFileInputs(commandOptions, command),
+    );
+    const generation = await createChatgptSession({
+      prompt: commandOptions.turnMessage,
+      attachments,
+      timeoutMs: commandOptions.timeout ?? DEFAULT_CHATGPT_IMAGE_TURN_TIMEOUT_MS,
+      includeSnapshot: true,
+      config: {
+        ...config,
+        url: commandOptions.projectUrl ?? config.url,
+        chatgptUrl: commandOptions.projectUrl ?? config.chatgptUrl,
+        modelStrategy: commandOptions.browserModelStrategy,
+        desiredModel: commandOptions.browserModelLabel ?? config.desiredModel,
+        thinkingTime: commandOptions.browserThinkingTime ?? config.thinkingTime,
+      },
+      log: (message) => {
+        if (!commandOptions.json) console.log(chalk.dim(message));
+      },
+    });
+    const extraction =
+      generation.conversationUrl && generation.newGeneratedImages?.length
+        ? await extractChatgptImagesFromConfiguredBrowser({
+            conversationUrl: generation.conversationUrl,
+            outputDir: commandOptions.outputDir,
+            download: commandOptions.download,
+            timeoutMs: Math.min(
+              commandOptions.timeout ?? DEFAULT_CHATGPT_IMAGE_TURN_TIMEOUT_MS,
+              60_000,
+            ),
+            config,
+            log: (message) => {
+              if (!commandOptions.json) console.log(chalk.dim(message));
+            },
+          })
+        : undefined;
+    const result = {
+      generation,
+      extraction: extraction
+        ? {
+            conversationUrl: extraction.page.href,
+            uniqueGeneratedImageCount: extraction.images.length,
+            generatedImageNodeCount: extraction.page.generatedImageNodeCount,
+            outputDir: extraction.outputDir,
+            images: extraction.images.map(({ domRecords: _domRecords, ...image }) => image),
+            artifacts: extraction.artifacts,
+            warnings: extraction.warnings,
+          }
+        : undefined,
+      warnings:
+        generation.newGeneratedImages?.length || generation.generatedImages?.length
+          ? []
+          : [
+              "No generated image artifacts were detected in the completed turn. Ensure the current ChatGPT mode is the image model before relying on this command.",
+            ],
+    };
+    if (commandOptions.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log(`Conversation: ${generation.conversationUrl ?? "unknown"}`);
+    console.log(`New generated images: ${generation.newGeneratedImages?.length ?? 0}`);
+    if (extraction?.artifacts.length) {
+      console.log(`Downloaded artifacts: ${extraction.artifacts.length}`);
+      for (const artifact of extraction.artifacts) {
+        console.log(`- ${artifact.downloadedPath}`);
+      }
+    }
+    for (const warning of result.warnings) {
+      console.log(chalk.yellow(`Warning: ${warning}`));
+    }
+  });
+
+imageCommand
+  .command("edit")
+  .description("Send an image-editing prompt with local image/reference attachments through ChatGPT browser mode.")
+  .requiredOption("--turn-message <text>", "Image editing prompt text to send.")
+  .requiredOption("-f, --file <paths...>", "Image files, zips, directories, or globs to attach.", collectPaths, [])
+  .option("-o, --output-dir <dir>", "Directory for downloaded generated images and JSON sidecars.")
+  .option("--project-url <url>", "Start from a ChatGPT project URL.")
+  .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
+  .option("--timeout <ms|s|m|h>", "Edit timeout.", (value) =>
+    parseDurationOption(value, "Image edit timeout"),
+  )
+  .option(
+    "--browser-model-strategy <mode>",
+    "Model picker strategy for this edit.",
+    "current",
+  )
+  .option("--browser-model-label <label>", "Exact/fuzzy ChatGPT model picker label to use.")
+  .option(
+    "--browser-thinking-time <level>",
+    "Thinking time intensity for image editing: light, standard, extended, heavy.",
+  )
+  .option("--no-download", "Only report generated image references; do not download bytes.")
+  .option("--json", "Print structured JSON.", false)
+  .action(async (commandOptions, command: Command) => {
+    const fileInputs = resolveCommandFileInputs(commandOptions, command);
+    if (fileInputs.length === 0) {
+      throw new Error("Image edit requires at least one --file attachment.");
+    }
+    const config = await resolveChatgptCliBrowserConfig(commandOptions.remoteChrome);
+    const attachments = await resolveBrowserAttachments(fileInputs);
+    const generation = await createChatgptSession({
+      prompt: commandOptions.turnMessage,
+      attachments,
+      timeoutMs: commandOptions.timeout ?? DEFAULT_CHATGPT_IMAGE_TURN_TIMEOUT_MS,
+      includeSnapshot: true,
+      config: {
+        ...config,
+        url: commandOptions.projectUrl ?? config.url,
+        chatgptUrl: commandOptions.projectUrl ?? config.chatgptUrl,
+        modelStrategy: commandOptions.browserModelStrategy,
+        desiredModel: commandOptions.browserModelLabel ?? config.desiredModel,
+        thinkingTime: commandOptions.browserThinkingTime ?? config.thinkingTime,
+      },
+      log: (message) => {
+        if (!commandOptions.json) console.log(chalk.dim(message));
+      },
+    });
+    const extraction =
+      generation.conversationUrl && generation.newGeneratedImages?.length
+        ? await extractChatgptImagesFromConfiguredBrowser({
+            conversationUrl: generation.conversationUrl,
+            outputDir: commandOptions.outputDir,
+            download: commandOptions.download,
+            timeoutMs: Math.min(
+              commandOptions.timeout ?? DEFAULT_CHATGPT_IMAGE_TURN_TIMEOUT_MS,
+              60_000,
+            ),
+            config,
+            log: (message) => {
+              if (!commandOptions.json) console.log(chalk.dim(message));
+            },
+          })
+        : undefined;
+    const result = {
+      generation,
+      inputAttachments: attachments.map((attachment) => ({
+        path: attachment.path,
+        displayPath: attachment.displayPath,
+        sizeBytes: attachment.sizeBytes,
+      })),
+      extraction: extraction
+        ? {
+            conversationUrl: extraction.page.href,
+            uniqueGeneratedImageCount: extraction.images.length,
+            generatedImageNodeCount: extraction.page.generatedImageNodeCount,
+            outputDir: extraction.outputDir,
+            images: extraction.images.map(({ domRecords: _domRecords, ...image }) => image),
+            artifacts: extraction.artifacts,
+            warnings: extraction.warnings,
+          }
+        : undefined,
+      warnings:
+        generation.newGeneratedImages?.length || generation.generatedImages?.length
+          ? []
+          : [
+              "No generated image artifacts were detected in the completed edit turn. Ensure the current ChatGPT mode is the image model before relying on this command.",
+            ],
+    };
+    if (commandOptions.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log(`Conversation: ${generation.conversationUrl ?? "unknown"}`);
+    console.log(`Input attachments: ${attachments.length}`);
+    console.log(`New generated images: ${generation.newGeneratedImages?.length ?? 0}`);
+    if (extraction?.artifacts.length) {
+      console.log(`Downloaded artifacts: ${extraction.artifacts.length}`);
+      for (const artifact of extraction.artifacts) {
+        console.log(`- ${artifact.downloadedPath}`);
+      }
+    }
+    for (const warning of result.warnings) {
+      console.log(chalk.yellow(`Warning: ${warning}`));
+    }
+  });
+
+const browserCommand = program
+  .command("browser")
+  .description("Inspect the configured ChatGPT browser session.");
+
+browserCommand
+  .command("login")
+  .description("Drive ChatGPT login end to end, prompting for OTP inline when needed.")
+  .option(
+    "--creds-file <path>",
+    "dotenv-style file with OPENAI_EMAIL/OPENAI_PWD and optional OPENAI_GOOGLE_EMAIL/OPENAI_GOOGLE_PWD overrides.",
+  )
+  .option("--email <email>", "Override the login email.")
+  .option("--otp <digits>", "Provide the OTP code inline and finish the login in one command.")
+  .option("--otp-stdin", "Read the OTP code from stdin and finish the login in one command.", false)
+  .option(
+    "--no-prompt-otp",
+    "Do not prompt interactively for the OTP code when verification is required.",
+  )
+  .option("--otp-attempts <count>", "Maximum interactive OTP attempts.", (value) =>
+    parseIntOption(value),
+  )
+  .option("--remote-chrome <host:port>", "Attach to an existing Chrome DevTools endpoint instead of launching a profile.")
+  .option(
+    "--manual-login-profile-dir <path>",
+    "Profile directory to launch/reuse for persistent ChatGPT login.",
+  )
+  .option("--timeout <ms|s|m|h>", "Login timeout.", (value) =>
+    parseDurationOption(value, "Browser login timeout"),
+  )
+  .option("--json", "Print structured JSON.", false)
+  .action(async (rawCommandOptions, command?: Command) => {
+    const commandOptions =
+      command?.opts?.() ??
+      (typeof rawCommandOptions?.opts === "function"
+        ? rawCommandOptions.opts()
+        : rawCommandOptions);
+    const remoteChromeOption =
+      commandOptions.remoteChrome ?? readCliOptionValue("--remote-chrome");
+    const baseConfig = await resolveChatgptCliBrowserConfig(remoteChromeOption);
+    const previousRemoteDebugHost = process.env.ORACLE_BROWSER_REMOTE_DEBUG_HOST;
+    if (!remoteChromeOption && baseConfig.remoteChrome?.host) {
+      process.env.ORACLE_BROWSER_REMOTE_DEBUG_HOST = baseConfig.remoteChrome.host;
+    }
+    let result;
+    try {
+      result = await beginChatgptTerminalLogin({
+        credsFile: commandOptions.credsFile,
+        email: commandOptions.email,
+        timeoutMs: commandOptions.timeout,
+        config: {
+          ...baseConfig,
+          remoteChrome: remoteChromeOption ? baseConfig.remoteChrome : null,
+          manualLogin: !remoteChromeOption,
+          manualLoginProfileDir:
+            commandOptions.manualLoginProfileDir ?? baseConfig.manualLoginProfileDir,
+          cookieSync: false,
+          keepBrowser: true,
+        },
+        log: (message) => {
+          if (!commandOptions.json) console.log(chalk.dim(message));
+        },
+      });
+    } finally {
+      if (previousRemoteDebugHost === undefined) {
+        delete process.env.ORACLE_BROWSER_REMOTE_DEBUG_HOST;
+      } else {
+        process.env.ORACLE_BROWSER_REMOTE_DEBUG_HOST = previousRemoteDebugHost;
+      }
+    }
+    result = await maybeCompleteInlineOtpLogin(result, commandOptions);
+    if (commandOptions.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log(`Status: ${result.status}`);
+    console.log(`Phase: ${result.page.phase}`);
+    console.log(`Page: ${result.page.href}`);
+    console.log(`Browser: ${result.host}:${result.port}`);
+    if (result.profileDir) {
+      console.log(`Profile: ${result.profileDir}`);
+    }
+    if (result.continuationId) {
+      console.log(`Continuation: ${result.continuationId}`);
+      console.log("Next: oracle browser submit-otp --code <digits>");
+    }
+    for (const warning of result.warnings) {
+      console.log(chalk.yellow(`Warning: ${warning}`));
+    }
+  });
+
+browserCommand
+  .command("submit-otp")
+  .description("Submit the saved ChatGPT login OTP code to finish a terminal-driven login flow.")
+  .option("--code <digits>", "OTP code digits.")
+  .option("--code-stdin", "Read the OTP code from stdin.", false)
+  .option("--timeout <ms|s|m|h>", "OTP submission timeout.", (value) =>
+    parseDurationOption(value, "Browser OTP timeout"),
+  )
+  .option("--json", "Print structured JSON.", false)
+  .action(async (commandOptions) => {
+    const code = commandOptions.code ?? (commandOptions.codeStdin ? await readTrimmedStdin() : "");
+    if (!code) {
+      throw new Error("OTP code is required. Pass --code or --code-stdin.");
+    }
+    const result = await submitChatgptLoginOtp({
+      code,
+      timeoutMs: commandOptions.timeout,
+      log: (message) => {
+        if (!commandOptions.json) console.log(chalk.dim(message));
+      },
+    });
+    if (commandOptions.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log(`Status: ${result.status}`);
+    console.log(`Phase: ${result.page.phase}`);
+    console.log(`Page: ${result.page.href}`);
+    for (const warning of result.warnings) {
+      console.log(chalk.yellow(`Warning: ${warning}`));
+    }
+  });
+
+browserCommand
+  .command("login-state")
+  .description("Show or clear the saved ChatGPT terminal-login continuation state.")
+  .option("--clear", "Delete the saved login continuation state.", false)
+  .option("--json", "Print structured JSON.", false)
+  .action(async (commandOptions) => {
+    if (commandOptions.clear) {
+      await clearChatgptLoginState();
+      if (!commandOptions.json) {
+        console.log("Cleared saved ChatGPT login continuation state.");
+        return;
+      }
+    }
+    const state = await loadChatgptLoginState();
+    if (commandOptions.json) {
+      console.log(JSON.stringify(state, null, 2));
+      return;
+    }
+    if (!state) {
+      console.log("No saved ChatGPT login continuation state.");
+      return;
+    }
+    console.log(`Continuation: ${state.id}`);
+    console.log(`Browser: ${state.host}:${state.port}`);
+    if (state.profileDir) {
+      console.log(`Profile: ${state.profileDir}`);
+    }
+    if (state.pageHref) {
+      console.log(`Page: ${state.pageHref}`);
+    }
+  });
+
+browserCommand
+  .command("doctor")
+  .description("Diagnose local ChatGPT browser prerequisites and profile persistence.")
+  .option("--remote-chrome <host:port>", "Attach-mode Chrome DevTools endpoint to inspect.")
+  .option(
+    "--manual-login-profile-dir <path>",
+    "Profile directory to test for persistent ChatGPT login.",
+  )
+  .option("--json", "Print structured JSON.", false)
+  .action(async (rawCommandOptions, command?: Command) => {
+    const commandOptions =
+      command?.opts?.() ??
+      (typeof rawCommandOptions?.opts === "function"
+        ? rawCommandOptions.opts()
+        : rawCommandOptions);
+    const remoteChromeOption =
+      commandOptions.remoteChrome ?? readCliOptionValue("--remote-chrome");
+    const config = await resolveChatgptCliBrowserConfig(remoteChromeOption);
+    const { runBrowserDoctor } = await import("../src/cli/browserDoctor.js");
+    await runBrowserDoctor({
+      json: commandOptions.json,
+      config: {
+        ...config,
+        remoteChrome: remoteChromeOption ? config.remoteChrome : null,
+        manualLogin: !remoteChromeOption,
+        manualLoginProfileDir:
+          commandOptions.manualLoginProfileDir ?? config.manualLoginProfileDir,
+      },
+    });
+  });
+
+browserCommand
+  .command("probe-attachments")
+  .description("Upload attachments into the ChatGPT composer, verify readiness, then clear them without sending.")
+  .requiredOption("-f, --file <paths...>", "Files, directories, or globs to probe.", collectPaths, [])
+  .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
+  .option("--timeout <ms|s|m|h>", "Probe timeout.", (value) =>
+    parseDurationOption(value, "Attachment probe timeout"),
+  )
+  .option("--keep-tab", "Leave the opened probe tab alive.", false)
+  .option("--json", "Print structured JSON.", false)
+  .action(async (commandOptions, command: Command) => {
+    const config = await resolveChatgptCliBrowserConfig(commandOptions.remoteChrome);
+    const attachments = await resolveBrowserAttachments(
+      resolveCommandFileInputs(commandOptions, command),
+    );
+    const result = await probeChatgptAttachments({
+      attachments,
+      timeoutMs: commandOptions.timeout,
+      keepTab: commandOptions.keepTab,
+      config,
+      log: (message) => {
+        if (!commandOptions.json) console.log(chalk.dim(message));
+      },
+    });
+    if (commandOptions.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log(`Probe uploaded: ${result.uploadedNames.length}`);
+    console.log(`Composer cleared: ${result.cleared ? "yes" : "no"}`);
+    console.log(`Page: ${result.page.href}`);
+  });
+
+browserCommand
+  .command("status")
+  .description("Check the configured logged-in ChatGPT browser.")
+  .option("--conversation-url <url>", "Open this conversation before reporting status.")
+  .option("--include-conversation", "Include a conversation turn snapshot when on a conversation.")
+  .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
+  .option("--timeout <ms|s|m|h>", "Status timeout.", (value) =>
+    parseDurationOption(value, "Browser status timeout"),
+  )
+  .option("--keep-tab", "Leave the opened status tab alive.", false)
+  .option("--json", "Print structured JSON.", false)
+  .action(async (commandOptions) => {
+    const config = await resolveChatgptCliBrowserConfig(commandOptions.remoteChrome);
+    const result = await readChatgptBrowserStatus({
+      conversationUrl: commandOptions.conversationUrl,
+      includeConversation: commandOptions.includeConversation,
+      timeoutMs: commandOptions.timeout,
+      keepTab: commandOptions.keepTab,
+      config,
+      log: (message) => {
+        if (!commandOptions.json) console.log(chalk.dim(message));
+      },
+    });
+    if (commandOptions.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log(`Status: ${result.status}`);
+    console.log(`Remote Chrome: ${result.remoteChrome.host}:${result.remoteChrome.port}`);
+    console.log(`Page: ${result.page.href}`);
+    console.log(`Composer: ${result.page.hasComposer ? "yes" : "no"}`);
+    console.log(`Generated images: ${result.page.uniqueGeneratedImageCount}`);
+  });
+
+const chatCommand = program.command("chat").description("ChatGPT browser conversation utilities.");
+
+chatCommand
+  .command("create")
+  .description("Create a new ChatGPT conversation by sending an initial prompt.")
+  .requiredOption("--turn-message <text>", "Initial prompt text to send.")
+  .option("-f, --file <paths...>", "Files, directories, or globs to attach.", collectPaths, [])
+  .option(
+    "--sandbox-output-dir <dir>",
+    "Directory for auto-downloaded sandbox artifacts emitted by the assistant.",
+  )
+  .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
+  .option("--timeout <ms|s|m|h>", "Create timeout.", (value) =>
+    parseDurationOption(value, "Chat create timeout"),
+  )
+  .option(
+    "--browser-model-strategy <mode>",
+    "Model picker strategy for this conversation.",
+    "current",
+  )
+  .option("--browser-model-label <label>", "Exact/fuzzy ChatGPT model picker label to use.")
+  .option("--include-snapshot", "Include the resulting conversation snapshot.", false)
+  .option("--json", "Print structured JSON.", false)
+  .action(async (commandOptions, command: Command) => {
+    const config = await resolveChatgptCliBrowserConfig(commandOptions.remoteChrome);
+    const attachments = await resolveBrowserAttachments(
+      resolveCommandFileInputs(commandOptions, command),
+    );
+    const result = await createChatgptSession({
+      prompt: commandOptions.turnMessage,
+      attachments,
+      timeoutMs: commandOptions.timeout,
+      includeSnapshot: commandOptions.includeSnapshot,
+      config: {
+        ...config,
+        modelStrategy: commandOptions.browserModelStrategy,
+        desiredModel: commandOptions.browserModelLabel ?? config.desiredModel,
+        sandboxArtifactsOutputDir:
+          commandOptions.sandboxOutputDir ?? config.sandboxArtifactsOutputDir,
+      },
+      log: (message) => {
+        if (!commandOptions.json) console.log(chalk.dim(message));
+      },
+    });
+    if (commandOptions.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log(`Conversation: ${result.conversationUrl ?? "unknown"}`);
+    console.log(result.answerMarkdown || result.answerText);
+    if (result.downloadedSandboxArtifacts?.length) {
+      console.log(`Downloaded sandbox artifacts: ${result.downloadedSandboxArtifacts.length}`);
+      for (const artifact of result.downloadedSandboxArtifacts) {
+        console.log(`- ${artifact.downloadedPath}`);
+      }
+    }
+    for (const warning of result.warnings ?? []) {
+      console.log(chalk.yellow(`Warning: ${warning}`));
+    }
+  });
+
+chatCommand
+  .command("get <conversationUrl>")
+  .description("Read a ChatGPT conversation snapshot.")
+  .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
+  .option("--timeout <ms|s|m|h>", "Snapshot timeout.", (value) =>
+    parseDurationOption(value, "Chat snapshot timeout"),
+  )
+  .option("--keep-tab", "Leave the opened conversation tab alive.", false)
+  .option("--json", "Print structured JSON.", false)
+  .action(async (conversationUrl: string, commandOptions) => {
+    const config = await resolveChatgptCliBrowserConfig(commandOptions.remoteChrome);
+    const result = await readChatgptConversationSnapshot({
+      conversationUrl,
+      timeoutMs: commandOptions.timeout,
+      keepTab: commandOptions.keepTab,
+      config,
+      log: (message) => {
+        if (!commandOptions.json) console.log(chalk.dim(message));
+      },
+    });
+    if (commandOptions.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log(`Conversation: ${result.page.href}`);
+    console.log(`Turns: ${result.turns.length}`);
+    console.log(`Generated images: ${result.generatedImages.length}`);
+    console.log(`Sandbox artifacts: ${result.sandboxArtifacts.length}`);
+    const latest = result.latestAssistantTurn?.textPreview;
+    if (latest) {
+      console.log(`Latest assistant: ${latest}`);
+    }
+  });
+
+chatCommand
+  .command("artifacts <conversationUrl>")
+  .description("Resolve and download assistant sandbox artifacts from a ChatGPT conversation.")
+  .option("-o, --output-dir <dir>", "Directory for downloaded artifacts and JSON sidecars.")
+  .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
+  .option("--timeout <ms|s|m|h>", "Artifact extraction timeout.", (value) =>
+    parseDurationOption(value, "Chat artifact extraction timeout"),
+  )
+  .option("--no-download", "Only report artifact buttons; do not download bytes.")
+  .option("--keep-tab", "Leave the opened conversation tab alive.", false)
+  .option("--json", "Print structured JSON.", false)
+  .action(async (conversationUrl: string, commandOptions) => {
+    const config = await resolveChatgptCliBrowserConfig(commandOptions.remoteChrome);
+    const result = await extractChatgptSandboxArtifactsFromConfiguredBrowser({
+      conversationUrl,
+      outputDir: commandOptions.outputDir,
+      download: commandOptions.download,
+      timeoutMs: commandOptions.timeout,
+      keepTab: commandOptions.keepTab,
+      config,
+      log: (message) => {
+        if (!commandOptions.json) console.log(chalk.dim(message));
+      },
+    });
+    if (commandOptions.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log(`Conversation: ${result.page.href}`);
+    console.log(`Sandbox artifact buttons: ${result.sandboxArtifacts.length}`);
+    if (result.downloadedArtifacts.length > 0) {
+      console.log(`Downloaded artifacts: ${result.downloadedArtifacts.length}`);
+      for (const artifact of result.downloadedArtifacts) {
+        console.log(`- ${artifact.downloadedPath}`);
+      }
+    }
+    for (const warning of result.warnings) {
+      console.log(chalk.yellow(`Warning: ${warning}`));
+    }
+  });
+
+chatCommand
+  .command("turn <conversationUrl>")
+  .description("Append one prompt turn to an existing ChatGPT conversation.")
+  .requiredOption("--turn-message <text>", "Prompt text to send.")
+  .option("-f, --file <paths...>", "Files to attach to this turn.", collectPaths, [])
+  .option(
+    "--sandbox-output-dir <dir>",
+    "Directory for auto-downloaded sandbox artifacts emitted by the assistant.",
+  )
+  .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
+  .option("--timeout <ms|s|m|h>", "Turn timeout.", (value) =>
+    parseDurationOption(value, "Chat turn timeout"),
+  )
+  .option(
+    "--browser-model-strategy <mode>",
+    "Model picker strategy for this turn.",
+    "current",
+  )
+  .option("--browser-model-label <label>", "Exact/fuzzy ChatGPT model picker label to use.")
+  .option("--include-snapshot", "Include the resulting conversation snapshot.", false)
+  .option("--json", "Print structured JSON.", false)
+  .action(async (conversationUrl: string, commandOptions, command: Command) => {
+    const config = await resolveChatgptCliBrowserConfig(commandOptions.remoteChrome);
+    const attachments = await resolveBrowserAttachments(
+      resolveCommandFileInputs(commandOptions, command),
+    );
+    const result = await sendChatgptTurn({
+      conversationUrl,
+      prompt: commandOptions.turnMessage,
+      attachments,
+      timeoutMs: commandOptions.timeout,
+      includeSnapshot: commandOptions.includeSnapshot,
+      config: {
+        ...config,
+        modelStrategy: commandOptions.browserModelStrategy,
+        desiredModel: commandOptions.browserModelLabel ?? config.desiredModel,
+        sandboxArtifactsOutputDir:
+          commandOptions.sandboxOutputDir ?? config.sandboxArtifactsOutputDir,
+      },
+      log: (message) => {
+        if (!commandOptions.json) console.log(chalk.dim(message));
+      },
+    });
+    if (commandOptions.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log(`Conversation: ${result.conversationUrl ?? conversationUrl}`);
+    console.log(result.answerMarkdown || result.answerText);
+    if (result.downloadedSandboxArtifacts?.length) {
+      console.log(`Downloaded sandbox artifacts: ${result.downloadedSandboxArtifacts.length}`);
+      for (const artifact of result.downloadedSandboxArtifacts) {
+        console.log(`- ${artifact.downloadedPath}`);
+      }
+    }
+    for (const warning of result.warnings ?? []) {
+      console.log(chalk.yellow(`Warning: ${warning}`));
+    }
+  });
+
+chatCommand
+  .command("delete-plan <conversationUrl>")
+  .description("Inspect whether a ChatGPT conversation can be deleted without deleting it.")
+  .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
+  .option("--timeout <ms|s|m|h>", "Delete planning timeout.", (value) =>
+    parseDurationOption(value, "Chat delete-plan timeout"),
+  )
+  .option("--keep-tab", "Leave the opened conversation tab alive.", false)
+  .option("--json", "Print structured JSON.", false)
+  .action(async (conversationUrl: string, commandOptions) => {
+    const config = await resolveChatgptCliBrowserConfig(commandOptions.remoteChrome);
+    const result = await planChatgptConversationDelete({
+      conversationUrl,
+      timeoutMs: commandOptions.timeout,
+      keepTab: commandOptions.keepTab,
+      config,
+      log: (message) => {
+        if (!commandOptions.json) console.log(chalk.dim(message));
+      },
+    });
+    if (commandOptions.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log(`Conversation: ${result.conversationUrl}`);
+    console.log(`Conversation id: ${result.conversationId ?? "unknown"}`);
+    console.log(`Can attempt delete: ${result.canAttemptDelete ? "yes" : "no"}`);
+    if (result.matchedConversation) {
+      console.log(`Matched title: ${result.matchedConversation.title}`);
+    }
+    for (const warning of result.warnings) {
+      console.log(chalk.yellow(`Warning: ${warning}`));
+    }
+  });
+
+chatCommand
+  .command("delete <conversationUrl>")
+  .description("Delete a ChatGPT conversation after exact id confirmation.")
+  .requiredOption("--confirm <conversationId>", "Required exact ChatGPT conversation id from the URL.")
+  .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
+  .option("--timeout <ms|s|m|h>", "Delete timeout.", (value) =>
+    parseDurationOption(value, "Chat delete timeout"),
+  )
+  .option("--keep-tab", "Leave the opened conversation tab alive.", false)
+  .option("--json", "Print structured JSON.", false)
+  .action(async (conversationUrl: string, commandOptions) => {
+    const config = await resolveChatgptCliBrowserConfig(commandOptions.remoteChrome);
+    const result = await deleteChatgptConversation({
+      conversationUrl,
+      confirmConversationId: commandOptions.confirm,
+      timeoutMs: commandOptions.timeout,
+      keepTab: commandOptions.keepTab,
+      config,
+      log: (message) => {
+        if (!commandOptions.json) console.log(chalk.dim(message));
+      },
+    });
+    if (commandOptions.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log(`Conversation id: ${result.conversationId}`);
+    console.log(`Deleted: ${result.deleted ? "yes" : "not verified"}`);
+    console.log(`Verification: ${result.verification}`);
+    for (const warning of result.warnings) {
+      console.log(chalk.yellow(`Warning: ${warning}`));
+    }
+  });
+
+chatCommand
+  .command("move <conversationUrl>")
+  .description("Move a ChatGPT conversation into a project after exact id confirmation.")
+  .requiredOption("--project-url <url>", "Target ChatGPT project URL.")
+  .requiredOption("--confirm <conversationId>", "Required exact ChatGPT conversation id from the URL.")
+  .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
+  .option("--timeout <ms|s|m|h>", "Move timeout.", (value) =>
+    parseDurationOption(value, "Chat move timeout"),
+  )
+  .option("--keep-tab", "Leave the opened conversation tab alive.", false)
+  .option("--json", "Print structured JSON.", false)
+  .action(async (conversationUrl: string, commandOptions) => {
+    const config = await resolveChatgptCliBrowserConfig(commandOptions.remoteChrome);
+    const result = await moveChatgptConversationToProject({
+      conversationUrl,
+      targetProjectUrl: commandOptions.projectUrl,
+      confirmConversationId: commandOptions.confirm,
+      timeoutMs: commandOptions.timeout,
+      keepTab: commandOptions.keepTab,
+      config,
+      log: (message) => {
+        if (!commandOptions.json) console.log(chalk.dim(message));
+      },
+    });
+    if (commandOptions.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log(`Conversation id: ${result.conversationId}`);
+    console.log(`Target project: ${result.targetProject.name}`);
+    console.log(`Moved: ${result.moved ? "yes" : "not verified"}`);
+    console.log(`Verification: ${result.verification}`);
+    for (const warning of result.warnings) {
+      console.log(chalk.yellow(`Warning: ${warning}`));
+    }
+  });
+
+const projectCommand = program.command("project").description("ChatGPT project utilities.");
+
+projectCommand
+  .command("create <name>")
+  .description("Create a ChatGPT project through the logged-in browser session.")
+  .option("--instructions <text>", "Initial project instructions.", "")
+  .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
+  .option("--timeout <ms|s|m|h>", "Project create timeout.", (value) =>
+    parseDurationOption(value, "Project create timeout"),
+  )
+  .option("--keep-tab", "Leave the created project tab alive.", false)
+  .option("--json", "Print structured JSON.", false)
+  .action(async (name: string, commandOptions) => {
+    const config = await resolveChatgptCliBrowserConfig(commandOptions.remoteChrome);
+    const result = await createChatgptProject({
+      name,
+      instructions: commandOptions.instructions,
+      timeoutMs: commandOptions.timeout,
+      keepTab: commandOptions.keepTab,
+      config,
+      log: (message) => {
+        if (!commandOptions.json) console.log(chalk.dim(message));
+      },
+    });
+    if (commandOptions.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log(`Project: ${result.project.name}`);
+    console.log(`URL: ${result.project.url ?? "unknown"}`);
+    console.log(`Created: ${result.created ? "yes" : "not verified"}`);
+    console.log(`Verification: ${result.verification}`);
+    for (const warning of result.warnings) {
+      console.log(chalk.yellow(`Warning: ${warning}`));
+    }
+  });
+
+projectCommand
+  .command("list")
+  .description("List ChatGPT projects visible in the sidebar.")
+  .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
+  .option("--timeout <ms|s|m|h>", "Project list timeout.", (value) =>
+    parseDurationOption(value, "Project list timeout"),
+  )
+  .option("--keep-tab", "Leave the opened tab alive.", false)
+  .option("--json", "Print structured JSON.", false)
+  .action(async (commandOptions) => {
+    const config = await resolveChatgptCliBrowserConfig(commandOptions.remoteChrome);
+    const result = await listChatgptProjects({
+      timeoutMs: commandOptions.timeout,
+      keepTab: commandOptions.keepTab,
+      config,
+      log: (message) => {
+        if (!commandOptions.json) console.log(chalk.dim(message));
+      },
+    });
+    if (commandOptions.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log(`Projects: ${result.projects.length}`);
+    for (const project of result.projects) {
+      console.log(`- ${project.name}${project.url ? ` (${project.url})` : ""}`);
+    }
+  });
+
+projectCommand
+  .command("get <projectUrl>")
+  .description("Read a ChatGPT project snapshot and visible conversations.")
+  .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
+  .option("--timeout <ms|s|m|h>", "Project snapshot timeout.", (value) =>
+    parseDurationOption(value, "Project snapshot timeout"),
+  )
+  .option("--keep-tab", "Leave the opened project tab alive.", false)
+  .option("--json", "Print structured JSON.", false)
+  .action(async (projectUrl: string, commandOptions) => {
+    const config = await resolveChatgptCliBrowserConfig(commandOptions.remoteChrome);
+    const result = await readChatgptProject({
+      projectUrl,
+      timeoutMs: commandOptions.timeout,
+      keepTab: commandOptions.keepTab,
+      config,
+      log: (message) => {
+        if (!commandOptions.json) console.log(chalk.dim(message));
+      },
+    });
+    if (commandOptions.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log(`Project: ${result.project.name}`);
+    console.log(`URL: ${result.project.url ?? projectUrl}`);
+    console.log(`Conversations: ${result.conversations.length}`);
+    for (const conversation of result.conversations.slice(0, 20)) {
+      console.log(`- ${conversation.title} (${conversation.url})`);
+    }
+  });
+
+projectCommand
+  .command("rename <projectUrl>")
+  .description("Rename a ChatGPT project after exact current-name confirmation.")
+  .requiredOption("--new-name <name>", "New project name.")
+  .requiredOption("--confirm-current-name <name>", "Required exact current project name.")
+  .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
+  .option("--timeout <ms|s|m|h>", "Project rename timeout.", (value) =>
+    parseDurationOption(value, "Project rename timeout"),
+  )
+  .option("--keep-tab", "Leave the opened project tab alive.", false)
+  .option("--json", "Print structured JSON.", false)
+  .action(async (projectUrl: string, commandOptions) => {
+    const config = await resolveChatgptCliBrowserConfig(commandOptions.remoteChrome);
+    const result = await renameChatgptProject({
+      projectUrl,
+      newName: commandOptions.newName,
+      confirmCurrentName: commandOptions.confirmCurrentName,
+      timeoutMs: commandOptions.timeout,
+      keepTab: commandOptions.keepTab,
+      config,
+      log: (message) => {
+        if (!commandOptions.json) console.log(chalk.dim(message));
+      },
+    });
+    if (commandOptions.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log(`Project: ${result.oldName} -> ${result.newName}`);
+    console.log(`Renamed: ${result.renamed ? "yes" : "not verified"}`);
+    console.log(`Verification: ${result.verification}`);
+    for (const warning of result.warnings) {
+      console.log(chalk.yellow(`Warning: ${warning}`));
+    }
+  });
+
 program
   .command("session [id]")
   .description("Attach to a stored session or list recent sessions when no ID is provided.")
@@ -911,6 +1895,188 @@ program
     const restartOptions = cmd.opts<RestartCommandOptions>();
     await restartSession(sessionId, restartOptions);
   });
+
+async function resolveChatgptCliBrowserConfig(remoteChrome?: string): Promise<BrowserSessionConfig> {
+  const { config: userConfig } = await loadUserConfig();
+  const cliBrowserConfig = remoteChrome
+    ? await buildBrowserConfig({
+        model: DEFAULT_MODEL,
+        remoteChrome,
+      })
+    : {};
+  return {
+    ...(userConfig.browser ?? {}),
+    ...cliBrowserConfig,
+    remoteChrome: remoteChrome
+      ? cliBrowserConfig.remoteChrome ?? parseChatgptRemoteChromeTarget(remoteChrome)
+      : cliBrowserConfig.remoteChrome ?? userConfig.browser?.remoteChrome ?? null,
+  };
+}
+
+function parseChatgptRemoteChromeTarget(raw: string): { host: string; port: number } {
+  const target = raw.trim();
+  if (!target) {
+    throw new Error("Invalid remote-chrome value: expected host:port but received an empty string.");
+  }
+
+  const ipv6Match = target.match(/^\[(.+)]:(\d+)$/);
+  let host: string | undefined;
+  let portSegment: string | undefined;
+  if (ipv6Match) {
+    host = ipv6Match[1]?.trim();
+    portSegment = ipv6Match[2]?.trim();
+  } else {
+    const lastColon = target.lastIndexOf(":");
+    if (lastColon === -1) {
+      throw new Error(`Invalid remote-chrome format: ${target}. Expected host:port.`);
+    }
+    host = target.slice(0, lastColon).trim();
+    portSegment = target.slice(lastColon + 1).trim();
+    if (host.includes(":")) {
+      throw new Error(
+        `Invalid remote-chrome format: ${target}. Wrap IPv6 addresses in brackets, e.g. --remote-chrome "[2001:db8::1]:9222".`,
+      );
+    }
+  }
+
+  const port = Number.parseInt(portSegment ?? "", 10);
+  if (!host || !Number.isFinite(port) || port <= 0 || port > 65_535) {
+    throw new Error(`Invalid remote-chrome format: ${target}. Expected host:port.`);
+  }
+  return { host, port };
+}
+
+function readCliOptionValue(name: string): string | undefined {
+  const equalsPrefix = `${name}=`;
+  for (let index = 0; index < process.argv.length; index += 1) {
+    const argument = process.argv[index];
+    if (argument === name) {
+      const value = process.argv[index + 1];
+      return value && !value.startsWith("-") ? value : undefined;
+    }
+    if (argument?.startsWith(equalsPrefix)) {
+      return argument.slice(equalsPrefix.length);
+    }
+  }
+  return undefined;
+}
+
+async function readTrimmedStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+  }
+  return Buffer.concat(chunks).toString("utf8").trim();
+}
+
+async function promptForOtpCode(promptText = "OTP code: "): Promise<string> {
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  try {
+    return (await rl.question(promptText)).trim();
+  } finally {
+    rl.close();
+  }
+}
+
+async function maybeCompleteInlineOtpLogin(
+  result: Awaited<ReturnType<typeof beginChatgptTerminalLogin>>,
+  commandOptions: OptionValues,
+): Promise<Awaited<ReturnType<typeof beginChatgptTerminalLogin>>> {
+  if (result.status !== "awaiting_otp") {
+    return result;
+  }
+
+  const providedCode =
+    typeof commandOptions.otp === "string" && commandOptions.otp.trim()
+      ? commandOptions.otp.trim()
+      : commandOptions.otpStdin
+        ? await readTrimmedStdin()
+        : "";
+  const allowPrompt =
+    commandOptions.promptOtp !== false &&
+    commandOptions.json !== true &&
+    process.stdin.isTTY === true &&
+    process.stdout.isTTY === true;
+
+  let attempt = 0;
+  const maxAttempts = Math.max(1, Number(commandOptions.otpAttempts ?? 3));
+  let nextCode = providedCode;
+  let currentResult:
+    | Awaited<ReturnType<typeof beginChatgptTerminalLogin>>
+    | Awaited<ReturnType<typeof submitChatgptLoginOtp>> = result;
+
+  while (currentResult.page.phase === "otp") {
+    if (!nextCode) {
+      if (!allowPrompt) {
+        return currentResult;
+      }
+      if (attempt >= maxAttempts) {
+        console.log(chalk.yellow(`OTP attempts exhausted (${maxAttempts}).`));
+        return currentResult;
+      }
+      const promptLabel = attempt === 0 ? "OTP code: " : "OTP code (try again): ";
+      nextCode = await promptForOtpCode(promptLabel);
+      if (!nextCode) {
+        return currentResult;
+      }
+    }
+
+    try {
+      currentResult = await submitChatgptLoginOtp({
+        code: nextCode,
+        timeoutMs: commandOptions.timeout,
+        log: (message) => {
+          if (!commandOptions.json) console.log(chalk.dim(message));
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!allowPrompt) {
+        throw error;
+      }
+      console.log(chalk.yellow(`OTP submission failed: ${message}`));
+      nextCode = "";
+      attempt += 1;
+      continue;
+    }
+    if (currentResult.status === "completed" || currentResult.status === "already_logged_in") {
+      return currentResult;
+    }
+    if (currentResult.page.phase !== "otp") {
+      return currentResult;
+    }
+
+    nextCode = "";
+    attempt += 1;
+    if (!allowPrompt) {
+      return currentResult;
+    }
+    if (attempt >= maxAttempts) {
+      console.log(chalk.yellow(`OTP attempts exhausted (${maxAttempts}).`));
+      return currentResult;
+    }
+    console.log(chalk.yellow("OTP was not accepted. The session is still waiting for a code."));
+  }
+
+  return currentResult;
+}
+
+function resolveCommandFileInputs(
+  commandOptions: OptionValues & { optsWithGlobals?: () => OptionValues },
+  command?: Command,
+): string[] {
+  const localFiles = Array.isArray(commandOptions.file) ? commandOptions.file : [];
+  const globalOptions = command?.optsWithGlobals?.() ?? commandOptions.optsWithGlobals?.() ?? {};
+  const globalFiles = Array.isArray(globalOptions.file) ? globalOptions.file : [];
+  return Array.from(new Set([...localFiles, ...globalFiles]));
+}
+
+async function resolveBrowserAttachments(inputs: string[]): Promise<BrowserAttachment[]> {
+  return resolveChatgptBrowserAttachments(inputs, { cwd: process.cwd() });
+}
 
 function buildRunOptions(
   options: ResolvedCliOptions,

@@ -8,7 +8,11 @@ import {
 } from "../constants.js";
 import { delay } from "../utils.js";
 import { logDomFailure } from "../domDebug.js";
-import { transferAttachmentViaDataTransfer } from "./attachmentDataTransfer.js";
+import {
+  transferAttachmentViaCdpDrag,
+  transferAttachmentViaDataTransfer,
+  transferAttachmentViaDrop,
+} from "./attachmentDataTransfer.js";
 
 export async function uploadAttachmentFile(
   deps: {
@@ -263,11 +267,6 @@ export async function uploadAttachmentFile(
         if (!fileCount && globalFileNodes.length > 0) {
           fileCount = collectFileCount(globalFileNodes);
         }
-        const hasAttachmentSignal = localCandidates.length > 0 || inputCount > 0 || fileCount > 0 || uploading;
-        if (!uiMatch && rootTextRaw && hasAttachmentSignal && matchesExpected(rootTextRaw)) {
-          uiMatch = true;
-        }
-
         return {
           ui: uiMatch,
           input: inputMatch,
@@ -407,21 +406,52 @@ export async function uploadAttachmentFile(
     if (fileCount >= expectedCount) return true;
     return Boolean(signals.ui && chipCount >= expectedCount);
   };
-  const initialInputSatisfied =
-    expectedCount > 0 ? initialSignals.inputCount >= expectedCount : Boolean(initialSignals.input);
-  if (
-    expectedCount > 0 &&
-    (initialSignals.fileCount >= expectedCount || initialSignals.inputCount >= expectedCount)
-  ) {
-    const satisfiedCount = Math.max(initialSignals.fileCount, initialSignals.inputCount);
-    logger(
-      `Attachment already present: composer shows ${satisfiedCount} file${satisfiedCount === 1 ? "" : "s"}`,
-    );
-    return true;
-  }
-  if (initialInputSatisfied || initialSignals.input) {
+  if (initialSignals.input) {
     logger(`Attachment already queued in file input: ${path.basename(attachment.path)}`);
     return true;
+  }
+
+  const hostPathCandidates = resolveAttachmentHostPathCandidates(attachment);
+  if (input && typeof input.dispatchDragEvent === "function") {
+    try {
+      const cdpDropResult = await transferAttachmentViaCdpDrag(
+        { runtime, input },
+        attachment,
+        hostPathCandidates,
+      );
+      const cdpDropSignals = await readAttachmentSignals(expectedName);
+      if (cdpDropSignals.ui || cdpDropSignals.input) {
+        logger(`Attachment queued via browser drag/drop: ${cdpDropResult.fileName}`);
+        return true;
+      }
+      logger("Attachment browser drag/drop did not expose a stable signal; retrying.");
+    } catch (error) {
+      logger(
+        `Attachment browser drag/drop failed; retrying: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  try {
+    const dropResult = await transferAttachmentViaDrop(runtime, attachment);
+    const dropSignals = await readAttachmentSignals(expectedName);
+    if (dropSignals.ui || dropSignals.input) {
+      logger(
+        dropResult.duplicate
+          ? `Attachment already uploaded: ${dropResult.fileName}`
+          : `Attachment queued via drag/drop: ${dropResult.fileName}`,
+      );
+      return true;
+    }
+    logger("Attachment drag/drop did not expose a stable signal; retrying with file input.");
+  } catch (error) {
+    logger(
+      `Attachment drag/drop failed; retrying with file input: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
   }
 
   const documentNode = await dom.getDocument();
@@ -924,17 +954,11 @@ export async function uploadAttachmentFile(
     for (let orderIndex = 0; orderIndex < candidateOrder.length; orderIndex += 1) {
       const idx = candidateOrder[orderIndex];
       const queuedSignals = await readAttachmentSignals(expectedName);
-      if (
-        queuedSignals.ui ||
-        isExpectedSatisfied(queuedSignals) ||
-        hasChipDelta(queuedSignals) ||
-        hasUploadDelta(queuedSignals) ||
-        hasFileCountDelta(queuedSignals)
-      ) {
+      if (queuedSignals.ui) {
         confirmedAttachment = true;
         break;
       }
-      if (queuedSignals.input || hasInputDelta(queuedSignals)) {
+      if (queuedSignals.input) {
         inputConfirmed = true;
         break;
       }
@@ -1034,7 +1058,26 @@ export async function uploadAttachmentFile(
         let hasExpectedFile = snapshotMatchesExpected(immediateInputSnapshot);
         if (!hasExpectedFile) {
           if (mode === "set") {
-            await dom.setFileInputFiles({ nodeId: resultNode.nodeId, files: [attachment.path] });
+            const uploadPaths = hostPathCandidates;
+            let lastSetError: unknown;
+            for (const uploadPath of uploadPaths) {
+              try {
+                await dom.setFileInputFiles({ nodeId: resultNode.nodeId, files: [uploadPath] });
+                lastSetError = undefined;
+                break;
+              } catch (error) {
+                lastSetError = error;
+              }
+            }
+            if (lastSetError) {
+              logger(
+                `Attachment direct file input failed; retrying with browser data transfer: ${
+                  lastSetError instanceof Error ? lastSetError.message : String(lastSetError)
+                }`,
+              );
+              const selector = `input[type="file"][data-oracle-upload-idx="${idx}"]`;
+              await transferAttachmentViaDataTransfer(runtime, attachment, selector);
+            }
           } else {
             const selector = `input[type="file"][data-oracle-upload-idx="${idx}"]`;
             try {
@@ -1197,6 +1240,30 @@ export async function uploadAttachmentFile(
 
   await logDomFailure(runtime, logger, "file-upload-missing");
   throw new Error("Attachment did not register with the ChatGPT composer in time.");
+}
+
+function resolveAttachmentHostPathCandidates(attachment: BrowserAttachment): string[] {
+  const wslCandidate = toWindowsHostPathCandidate(attachment.path);
+  const candidates = [
+    ...(attachment.hostPaths ?? []),
+    ...(wslCandidate ? [wslCandidate] : []),
+    attachment.path,
+  ];
+  return Array.from(new Set(candidates.filter(Boolean)));
+}
+
+function toWindowsHostPathCandidate(filePath: string): string | undefined {
+  const distro = process.env.WSL_DISTRO_NAME;
+  if (!distro || !path.isAbsolute(filePath)) {
+    return undefined;
+  }
+  const mountMatch = filePath.match(/^\/mnt\/([a-zA-Z])\/(.+)$/);
+  if (mountMatch) {
+    const drive = mountMatch[1].toUpperCase();
+    const rest = mountMatch[2].split("/").join("\\");
+    return `${drive}:\\${rest}`;
+  }
+  return `\\\\wsl.localhost\\${distro}${filePath.split("/").join("\\")}`;
 }
 
 export async function clearComposerAttachments(
@@ -1537,6 +1604,17 @@ export async function waitForAttachmentCompletion(
       fileCount = collectFileCount(Array.from(document.querySelectorAll(fileCountSelectors)));
     }
     const filesAttached = attachedNames.length > 0 || fileCount > 0;
+    const errorSelectors = [
+      '[role="alert"]',
+      '[aria-live="assertive"]',
+      '[data-testid*="toast"]',
+      '[data-testid*="error"]',
+      '[data-testid*="upload"]',
+    ].join(',');
+    const errorTexts = Array.from(document.querySelectorAll(errorSelectors))
+      .map((node) => (node.textContent || '').replace(/\\s+/g, ' ').trim())
+      .filter((text) => /upload failed|failed to upload|couldn.?t upload|could not upload|too many files|too large|exceeds?|unsupported file|try again/i.test(text))
+      .slice(0, 5);
     return {
       state: button ? (disabled ? 'disabled' : 'ready') : 'missing',
       uploading,
@@ -1544,6 +1622,7 @@ export async function waitForAttachmentCompletion(
       attachedNames,
       inputNames,
       fileCount,
+      errorTexts,
     };
   })()`;
   while (Date.now() < deadline) {
@@ -1557,6 +1636,7 @@ export async function waitForAttachmentCompletion(
           attachedNames?: string[];
           inputNames?: string[];
           fileCount?: number;
+          errorTexts?: string[];
         }
       | undefined;
     if (!value && logger?.verbose) {
@@ -1586,6 +1666,10 @@ export async function waitForAttachmentCompletion(
             })}`,
           );
         }
+      }
+      const errorTexts = (value.errorTexts ?? []).filter(Boolean);
+      if (errorTexts.length > 0) {
+        throw new Error(`Attachment upload failed: ${errorTexts.join(" | ")}`);
       }
       const attachedNames = (value.attachedNames ?? [])
         .map((name) => name.toLowerCase().replace(/\s+/g, " ").trim())

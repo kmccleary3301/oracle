@@ -25,6 +25,10 @@ export interface BrowserConfigDefaults {
   remoteToken?: string | null;
   /** Optional metadata for the SSH reverse-tunnel that makes remoteHost reachable. */
   remoteViaSshReverseTunnel?: RemoteViaSshReverseTunnelConfig | null;
+  /** Attach directly to an existing Chrome DevTools endpoint. */
+  remoteChrome?: { host: string; port: number } | null;
+  /** Max number of Oracle-managed tabs to keep open on the remote Chrome endpoint. */
+  remoteChromeMaxTabs?: number;
   timeoutMs?: number;
   debugPort?: number | null;
   inputTimeoutMs?: number;
@@ -53,6 +57,8 @@ export interface BrowserConfigDefaults {
   manualLogin?: boolean;
   /** Manual-login profile directory override (also available via ORACLE_BROWSER_PROFILE_DIR). */
   manualLoginProfileDir?: string | null;
+  /** Override the default directory used for auto-downloaded ChatGPT sandbox artifacts. */
+  sandboxArtifactsOutputDir?: string | null;
 }
 
 export interface AzureConfig {

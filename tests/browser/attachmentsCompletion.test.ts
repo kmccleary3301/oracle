@@ -131,6 +131,27 @@ describe("attachment completion fallbacks", () => {
     await assertion;
     useRealTime();
   });
+
+  test("waitForAttachmentCompletion rejects explicit upload errors immediately", async () => {
+    const runtime = {
+      evaluate: vi.fn().mockResolvedValue({
+        result: {
+          value: {
+            state: "disabled",
+            uploading: false,
+            filesAttached: false,
+            attachedNames: [],
+            inputNames: [],
+            errorTexts: ["Upload failed. Try again."],
+          },
+        },
+      }),
+    } as unknown as ChromeClient["Runtime"];
+
+    await expect(
+      waitForAttachmentCompletion(runtime, 10_000, ["oracle-attach-verify.txt"]),
+    ).rejects.toThrow(/Attachment upload failed: Upload failed\. Try again\./);
+  });
 });
 
 describe("sent turn attachment verification", () => {

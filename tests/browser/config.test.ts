@@ -23,6 +23,7 @@ describe("resolveBrowserConfig", () => {
       desiredModel: "Custom",
       chromeProfile: "Profile 1",
       chromePath: "/Applications/Chrome",
+      sandboxArtifactsOutputDir: "/tmp/oracle-artifacts",
       debug: true,
     });
     expect(resolved.url).toBe("https://example.com/");
@@ -33,6 +34,7 @@ describe("resolveBrowserConfig", () => {
     expect(resolved.desiredModel).toBe("Custom");
     expect(resolved.chromeProfile).toBe("Profile 1");
     expect(resolved.chromePath).toBe("/Applications/Chrome");
+    expect(resolved.sandboxArtifactsOutputDir).toBe("/tmp/oracle-artifacts");
     expect(resolved.debug).toBe(true);
   });
 

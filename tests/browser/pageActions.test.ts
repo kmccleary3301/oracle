@@ -334,15 +334,25 @@ describe("waitForAssistantResponse", () => {
 
 describe("uploadAttachmentFile", () => {
   let transferSpy: ReturnType<typeof vi.spyOn>;
+  let cdpDragSpy: ReturnType<typeof vi.spyOn>;
+  let dropSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     transferSpy = vi
       .spyOn(attachmentDataTransfer, "transferAttachmentViaDataTransfer")
       .mockResolvedValue({ fileName: "oracle-browser-smoke.txt", size: 1 });
+    cdpDragSpy = vi
+      .spyOn(attachmentDataTransfer, "transferAttachmentViaCdpDrag")
+      .mockRejectedValue(new Error("cdp drag unavailable in unit test"));
+    dropSpy = vi
+      .spyOn(attachmentDataTransfer, "transferAttachmentViaDrop")
+      .mockRejectedValue(new Error("drop unavailable in unit test"));
   });
 
   afterEach(() => {
     transferSpy.mockRestore();
+    cdpDragSpy.mockRestore();
+    dropSpy.mockRestore();
   });
 
   test.skip("selects DOM input and uploads file", async () => {
@@ -467,7 +477,7 @@ describe("uploadAttachmentFile", () => {
     expect(logger).toHaveBeenCalledWith(expect.stringMatching(/already queued/i));
   });
 
-  test("skips upload when file count already satisfies expected count", async () => {
+  test("does not skip upload when only file count satisfies expected count", async () => {
     logger.mockClear();
     const dom = {
       getDocument: vi.fn(),
@@ -503,14 +513,14 @@ describe("uploadAttachmentFile", () => {
         logger,
         { expectedCount: 1 },
       ),
-    ).resolves.toBe(true);
+    ).rejects.toThrow(/Unable to locate ChatGPT file attachment input/i);
 
-    expect(dom.getDocument).not.toHaveBeenCalled();
+    expect(dom.getDocument).toHaveBeenCalled();
     expect(dom.setFileInputFiles).not.toHaveBeenCalled();
-    expect(logger).toHaveBeenCalledWith(expect.stringMatching(/composer shows 1 file/i));
+    expect(logger).toHaveBeenCalledWith(expect.stringMatching(/drag\/drop failed/i));
   });
 
-  test("skips upload when input count already satisfies expected count", async () => {
+  test("does not skip upload when only input count satisfies expected count", async () => {
     logger.mockClear();
     const dom = {
       getDocument: vi.fn(),
@@ -546,11 +556,11 @@ describe("uploadAttachmentFile", () => {
         logger,
         { expectedCount: 1 },
       ),
-    ).resolves.toBe(true);
+    ).rejects.toThrow(/Unable to locate ChatGPT file attachment input/i);
 
-    expect(dom.getDocument).not.toHaveBeenCalled();
+    expect(dom.getDocument).toHaveBeenCalled();
     expect(dom.setFileInputFiles).not.toHaveBeenCalled();
-    expect(logger).toHaveBeenCalledWith(expect.stringMatching(/composer shows 1 file/i));
+    expect(logger).toHaveBeenCalledWith(expect.stringMatching(/drag\/drop failed/i));
   });
 
   test("avoids retrying other inputs once upload shows progress", async () => {

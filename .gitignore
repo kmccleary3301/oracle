@@ -15,3 +15,8 @@ oracle-*.tgz
 oracle-*.tgz.sha1
 oracle-*.tgz.sha256
 /.claude
+
+# Local browser/live-test state. These must never be committed.
+openai_creds.env
+.tmp-*
+tmp/

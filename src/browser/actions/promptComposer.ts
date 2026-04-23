@@ -21,17 +21,31 @@ const ENTER_KEY_EVENT = {
 } as const;
 const ENTER_KEY_TEXT = "\r";
 
+interface InsertPromptDeps {
+  runtime: ChromeClient["Runtime"];
+  input: ChromeClient["Input"];
+  inputTimeoutMs?: number | null;
+}
+
+interface SubmitPreparedPromptDeps extends InsertPromptDeps {
+  attachmentNames?: string[];
+  baselineTurns?: number | null;
+}
+
 export async function submitPrompt(
-  deps: {
-    runtime: ChromeClient["Runtime"];
-    input: ChromeClient["Input"];
-    attachmentNames?: string[];
-    baselineTurns?: number | null;
-    inputTimeoutMs?: number | null;
-  },
+  deps: SubmitPreparedPromptDeps,
   prompt: string,
   logger: BrowserLogger,
 ): Promise<number | null> {
+  await insertPromptText(deps, prompt, logger);
+  return submitPreparedPrompt(deps, prompt, logger);
+}
+
+export async function insertPromptText(
+  deps: InsertPromptDeps,
+  prompt: string,
+  logger: BrowserLogger,
+): Promise<void> {
   const { runtime, input } = deps;
 
   await waitForDomReady(runtime, logger, deps.inputTimeoutMs ?? undefined);
@@ -131,7 +145,15 @@ export async function submitPrompt(
   const editorTextTrimmed = editorTextRaw?.trim?.() ?? "";
   const fallbackValueTrimmed = fallbackValueRaw?.trim?.() ?? "";
   const activeValueTrimmed = activeValueRaw?.trim?.() ?? "";
-  if (!editorTextTrimmed && !fallbackValueTrimmed && !activeValueTrimmed) {
+  const promptSnippet = prompt.trim().slice(0, Math.min(200, prompt.trim().length));
+  const containsPromptSnippet = (...values: string[]): boolean => {
+    if (!promptSnippet) return true;
+    return values.some((value) => String(value || "").includes(promptSnippet));
+  };
+  if (
+    (!editorTextTrimmed && !fallbackValueTrimmed && !activeValueTrimmed) ||
+    !containsPromptSnippet(editorTextRaw, fallbackValueRaw, activeValueRaw)
+  ) {
     // Learned: occasionally Input.insertText doesn't land in the editor; force textContent/value + input events.
     await runtime.evaluate({
       expression: `(() => {
@@ -182,6 +204,10 @@ export async function submitPrompt(
   const observedEditor = postVerification.result?.value?.editorText ?? "";
   const observedFallback = postVerification.result?.value?.fallbackValue ?? "";
   const observedActive = postVerification.result?.value?.activeValue ?? "";
+  if (!containsPromptSnippet(observedEditor, observedFallback, observedActive)) {
+    await logDomFailure(runtime, logger, "prompt-insert-mismatch");
+    throw new Error("Failed to insert the requested prompt text into the composer.");
+  }
   const observedLength = Math.max(
     observedEditor.length,
     observedFallback.length,
@@ -200,9 +226,19 @@ export async function submitPrompt(
       },
     );
   }
+}
 
+export async function submitPreparedPrompt(
+  deps: SubmitPreparedPromptDeps,
+  prompt: string,
+  logger: BrowserLogger,
+): Promise<number | null> {
+  const { runtime, input } = deps;
   const clicked = await attemptSendButton(runtime, logger, deps?.attachmentNames);
   if (!clicked) {
+    if ((deps.attachmentNames?.length ?? 0) > 0) {
+      throw new Error("Send button did not become enabled after attachment upload.");
+    }
     await input.dispatchKeyEvent({
       type: "keyDown",
       ...ENTER_KEY_EVENT,
@@ -375,19 +411,8 @@ async function attemptSendButton(
     return 'clicked';
   })()`;
 
-  const deadline = Date.now() + 8_000;
+  const deadline = Date.now() + ((attachmentNames?.length ?? 0) > 0 ? 30_000 : 8_000);
   while (Date.now() < deadline) {
-    const needAttachment = Array.isArray(attachmentNames) && attachmentNames.length > 0;
-    if (needAttachment) {
-      const ready = await Runtime.evaluate({
-        expression: buildAttachmentReadyExpression(attachmentNames),
-        returnByValue: true,
-      });
-      if (!ready?.result?.value) {
-        await delay(150);
-        continue;
-      }
-    }
     const { result } = await Runtime.evaluate({ expression: script, returnByValue: true });
     if (result.value === "clicked") {
       return true;

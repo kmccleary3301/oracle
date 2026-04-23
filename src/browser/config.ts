@@ -4,6 +4,7 @@ import type { BrowserAutomationConfig, ResolvedBrowserConfig } from "./types.js"
 import { isTemporaryChatUrl, normalizeChatgptUrl } from "./utils.js";
 import os from "node:os";
 import path from "node:path";
+import { DEFAULT_REMOTE_CHROME_MAX_TABS } from "./remoteChromeTabs.js";
 
 export const DEFAULT_BROWSER_CONFIG: ResolvedBrowserConfig = {
   chromeProfile: null,
@@ -34,9 +35,11 @@ export const DEFAULT_BROWSER_CONFIG: ResolvedBrowserConfig = {
   debug: false,
   allowCookieErrors: false,
   remoteChrome: null,
+  remoteChromeMaxTabs: DEFAULT_REMOTE_CHROME_MAX_TABS,
   manualLogin: false,
   manualLoginProfileDir: null,
   manualLoginCookieSync: false,
+  sandboxArtifactsOutputDir: null,
 };
 
 export function resolveBrowserConfig(
@@ -113,11 +116,15 @@ export function resolveBrowserConfig(
     debug: config?.debug ?? DEFAULT_BROWSER_CONFIG.debug,
     allowCookieErrors:
       config?.allowCookieErrors ?? envAllowCookieErrors ?? DEFAULT_BROWSER_CONFIG.allowCookieErrors,
+    remoteChromeMaxTabs:
+      config?.remoteChromeMaxTabs ?? DEFAULT_BROWSER_CONFIG.remoteChromeMaxTabs,
     thinkingTime: config?.thinkingTime,
     manualLogin,
     manualLoginProfileDir: manualLogin ? resolvedProfileDir : null,
     manualLoginCookieSync:
       config?.manualLoginCookieSync ?? DEFAULT_BROWSER_CONFIG.manualLoginCookieSync,
+    sandboxArtifactsOutputDir:
+      config?.sandboxArtifactsOutputDir ?? DEFAULT_BROWSER_CONFIG.sandboxArtifactsOutputDir,
   };
 }
 

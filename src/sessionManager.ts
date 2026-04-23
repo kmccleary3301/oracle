@@ -55,6 +55,7 @@ export interface BrowserSessionConfig {
   manualLogin?: boolean;
   manualLoginProfileDir?: string | null;
   manualLoginCookieSync?: boolean;
+  sandboxArtifactsOutputDir?: string | null;
   /** Thinking time intensity: 'light', 'standard', 'extended', 'heavy' */
   thinkingTime?: ThinkingTimeLevel;
 }

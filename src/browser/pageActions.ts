@@ -7,7 +7,7 @@ export {
   installJavaScriptDialogAutoDismissal,
 } from "./actions/navigation.js";
 export { ensureModelSelection } from "./actions/modelSelection.js";
-export { submitPrompt, clearPromptComposer } from "./actions/promptComposer.js";
+export { submitPrompt, insertPromptText, clearPromptComposer } from "./actions/promptComposer.js";
 export {
   clearComposerAttachments,
   uploadAttachmentFile,

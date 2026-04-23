@@ -29,6 +29,7 @@ import {
   installJavaScriptDialogAutoDismissal,
   ensureModelSelection,
   clearPromptComposer,
+  insertPromptText,
   waitForAssistantResponse,
   captureAssistantMarkdown,
   clearComposerAttachments,
@@ -38,7 +39,6 @@ import {
   readAssistantSnapshot,
 } from "./pageActions.js";
 import { INPUT_SELECTORS } from "./constants.js";
-import { uploadAttachmentViaDataTransfer } from "./actions/remoteFileTransfer.js";
 import { ensureThinkingTime } from "./actions/thinkingTime.js";
 import { estimateTokenCount, withRetries, delay } from "./utils.js";
 import { formatElapsed } from "../oracle/format.js";
@@ -59,6 +59,12 @@ import {
 } from "./profileState.js";
 import { runProviderSubmissionFlow } from "./providerDomFlow.js";
 import { chatgptDomProvider } from "./providers/index.js";
+import {
+  downloadSandboxArtifacts,
+  extractSandboxArtifactRefsFromRuntime,
+  resolveSandboxArtifactOutputDir,
+  waitForNewSandboxArtifactRefsFromRuntime,
+} from "./chatgpt/sandboxArtifacts.js";
 
 export type { BrowserAutomationConfig, BrowserRunOptions, BrowserRunResult } from "./types.js";
 export { CHATGPT_URL, DEFAULT_MODEL_STRATEGY, DEFAULT_MODEL_TARGET } from "./constants.js";
@@ -77,6 +83,166 @@ export function shouldPreserveBrowserOnErrorForTest(error: unknown, headless: bo
   return shouldPreserveBrowserOnError(error, headless);
 }
 
+async function uploadBrowserAttachmentsWithRetry(
+  deps: {
+    runtime: ChromeClient["Runtime"];
+    dom: ChromeClient["DOM"];
+    input?: ChromeClient["Input"];
+  },
+  attachments: BrowserAttachment[],
+  options: {
+    logger: BrowserLogger;
+    baseTimeoutMs: number;
+    minBaseTimeoutMs: number;
+    perFileTimeoutMs: number;
+    retries?: number;
+  },
+): Promise<{ attachmentNames: string[]; inputOnlyAttachments: boolean }> {
+  const attachmentNames = attachments.map((attachment) => path.basename(attachment.path));
+  const maxAttempts = Math.max(1, (options.retries ?? 1) + 1);
+  const waitBudget =
+    Math.max(options.baseTimeoutMs, options.minBaseTimeoutMs) +
+    Math.max(0, attachments.length - 1) * options.perFileTimeoutMs;
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    let inputOnlyAttachments = false;
+    if (attempt > 1) {
+      options.logger(
+        `[browser] Retrying attachment upload batch (${attempt}/${maxAttempts}) after resetting composer attachments.`,
+      );
+      await clearComposerAttachments(deps.runtime, 5_000, options.logger);
+      await delay(750);
+    }
+
+    try {
+      for (let attachmentIndex = 0; attachmentIndex < attachments.length; attachmentIndex += 1) {
+        const attachment = attachments[attachmentIndex];
+        options.logger(`Uploading attachment: ${attachment.displayPath}`);
+        const uiConfirmed = await uploadAttachmentFile(
+          { runtime: deps.runtime, dom: deps.dom, input: deps.input },
+          attachment,
+          options.logger,
+          { expectedCount: attachmentIndex + 1 },
+        );
+        if (!uiConfirmed) {
+          inputOnlyAttachments = true;
+        }
+        await delay(500);
+      }
+      await waitForAttachmentCompletion(deps.runtime, waitBudget, attachmentNames, options.logger);
+      options.logger("All attachments uploaded");
+      return { attachmentNames, inputOnlyAttachments };
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      if (attempt >= maxAttempts || !shouldRetryAttachmentUploadError(message)) {
+        throw error;
+      }
+      options.logger(
+        `[browser] Attachment upload attempt ${attempt}/${maxAttempts} failed: ${message}`,
+      );
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+function shouldRetryAttachmentUploadError(message: string): boolean {
+  if (/too many files|too large|exceeds?|unsupported file|aggregate limit|image limit/i.test(message)) {
+    return false;
+  }
+  return /upload failed|failed to upload|couldn.?t upload|could not upload|try again|did not finish uploading|timeout|timed out|transfer/i.test(
+    message,
+  );
+}
+
+function canRelaxSentAttachmentVerification(attachments: BrowserAttachment[]): boolean {
+  if (attachments.length === 0) return false;
+  const relaxedExtensions = new Set([
+    ".avif",
+    ".bmp",
+    ".gif",
+    ".heic",
+    ".heif",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".svg",
+    ".webp",
+  ]);
+  return attachments.every((attachment) =>
+    relaxedExtensions.has(path.extname(attachment.path).toLowerCase()),
+  );
+}
+
+async function collectPostTurnSandboxArtifacts(
+  Runtime: ChromeClient["Runtime"],
+  logger: BrowserLogger,
+  options: {
+    baselineArtifacts: Awaited<ReturnType<typeof extractSandboxArtifactRefsFromRuntime>>;
+    conversationUrl?: string;
+    waitTimeoutMs?: number;
+    outputDir?: string | null;
+  },
+): Promise<{
+  sandboxArtifacts: Awaited<ReturnType<typeof extractSandboxArtifactRefsFromRuntime>>;
+  newSandboxArtifacts: Awaited<ReturnType<typeof extractSandboxArtifactRefsFromRuntime>>;
+  downloadedSandboxArtifacts: Awaited<ReturnType<typeof downloadSandboxArtifacts>>;
+  warnings: string[];
+}> {
+  const warnings: string[] = [];
+  try {
+    const baselineArtifacts = options.baselineArtifacts ?? [];
+    const newSandboxArtifacts = await waitForNewSandboxArtifactRefsFromRuntime(
+      Runtime,
+      baselineArtifacts,
+      options.waitTimeoutMs ?? 8_000,
+    );
+    const sandboxArtifacts = await extractSandboxArtifactRefsFromRuntime(Runtime);
+    if (newSandboxArtifacts.length === 0) {
+      return {
+        sandboxArtifacts,
+        newSandboxArtifacts,
+        downloadedSandboxArtifacts: [],
+        warnings,
+      };
+    }
+    const outputDir = resolveSandboxArtifactOutputDir(
+      options.outputDir ?? undefined,
+      options.conversationUrl ?? "",
+    );
+    const downloadedSandboxArtifacts = await downloadSandboxArtifacts(
+      Runtime,
+      newSandboxArtifacts,
+      outputDir,
+    );
+    if (downloadedSandboxArtifacts.length === 0) {
+      warnings.push("Assistant response exposed sandbox artifact labels, but no downloadable files resolved.");
+    } else {
+      logger(
+        `Downloaded ${downloadedSandboxArtifacts.length} sandbox artifact${downloadedSandboxArtifacts.length === 1 ? "" : "s"}`,
+      );
+    }
+    return {
+      sandboxArtifacts,
+      newSandboxArtifacts,
+      downloadedSandboxArtifacts,
+      warnings,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger(`[browser] Sandbox artifact collection failed: ${message}`);
+    warnings.push(`Sandbox artifact collection failed: ${message}`);
+    return {
+      sandboxArtifacts: [],
+      newSandboxArtifacts: [],
+      downloadedSandboxArtifacts: [],
+      warnings,
+    };
+  }
+}
+
 export async function runBrowserMode(options: BrowserRunOptions): Promise<BrowserRunResult> {
   const promptText = options.prompt?.trim();
   if (!promptText) {
@@ -93,6 +259,11 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
   }
   if (logger.sessionLog === undefined && options.log?.sessionLog) {
     logger.sessionLog = options.log.sessionLog;
+  }
+  if (attachments.length > 0) {
+    logger(
+      `Resolved ${attachments.length} browser attachment${attachments.length === 1 ? "" : "s"}`,
+    );
   }
   const runtimeHintCb = options.runtimeHintCb;
   let lastTargetId: string | undefined;
@@ -501,57 +672,47 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     };
     const submitOnce = async (prompt: string, submissionAttachments: BrowserAttachment[]) => {
       const baselineSnapshot = await readAssistantSnapshot(Runtime).catch(() => null);
+      const baselineSandboxArtifacts = await extractSandboxArtifactRefsFromRuntime(Runtime).catch(
+        () => [],
+      );
       const baselineAssistantText =
         typeof baselineSnapshot?.text === "string" ? baselineSnapshot.text.trim() : "";
-      const attachmentNames = submissionAttachments.map((a) => path.basename(a.path));
-      let attachmentWaitTimedOut = false;
+      let attachmentNames = submissionAttachments.map((a) => path.basename(a.path));
       let inputOnlyAttachments = false;
+      let promptAlreadyInserted = false;
       if (submissionAttachments.length > 0) {
         if (!DOM) {
           throw new Error("Chrome DOM domain unavailable while uploading attachments.");
         }
         await clearComposerAttachments(Runtime, 5_000, logger);
-        for (
-          let attachmentIndex = 0;
-          attachmentIndex < submissionAttachments.length;
-          attachmentIndex += 1
-        ) {
-          const attachment = submissionAttachments[attachmentIndex];
-          logger(`Uploading attachment: ${attachment.displayPath}`);
-          const uiConfirmed = await uploadAttachmentFile(
-            { runtime: Runtime, dom: DOM, input: Input },
-            attachment,
-            logger,
-            { expectedCount: attachmentIndex + 1 },
-          );
-          if (!uiConfirmed) {
-            inputOnlyAttachments = true;
-          }
-          await delay(500);
-        }
-        // Scale timeout based on number of files: base 45s + 20s per additional file.
+        await clearPromptComposer(Runtime, logger);
+        await insertPromptText(
+          {
+            runtime: Runtime,
+            input: Input,
+            inputTimeoutMs: config.inputTimeoutMs ?? undefined,
+          },
+          prompt,
+          logger,
+        );
+        promptAlreadyInserted = true;
         const baseTimeout = config.inputTimeoutMs ?? 30_000;
-        const perFileTimeout = 20_000;
-        const waitBudget =
-          Math.max(baseTimeout, 45_000) + (submissionAttachments.length - 1) * perFileTimeout;
-        try {
-          await waitForAttachmentCompletion(Runtime, waitBudget, attachmentNames, logger);
-          logger("All attachments uploaded");
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          if (/Attachments did not finish uploading before timeout/i.test(message)) {
-            attachmentWaitTimedOut = true;
-            logger(
-              `[browser] Attachment upload timed out after ${Math.round(waitBudget / 1000)}s; continuing without confirmation.`,
-            );
-          } else {
-            throw error;
-          }
-        }
+        const uploadResult = await uploadBrowserAttachmentsWithRetry(
+          { runtime: Runtime, dom: DOM, input: Input },
+          submissionAttachments,
+          {
+            logger,
+            baseTimeoutMs: baseTimeout,
+            minBaseTimeoutMs: 45_000,
+            perFileTimeoutMs: 20_000,
+            retries: 1,
+          },
+        );
+        attachmentNames = uploadResult.attachmentNames;
+        inputOnlyAttachments = uploadResult.inputOnlyAttachments;
       }
       let baselineTurns = await readConversationTurnCount(Runtime, logger);
       // Learned: return baselineTurns so assistant polling can ignore earlier content.
-      const sendAttachmentNames = attachmentWaitTimedOut ? [] : attachmentNames;
       const providerState: Record<string, unknown> = {
         runtime: Runtime,
         input: Input,
@@ -559,7 +720,8 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         timeoutMs: config.timeoutMs,
         inputTimeoutMs: config.inputTimeoutMs ?? undefined,
         baselineTurns: baselineTurns ?? undefined,
-        attachmentNames: sendAttachmentNames,
+        attachmentNames,
+        promptAlreadyInserted,
       };
       await runProviderSubmissionFlow(chatgptDomProvider, {
         prompt,
@@ -573,9 +735,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         baselineTurns = providerBaselineTurns;
       }
       if (attachmentNames.length > 0) {
-        if (attachmentWaitTimedOut) {
-          logger("Attachment confirmation timed out; skipping user-turn attachment verification.");
-        } else if (inputOnlyAttachments) {
+        if (inputOnlyAttachments) {
           logger(
             "Attachment UI did not render before send; skipping user-turn attachment verification.",
           );
@@ -587,24 +747,34 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
             logger,
           );
           if (!verified) {
-            throw new Error("Sent user message did not expose attachment UI after upload.");
+            if (canRelaxSentAttachmentVerification(submissionAttachments)) {
+              logger(
+                "Sent user message did not expose image attachment filenames; continuing because upload readiness was verified before send.",
+              );
+            } else {
+              throw new Error("Sent user message did not expose attachment UI after upload.");
+            }
+          } else {
+            logger("Verified attachments present on sent user message");
           }
-          logger("Verified attachments present on sent user message");
         }
       }
       // Reattach needs a /c/ URL; ChatGPT can update it late, so poll in the background.
       scheduleConversationHint("post-submit", config.timeoutMs ?? 120_000);
-      return { baselineTurns, baselineAssistantText };
+      return { baselineTurns, baselineAssistantText, baselineSandboxArtifacts };
     };
 
     let baselineTurns: number | null = null;
     let baselineAssistantText: string | null = null;
+    let baselineSandboxArtifacts: Awaited<ReturnType<typeof extractSandboxArtifactRefsFromRuntime>> =
+      [];
     await acquireProfileLockIfNeeded();
     try {
       try {
         const submission = await raceWithDisconnect(submitOnce(promptText, attachments));
         baselineTurns = submission.baselineTurns;
         baselineAssistantText = submission.baselineAssistantText;
+        baselineSandboxArtifacts = submission.baselineSandboxArtifacts;
       } catch (error) {
         const isPromptTooLarge =
           error instanceof BrowserAutomationError &&
@@ -619,6 +789,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
           );
           baselineTurns = submission.baselineTurns;
           baselineAssistantText = submission.baselineAssistantText;
+          baselineSandboxArtifacts = submission.baselineSandboxArtifacts;
         } else {
           throw error;
         }
@@ -822,9 +993,11 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     }));
 
     // Final sanity check: ensure we didn't accidentally capture the user prompt instead of the assistant turn.
-    const finalSnapshot = await readAssistantSnapshot(Runtime, baselineTurns ?? undefined).catch(
-      () => null,
-    );
+    const finalSnapshot = await readSettledAssistantSnapshot(
+      Runtime,
+      baselineTurns ?? undefined,
+      5_000,
+    ).catch(() => null);
     const finalText = typeof finalSnapshot?.text === "string" ? finalSnapshot.text.trim() : "";
     if (finalText && finalText !== promptText.trim()) {
       const trimmedMarkdown = answerMarkdown.trim();
@@ -922,6 +1095,11 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     const durationMs = Date.now() - startedAt;
     const answerChars = answerText.length;
     const answerTokens = estimateTokenCount(answerMarkdown);
+    const sandboxArtifactResult = await collectPostTurnSandboxArtifacts(Runtime, logger, {
+      baselineArtifacts: baselineSandboxArtifacts,
+      conversationUrl: lastUrl,
+      outputDir: config.sandboxArtifactsOutputDir,
+    });
     return {
       answerText,
       answerMarkdown,
@@ -936,6 +1114,10 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       chromeTargetId: lastTargetId,
       tabUrl: lastUrl,
       controllerPid: process.pid,
+      sandboxArtifacts: sandboxArtifactResult.sandboxArtifacts,
+      newSandboxArtifacts: sandboxArtifactResult.newSandboxArtifacts,
+      downloadedSandboxArtifacts: sandboxArtifactResult.downloadedSandboxArtifacts,
+      warnings: sandboxArtifactResult.warnings,
     };
   } catch (error) {
     const normalizedError = error instanceof Error ? error : new Error(String(error));
@@ -1300,7 +1482,9 @@ async function runRemoteBrowserMode(
   let removeDialogHandler: (() => void) | null = null;
 
   try {
-    const connection = await connectToRemoteChrome(host, port, logger, config.url);
+    const connection = await connectToRemoteChrome(host, port, logger, config.url, {
+      maxTabs: config.remoteChromeMaxTabs,
+    });
     client = connection.client;
     remoteTargetId = connection.targetId ?? null;
     await emitRuntimeHint();
@@ -1381,27 +1565,44 @@ async function runRemoteBrowserMode(
 
     const submitOnce = async (prompt: string, submissionAttachments: BrowserAttachment[]) => {
       const baselineSnapshot = await readAssistantSnapshot(Runtime).catch(() => null);
+      const baselineSandboxArtifacts = await extractSandboxArtifactRefsFromRuntime(Runtime).catch(
+        () => [],
+      );
       const baselineAssistantText =
         typeof baselineSnapshot?.text === "string" ? baselineSnapshot.text.trim() : "";
-      const attachmentNames = submissionAttachments.map((a) => path.basename(a.path));
+      let attachmentNames = submissionAttachments.map((a) => path.basename(a.path));
+      let inputOnlyAttachments = false;
+      let promptAlreadyInserted = false;
       if (submissionAttachments.length > 0) {
         if (!DOM) {
           throw new Error("Chrome DOM domain unavailable while uploading attachments.");
         }
         await clearComposerAttachments(Runtime, 5_000, logger);
-        // Use remote file transfer for remote Chrome (reads local files and injects via CDP)
-        for (const attachment of submissionAttachments) {
-          logger(`Uploading attachment: ${attachment.displayPath}`);
-          await uploadAttachmentViaDataTransfer({ runtime: Runtime, dom: DOM }, attachment, logger);
-          await delay(500);
-        }
-        // Scale timeout based on number of files: base 30s + 15s per additional file
+        await clearPromptComposer(Runtime, logger);
+        await insertPromptText(
+          {
+            runtime: Runtime,
+            input: Input,
+            inputTimeoutMs: config.inputTimeoutMs ?? undefined,
+          },
+          prompt,
+          logger,
+        );
+        promptAlreadyInserted = true;
         const baseTimeout = config.inputTimeoutMs ?? 30_000;
-        const perFileTimeout = 15_000;
-        const waitBudget =
-          Math.max(baseTimeout, 30_000) + (submissionAttachments.length - 1) * perFileTimeout;
-        await waitForAttachmentCompletion(Runtime, waitBudget, attachmentNames, logger);
-        logger("All attachments uploaded");
+        const uploadResult = await uploadBrowserAttachmentsWithRetry(
+          { runtime: Runtime, dom: DOM, input: Input },
+          submissionAttachments,
+          {
+            logger,
+            baseTimeoutMs: baseTimeout,
+            minBaseTimeoutMs: 30_000,
+            perFileTimeoutMs: 15_000,
+            retries: 1,
+          },
+        );
+        attachmentNames = uploadResult.attachmentNames;
+        inputOnlyAttachments = uploadResult.inputOnlyAttachments;
       }
       let baselineTurns = await readConversationTurnCount(Runtime, logger);
       const providerState: Record<string, unknown> = {
@@ -1412,6 +1613,7 @@ async function runRemoteBrowserMode(
         inputTimeoutMs: config.inputTimeoutMs ?? undefined,
         baselineTurns: baselineTurns ?? undefined,
         attachmentNames,
+        promptAlreadyInserted,
       };
       await runProviderSubmissionFlow(chatgptDomProvider, {
         prompt,
@@ -1424,15 +1626,43 @@ async function runRemoteBrowserMode(
       if (typeof providerBaselineTurns === "number" && Number.isFinite(providerBaselineTurns)) {
         baselineTurns = providerBaselineTurns;
       }
-      return { baselineTurns, baselineAssistantText };
+      if (attachmentNames.length > 0) {
+        if (inputOnlyAttachments) {
+          logger(
+            "Attachment UI did not render before send; skipping user-turn attachment verification.",
+          );
+        } else {
+          const verified = await waitForUserTurnAttachments(
+            Runtime,
+            attachmentNames,
+            20_000,
+            logger,
+          );
+          if (!verified) {
+            if (canRelaxSentAttachmentVerification(submissionAttachments)) {
+              logger(
+                "Sent user message did not expose image attachment filenames; continuing because upload readiness was verified before send.",
+              );
+            } else {
+              throw new Error("Sent user message did not expose attachment UI after upload.");
+            }
+          } else {
+            logger("Verified attachments present on sent user message");
+          }
+        }
+      }
+      return { baselineTurns, baselineAssistantText, baselineSandboxArtifacts };
     };
 
     let baselineTurns: number | null = null;
     let baselineAssistantText: string | null = null;
+    let baselineSandboxArtifacts: Awaited<ReturnType<typeof extractSandboxArtifactRefsFromRuntime>> =
+      [];
     try {
       const submission = await submitOnce(promptText, attachments);
       baselineTurns = submission.baselineTurns;
       baselineAssistantText = submission.baselineAssistantText;
+      baselineSandboxArtifacts = submission.baselineSandboxArtifacts;
     } catch (error) {
       const isPromptTooLarge =
         error instanceof BrowserAutomationError &&
@@ -1447,6 +1677,7 @@ async function runRemoteBrowserMode(
         );
         baselineTurns = submission.baselineTurns;
         baselineAssistantText = submission.baselineAssistantText;
+        baselineSandboxArtifacts = submission.baselineSandboxArtifacts;
       } else {
         throw error;
       }
@@ -1587,6 +1818,15 @@ async function runRemoteBrowserMode(
         throw error;
       }
     }
+    try {
+      const conversationUrl = await readConversationUrl(Runtime);
+      if (conversationUrl) {
+        lastUrl = conversationUrl;
+        await emitRuntimeHint();
+      }
+    } catch {
+      // ignore; tabUrl is best-effort metadata.
+    }
     const baselineNormalized = baselineAssistantText
       ? normalizeForComparison(baselineAssistantText)
       : "";
@@ -1642,9 +1882,11 @@ async function runRemoteBrowserMode(
     }));
 
     // Final sanity check: ensure we didn't accidentally capture the user prompt instead of the assistant turn.
-    const finalSnapshot = await readAssistantSnapshot(Runtime, baselineTurns ?? undefined).catch(
-      () => null,
-    );
+    const finalSnapshot = await readSettledAssistantSnapshot(
+      Runtime,
+      baselineTurns ?? undefined,
+      5_000,
+    ).catch(() => null);
     const finalText = typeof finalSnapshot?.text === "string" ? finalSnapshot.text.trim() : "";
     if (
       finalText &&
@@ -1707,6 +1949,11 @@ async function runRemoteBrowserMode(
     const durationMs = Date.now() - startedAt;
     const answerChars = answerText.length;
     const answerTokens = estimateTokenCount(answerMarkdown);
+    const sandboxArtifactResult = await collectPostTurnSandboxArtifacts(Runtime, logger, {
+      baselineArtifacts: baselineSandboxArtifacts,
+      conversationUrl: lastUrl,
+      outputDir: config.sandboxArtifactsOutputDir,
+    });
 
     return {
       answerText,
@@ -1722,6 +1969,10 @@ async function runRemoteBrowserMode(
       chromeTargetId: remoteTargetId ?? undefined,
       tabUrl: lastUrl,
       controllerPid: process.pid,
+      sandboxArtifacts: sandboxArtifactResult.sandboxArtifacts,
+      newSandboxArtifacts: sandboxArtifactResult.newSandboxArtifacts,
+      downloadedSandboxArtifacts: sandboxArtifactResult.downloadedSandboxArtifacts,
+      warnings: sandboxArtifactResult.warnings,
     };
   } catch (error) {
     const normalizedError = error instanceof Error ? error : new Error(String(error));
@@ -2146,6 +2397,27 @@ async function resolveUserDataBaseDir(): Promise<string> {
     }
   }
   return os.tmpdir();
+}
+
+type AssistantSnapshotResult = NonNullable<Awaited<ReturnType<typeof readAssistantSnapshot>>>;
+
+async function readSettledAssistantSnapshot(
+  Runtime: ChromeClient["Runtime"],
+  minTurnIndex: number | undefined,
+  settleMs: number,
+): Promise<AssistantSnapshotResult | null> {
+  const deadline = Date.now() + Math.max(0, settleMs);
+  let best: AssistantSnapshotResult | null = null;
+  while (Date.now() < deadline) {
+    const snapshot = await readAssistantSnapshot(Runtime, minTurnIndex).catch(() => null);
+    const text = typeof snapshot?.text === "string" ? snapshot.text.trim() : "";
+    const bestText = typeof best?.text === "string" ? best.text.trim() : "";
+    if (snapshot && text && text.length >= bestText.length) {
+      best = snapshot;
+    }
+    await delay(350);
+  }
+  return best ?? (await readAssistantSnapshot(Runtime, minTurnIndex).catch(() => null));
 }
 
 function buildThinkingStatusExpression(): string {
