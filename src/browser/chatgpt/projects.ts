@@ -432,13 +432,24 @@ export async function moveChatgptConversationToProject(
     await clickMoveToProjectMenuItem(Runtime);
     await delay(500);
     const targetProject = await clickProjectInMoveMenu(Runtime, options.targetProjectUrl);
-    await delay(2_000);
-    const pageAfter = await snapshotChatgptPage(Runtime);
-    const conversations = await readProjectConversationsFromRuntime(Runtime);
-    const movedConversation = conversations.find((conversation) => {
-      if (conversation.conversationId !== conversationId) return false;
-      return conversation.projectId === targetProjectId || conversation.url.includes(`/g/${targetProjectId}/`);
-    });
+    let pageAfter = await snapshotChatgptPage(Runtime);
+    let movedConversation: ChatgptProjectConversationRef | undefined;
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      await delay(750);
+      pageAfter = await snapshotChatgptPage(Runtime);
+      const conversations = await readProjectConversationsFromRuntime(Runtime);
+      movedConversation = conversations.find((conversation) => {
+        if (conversation.conversationId !== conversationId) return false;
+        return (
+          conversation.projectId === targetProjectId ||
+          conversation.url.includes(`/g/${targetProjectId}/`)
+        );
+      });
+      if (movedConversation) {
+        break;
+      }
+    }
     const verification = movedConversation
       ? "project_link_found"
       : pageAfter.title.startsWith(`${targetProject.name} -`) ||
@@ -507,6 +518,7 @@ export async function renameChatgptProject(
     await Promise.all([Page.enable(), Runtime.enable()]);
     await navigateToChatGPT(Page, Runtime, options.projectUrl, logger);
     await waitForDocumentReady(Runtime, options.timeoutMs ?? 20_000);
+    await waitForProjectTitleReady(Runtime, options.timeoutMs ?? 20_000);
     const pageBefore = await snapshotChatgptPage(Runtime);
     const projectBefore = await readCurrentProjectFromRuntime(Runtime, options.projectUrl);
     if (projectBefore.name !== options.confirmCurrentName) {
@@ -517,7 +529,9 @@ export async function renameChatgptProject(
 
     await openProjectRenameEditor(Runtime, projectBefore.name);
     await fillProjectRenameEditor(Runtime, newName);
-    await delay(1_500);
+    await delay(3_000);
+    await closeProjectDetailsDialog(Runtime);
+    await delay(1_000);
     const pageAfter = await snapshotChatgptPage(Runtime);
     const listedProjects = await readProjectsFromRuntime(Runtime);
     const projectAfter =
@@ -589,6 +603,32 @@ async function waitForProjectConversations(
     conversations = await readProjectConversationsFromRuntime(Runtime);
   }
   return conversations;
+}
+
+async function waitForProjectTitleReady(
+  Runtime: ChromeClient["Runtime"],
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const { result } = await Runtime.evaluate({
+      expression: `(() => {
+        const visible = (node) => {
+          if (!(node instanceof HTMLElement)) return false;
+          const rect = node.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        };
+        return Boolean(
+          Array.from(document.querySelectorAll('button[name="project-title"], input[aria-label="Project name"]')).find(visible)
+        );
+      })()`,
+      returnByValue: true,
+    });
+    if (result?.value === true) {
+      return;
+    }
+    await delay(250);
+  }
 }
 
 async function readProjectsFromRuntime(
@@ -751,8 +791,13 @@ function buildCurrentProjectExpression(fallbackUrl: string): string {
     const currentProjectId = projectIdFromUrl(location.href) || projectIdFromUrl(fallbackUrl);
     const anchors = Array.from(document.querySelectorAll("a"));
     const currentAnchor = anchors.find((anchor) => projectIdFromUrl(anchor.href || anchor.getAttribute("href") || "") === currentProjectId);
+    const titleButton = Array.from(document.querySelectorAll('button[name="project-title"]')).find((node) => {
+      if (!(node instanceof HTMLElement)) return false;
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    });
     const heading = Array.from(document.querySelectorAll("h1,h2,[role='heading']")).find((node) => normalize(node.textContent));
-    const name = normalize(currentAnchor?.innerText || currentAnchor?.textContent || heading?.textContent) || "Project";
+    const name = normalize(titleButton?.textContent || currentAnchor?.innerText || currentAnchor?.textContent || heading?.textContent) || "Project";
     return {
       name,
       url: currentAnchor?.href || fallbackUrl,
@@ -1145,7 +1190,7 @@ async function openProjectRenameEditor(
           const rect = node.getBoundingClientRect();
           return rect.width > 0 && rect.height > 0;
         };
-        const input = Array.from(document.querySelectorAll('input[name="title-editor"]')).find(visible);
+        const input = Array.from(document.querySelectorAll('input[name="title-editor"], input[aria-label="Project name"]')).find(visible);
         if (input) return { ok: true };
         const titleButton = Array.from(document.querySelectorAll('button,[role="button"]')).find((node) => {
           const label = node.getAttribute?.('aria-label') || '';
@@ -1183,7 +1228,7 @@ async function openProjectRenameEditor(
       continue;
     }
     const { result } = await Runtime.evaluate({
-      expression: `Boolean(Array.from(document.querySelectorAll('input[name="title-editor"]')).find((node) => {
+      expression: `Boolean(Array.from(document.querySelectorAll('input[name="title-editor"], input[aria-label="Project name"]')).find((node) => {
         if (!(node instanceof HTMLElement)) return false;
         const rect = node.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
@@ -1204,7 +1249,7 @@ async function fillProjectRenameEditor(
 ): Promise<void> {
   const { result } = await Runtime.evaluate({
     expression: `(() => {
-      const input = Array.from(document.querySelectorAll('input[name="title-editor"]')).find((node) => {
+      const input = Array.from(document.querySelectorAll('input[name="title-editor"], input[aria-label="Project name"]')).find((node) => {
         if (!(node instanceof HTMLInputElement)) return false;
         const rect = node.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
@@ -1212,12 +1257,14 @@ async function fillProjectRenameEditor(
       if (!input) return { ok: false, reason: 'project title editor not found' };
       input.focus();
       input.select();
-      input.value = ${JSON.stringify(newName)};
-      input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ${JSON.stringify(newName)} }));
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      if (setter) {
+        setter.call(input, ${JSON.stringify(newName)});
+      } else {
+        input.value = ${JSON.stringify(newName)};
+      }
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: ${JSON.stringify(newName)} }));
       input.dispatchEvent(new Event('change', { bubbles: true }));
-      input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter' }));
-      input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter' }));
-      input.blur();
       return { ok: true };
     })()`,
     returnByValue: true,
@@ -1226,6 +1273,28 @@ async function fillProjectRenameEditor(
   if (!value?.ok) {
     throw new Error(value?.reason ?? "project rename failed");
   }
+}
+
+async function closeProjectDetailsDialog(Runtime: ChromeClient["Runtime"]): Promise<void> {
+  await clickRuntimeElement(
+    Runtime,
+    `(() => {
+      const visible = (node) => {
+        if (!(node instanceof HTMLElement)) return false;
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const dialog = Array.from(document.querySelectorAll('[role="dialog"],body')).find((node) => {
+        return /Project name|Instructions|Delete project/.test(node.textContent || '');
+      }) || document.body;
+      const closeButton = Array.from(dialog.querySelectorAll('button,[role="button"]')).find((node) => {
+        return visible(node) && (node.getAttribute?.('aria-label') === 'Close' || /^close$/i.test(node.textContent || ''));
+      });
+      if (!closeButton) return { ok: false, reason: 'project details close button not found' };
+      closeButton.click();
+      return { ok: true };
+    })()`,
+  ).catch(() => undefined);
 }
 
 async function clickRuntimeElement(
@@ -1286,4 +1355,5 @@ function normalizeUrl(url: string): string {
 
 export const __test__ = {
   buildConversationListExpression,
+  buildCurrentProjectExpression,
 };
