@@ -40,6 +40,7 @@ export const DEFAULT_BROWSER_CONFIG: ResolvedBrowserConfig = {
   manualLoginProfileDir: null,
   manualLoginCookieSync: false,
   sandboxArtifactsOutputDir: null,
+  thinkingFallback: "allow",
 };
 
 export function resolveBrowserConfig(
@@ -116,9 +117,9 @@ export function resolveBrowserConfig(
     debug: config?.debug ?? DEFAULT_BROWSER_CONFIG.debug,
     allowCookieErrors:
       config?.allowCookieErrors ?? envAllowCookieErrors ?? DEFAULT_BROWSER_CONFIG.allowCookieErrors,
-    remoteChromeMaxTabs:
-      config?.remoteChromeMaxTabs ?? DEFAULT_BROWSER_CONFIG.remoteChromeMaxTabs,
+    remoteChromeMaxTabs: config?.remoteChromeMaxTabs ?? DEFAULT_BROWSER_CONFIG.remoteChromeMaxTabs,
     thinkingTime: config?.thinkingTime,
+    thinkingFallback: config?.thinkingFallback ?? DEFAULT_BROWSER_CONFIG.thinkingFallback,
     manualLogin,
     manualLoginProfileDir: manualLogin ? resolvedProfileDir : null,
     manualLoginCookieSync:

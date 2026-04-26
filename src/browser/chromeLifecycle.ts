@@ -191,10 +191,14 @@ export async function connectToRemoteChrome(
         `Failed to close unused remote Chrome tab ${targetId}: ${message}`,
     });
     if (targetConnection) {
-      await recordRemoteChromeTarget(host, port, targetConnection.targetId, targetUrl).catch((error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        logger(`[tabs] failed to record remote Chrome tab ${targetConnection.targetId}: ${message}`);
-      });
+      await recordRemoteChromeTarget(host, port, targetConnection.targetId, targetUrl).catch(
+        (error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          logger(
+            `[tabs] failed to record remote Chrome tab ${targetConnection.targetId}: ${message}`,
+          );
+        },
+      );
       return { client: targetConnection.client, targetId: targetConnection.targetId };
     }
   }
@@ -397,7 +401,9 @@ export async function ensureWindowsChromeDevtoolsBridge(options: {
   spawnWindowsChromeDevtoolsBridge(host, options.port, options.chromePid);
   await waitForTcpPort(host, options.port, options.timeoutMs ?? 15_000).catch((error) => {
     const message = error instanceof Error ? error.message : String(error);
-    options.logger(`Failed to expose Windows Chrome DevTools on ${host}:${options.port}: ${message}`);
+    options.logger(
+      `Failed to expose Windows Chrome DevTools on ${host}:${options.port}: ${message}`,
+    );
     throw error;
   });
 }
@@ -427,14 +433,7 @@ function spawnWindowsChromeDevtoolsBridge(host: string, port: number, chromePid?
   ).toString("base64");
   const child = spawn(
     "powershell.exe",
-    [
-      "-NoProfile",
-      "-NonInteractive",
-      "-WindowStyle",
-      "Hidden",
-      "-EncodedCommand",
-      encoded,
-    ],
+    ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-EncodedCommand", encoded],
     {
       detached: true,
       stdio: "ignore",
@@ -444,7 +443,8 @@ function spawnWindowsChromeDevtoolsBridge(host: string, port: number, chromePid?
 }
 
 function buildWindowsChromeBridgeScript(host: string, port: number, chromePid?: number): string {
-  const pidExpr = Number.isFinite(chromePid) && (chromePid ?? 0) > 0 ? `${Math.trunc(chromePid ?? 0)}` : "0";
+  const pidExpr =
+    Number.isFinite(chromePid) && (chromePid ?? 0) > 0 ? `${Math.trunc(chromePid ?? 0)}` : "0";
   return `
 $ErrorActionPreference = 'SilentlyContinue'
 $listenAddress = '${host.replace(/'/g, "''")}'
@@ -536,7 +536,11 @@ try {
 `.trim();
 }
 
-async function waitForDevtoolsHttpReady(host: string, port: number, timeoutMs = 20_000): Promise<void> {
+async function waitForDevtoolsHttpReady(
+  host: string,
+  port: number,
+  timeoutMs = 20_000,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastError = "unreachable";
   while (Date.now() < deadline) {

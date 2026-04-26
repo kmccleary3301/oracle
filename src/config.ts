@@ -53,6 +53,8 @@ export interface BrowserConfigDefaults {
   modelStrategy?: BrowserModelStrategy;
   /** Thinking time intensity (ChatGPT Thinking/Pro models): 'light', 'standard', 'extended', 'heavy' */
   thinkingTime?: ThinkingTimeLevel;
+  /** Whether missing Thinking controls should continue with current/default mode or fail. */
+  thinkingFallback?: "allow" | "fail";
   /** Skip cookie sync and reuse a persistent automation profile (waits for manual ChatGPT login). */
   manualLogin?: boolean;
   /** Manual-login profile directory override (also available via ORACLE_BROWSER_PROFILE_DIR). */
@@ -75,6 +77,22 @@ export interface RemoteViaSshReverseTunnelConfig {
   extraArgs?: string;
 }
 
+export interface DaemonConfigDefaults {
+  enabled?: boolean;
+  autoStart?: boolean;
+  host?: string;
+  port?: number;
+  token?: string;
+  connectionPath?: string;
+  jobDir?: string;
+  maxConcurrentJobs?: number;
+  maxOpenChatgptTabs?: number;
+  jobRetentionDays?: number;
+  completedRetentionDays?: number;
+  failedRetentionDays?: number;
+  defaultPollIntervalMs?: number;
+}
+
 export interface UserConfig {
   engine?: EnginePreference;
   model?: string;
@@ -82,6 +100,7 @@ export interface UserConfig {
   maxFileSizeBytes?: number;
   notify?: NotifyConfig;
   browser?: BrowserConfigDefaults;
+  daemon?: DaemonConfigDefaults;
   heartbeatSeconds?: number;
   filesReport?: boolean;
   background?: boolean;

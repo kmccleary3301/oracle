@@ -34,6 +34,25 @@ function isAnswerNowPlaceholderText(normalized: string): boolean {
   );
 }
 
+function hasGeneratedImages(
+  snapshot: Pick<AssistantSnapshot, "generatedImageFileIds"> | null | undefined,
+): boolean {
+  return (
+    Array.isArray(snapshot?.generatedImageFileIds) && snapshot.generatedImageFileIds.length > 0
+  );
+}
+
+function isGeneratedImageTerminalPlaceholderText(normalized: string): boolean {
+  const text = normalized.trim();
+  return (
+    text === "done" ||
+    text === "stopped thinking" ||
+    text === "chatgpt said:done" ||
+    text === "chatgpt said:stopped thinking" ||
+    text.endsWith("\nstopped thinking")
+  );
+}
+
 export async function waitForAssistantResponse(
   Runtime: ChromeClient["Runtime"],
   timeoutMs: number,
@@ -298,9 +317,25 @@ async function parseAssistantEvaluationResult(
         ? ((result.value as { messageId?: string }).messageId ?? undefined)
         : undefined;
     const text = cleanAssistantText(String((result.value as { text: unknown }).text ?? ""));
+    const generatedImageFileIds = Array.isArray(
+      (result.value as { generatedImageFileIds?: unknown }).generatedImageFileIds,
+    )
+      ? ((result.value as { generatedImageFileIds: unknown[] }).generatedImageFileIds.filter(
+          (id): id is string => typeof id === "string" && id.length > 0,
+        ) ?? [])
+      : [];
     const normalized = text.toLowerCase();
     if (isAnswerNowPlaceholderText(normalized)) {
+      if (generatedImageFileIds.length > 0) {
+        return { text: "Generated image", html, meta: { turnId, messageId } };
+      }
       return null;
+    }
+    if (
+      generatedImageFileIds.length > 0 &&
+      (!text.trim() || isGeneratedImageTerminalPlaceholderText(normalized))
+    ) {
+      return { text: "Generated image", html, meta: { turnId, messageId } };
     }
     return { text, html, meta: { turnId, messageId } };
   }
@@ -396,6 +431,7 @@ async function pollAssistantCompletion(
 } | null> {
   const watchdogDeadline = Date.now() + timeoutMs;
   let previousLength = 0;
+  let previousImageSignature = "";
   let stableCycles = 0;
   let lastChangeAt = Date.now();
   while (Date.now() < watchdogDeadline) {
@@ -407,8 +443,12 @@ async function pollAssistantCompletion(
     const normalized = normalizeAssistantSnapshot(snapshot);
     if (normalized) {
       const currentLength = normalized.text.length;
-      if (currentLength > previousLength) {
+      const imageSignature = Array.isArray(snapshot?.generatedImageFileIds)
+        ? snapshot.generatedImageFileIds.join("|")
+        : "";
+      if (currentLength > previousLength || imageSignature !== previousImageSignature) {
         previousLength = currentLength;
+        previousImageSignature = imageSignature;
         stableCycles = 0;
         lastChangeAt = Date.now();
       } else {
@@ -428,17 +468,20 @@ async function pollAssistantCompletion(
       const requiredStableCycles = shortAnswer ? 12 : mediumAnswer ? 8 : longAnswer ? 8 : 10;
       const stableMs = Date.now() - lastChangeAt;
       const minStableMs = shortAnswer ? 8000 : mediumAnswer ? 1200 : longAnswer ? 2000 : 3000;
+      const imageOutput = hasGeneratedImages(snapshot);
+      const imageStableEnough = imageOutput && stableCycles >= 6 && stableMs >= 3000;
       // Require stop button to disappear before treating completion as final.
       if (!stopVisible) {
         const stableEnough = stableCycles >= requiredStableCycles && stableMs >= minStableMs;
         const completionEnough =
           completionVisible && stableCycles >= completionStableTarget && stableMs >= minStableMs;
-        if (completionEnough || stableEnough) {
+        if (imageStableEnough || completionEnough || stableEnough) {
           return normalized;
         }
       }
     } else {
       previousLength = 0;
+      previousImageSignature = "";
       stableCycles = 0;
     }
     await delay(400);
@@ -510,13 +553,43 @@ function normalizeAssistantSnapshot(snapshot: AssistantSnapshot | null): {
 } | null {
   const text = snapshot?.text ? cleanAssistantText(snapshot.text) : "";
   if (!text.trim()) {
+    if (hasGeneratedImages(snapshot)) {
+      return {
+        text: "Generated image",
+        html: snapshot?.html ?? undefined,
+        meta: {
+          turnId: snapshot?.turnId ?? undefined,
+          messageId: snapshot?.messageId ?? undefined,
+        },
+      };
+    }
     return null;
   }
   const normalized = text.toLowerCase();
   // "Pro thinking" often renders a placeholder turn containing an "Answer now" gate.
   // Treat it as incomplete so browser mode keeps waiting for the real assistant text.
   if (isAnswerNowPlaceholderText(normalized)) {
+    if (hasGeneratedImages(snapshot)) {
+      return {
+        text: "Generated image",
+        html: snapshot?.html ?? undefined,
+        meta: {
+          turnId: snapshot?.turnId ?? undefined,
+          messageId: snapshot?.messageId ?? undefined,
+        },
+      };
+    }
     return null;
+  }
+  if (hasGeneratedImages(snapshot) && isGeneratedImageTerminalPlaceholderText(normalized)) {
+    return {
+      text: "Generated image",
+      html: snapshot?.html ?? undefined,
+      meta: {
+        turnId: snapshot?.turnId ?? undefined,
+        messageId: snapshot?.messageId ?? undefined,
+      },
+    };
   }
   // Ignore user echo turns that can show up in project view fallbacks.
   if (normalized.startsWith("you said")) {
@@ -557,6 +630,8 @@ function buildAssistantSnapshotExpression(minTurnIndex?: number): string {
     const extracted = extractAssistantTurn();
     const isPlaceholder = (snapshot) => {
       const normalized = String(snapshot?.text ?? '').toLowerCase().trim();
+      const hasGeneratedImages = Array.isArray(snapshot?.generatedImageFileIds) && snapshot.generatedImageFileIds.length > 0;
+      if (hasGeneratedImages) return false;
       if (normalized === 'chatgpt said:' || normalized === 'chatgpt said') return true;
       if (normalized.includes('file upload request') && (normalized.includes('pro thinking') || normalized.includes('chatgpt said'))) {
         return true;
@@ -591,6 +666,8 @@ function buildResponseObserverExpression(timeoutMs: number, minTurnIndex?: numbe
     const settleDelayMs = 800;
     const isAnswerNowPlaceholder = (snapshot) => {
       const normalized = String(snapshot?.text ?? '').toLowerCase().trim();
+      const hasGeneratedImages = Array.isArray(snapshot?.generatedImageFileIds) && snapshot.generatedImageFileIds.length > 0;
+      if (hasGeneratedImages) return false;
       if (normalized === 'chatgpt said:' || normalized === 'chatgpt said') return true;
       if (normalized.includes('file upload request') && (normalized.includes('pro thinking') || normalized.includes('chatgpt said'))) {
         return true;
@@ -850,10 +927,33 @@ function buildAssistantExtractor(functionName: string): string {
       const textContent = contentRoot?.textContent ?? '';
       const text = innerText.trim().length > 0 ? innerText : textContent;
       const html = contentRoot?.innerHTML ?? '';
-      const messageId = messageRoot.getAttribute('data-message-id');
-      const turnId = messageRoot.getAttribute('data-testid');
-      if (text.trim()) {
-        return { text, html, messageId, turnId, turnIndex: index };
+      const messageId =
+        messageRoot.getAttribute('data-message-id') ||
+        turn.getAttribute('data-message-id');
+      const turnId = messageRoot.getAttribute('data-testid') || turn.getAttribute('data-testid');
+      const fileIdFor = (src) => {
+        try {
+          const url = new URL(src, location.href);
+          const id = (url.searchParams.get('id') || '').trim();
+          if (/^file_[A-Za-z0-9]+$/.test(id) && url.pathname.includes('/backend-api/estuary/')) {
+            return id;
+          }
+          const pathMatch = url.pathname.match(/\\/(file_[A-Za-z0-9]+)(?:\\/|$)/);
+          if (pathMatch && url.pathname.includes('/backend-api/estuary/')) {
+            return pathMatch[1];
+          }
+          return null;
+        } catch {
+          return null;
+        }
+      };
+      const generatedImageFileIds = Array.from(new Set(
+        Array.from(turn.querySelectorAll('img'))
+          .map((img) => fileIdFor(img.currentSrc || img.src || ''))
+          .filter(Boolean)
+      ));
+      if (text.trim() || generatedImageFileIds.length > 0) {
+        return { text, html, messageId, turnId, turnIndex: index, generatedImageFileIds };
       }
     }
     return null;
@@ -1176,6 +1276,7 @@ interface AssistantSnapshot {
   messageId?: string | null;
   turnId?: string | null;
   turnIndex?: number | null;
+  generatedImageFileIds?: string[];
 }
 
 const LANGUAGE_TAGS = new Set(

@@ -39,7 +39,8 @@ import {
   readAssistantSnapshot,
 } from "./pageActions.js";
 import { INPUT_SELECTORS } from "./constants.js";
-import { ensureThinkingTime } from "./actions/thinkingTime.js";
+import { ensureThinkingTimeIfAvailable } from "./actions/thinkingTime.js";
+import type { ThinkingTimeSelectionResult } from "./actions/thinkingTime.js";
 import { estimateTokenCount, withRetries, delay } from "./utils.js";
 import { formatElapsed } from "../oracle/format.js";
 import { CHATGPT_URL, CONVERSATION_TURN_SELECTOR, DEFAULT_MODEL_STRATEGY } from "./constants.js";
@@ -151,7 +152,9 @@ async function uploadBrowserAttachmentsWithRetry(
 }
 
 function shouldRetryAttachmentUploadError(message: string): boolean {
-  if (/too many files|too large|exceeds?|unsupported file|aggregate limit|image limit/i.test(message)) {
+  if (
+    /too many files|too large|exceeds?|unsupported file|aggregate limit|image limit/i.test(message)
+  ) {
     return false;
   }
   return /upload failed|failed to upload|couldn.?t upload|could not upload|try again|did not finish uploading|timeout|timed out|transfer/i.test(
@@ -228,7 +231,9 @@ async function collectPostTurnSandboxArtifacts(
       outputDir,
     );
     if (downloadedSandboxArtifacts.length === 0) {
-      warnings.push("Assistant response exposed sandbox artifact labels, but no downloadable files resolved.");
+      warnings.push(
+        "Assistant response exposed sandbox artifact labels, but no downloadable files resolved.",
+      );
     } else {
       logger(
         `Downloaded ${downloadedSandboxArtifacts.length} sandbox artifact${downloadedSandboxArtifacts.length === 1 ? "" : "s"}`,
@@ -401,6 +406,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
   let removeDialogHandler: (() => void) | null = null;
   let appliedCookies = 0;
   let preserveBrowserOnError = false;
+  let thinkingTimeSelection: ThinkingTimeSelectionResult | undefined;
 
   try {
     try {
@@ -651,8 +657,8 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     // Handle thinking time selection if specified
     const thinkingTime = config.thinkingTime;
     if (thinkingTime) {
-      await raceWithDisconnect(
-        withRetries(() => ensureThinkingTime(Runtime, thinkingTime, logger), {
+      thinkingTimeSelection = await raceWithDisconnect(
+        withRetries(() => ensureThinkingTimeIfAvailable(Runtime, thinkingTime, logger), {
           retries: 2,
           delayMs: 300,
           onRetry: (attempt, error) => {
@@ -664,6 +670,11 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
           },
         }),
       );
+      if (thinkingTimeSelection.fallbackUsed && config.thinkingFallback === "fail") {
+        throw new Error(
+          `Unable to set requested thinking time ${thinkingTime}: ${thinkingTimeSelection.reason ?? thinkingTimeSelection.status}`,
+        );
+      }
     }
     const profileLockTimeoutMs = manualLogin ? (config.profileLockTimeoutMs ?? 0) : 0;
     let profileLock: ProfileRunLock | null = null;
@@ -776,8 +787,9 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
 
     let baselineTurns: number | null = null;
     let baselineAssistantText: string | null = null;
-    let baselineSandboxArtifacts: Awaited<ReturnType<typeof extractSandboxArtifactRefsFromRuntime>> =
-      [];
+    let baselineSandboxArtifacts: Awaited<
+      ReturnType<typeof extractSandboxArtifactRefsFromRuntime>
+    > = [];
     await acquireProfileLockIfNeeded();
     try {
       try {
@@ -1136,6 +1148,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       sandboxArtifacts: sandboxArtifactResult.sandboxArtifacts,
       newSandboxArtifacts: sandboxArtifactResult.newSandboxArtifacts,
       downloadedSandboxArtifacts: sandboxArtifactResult.downloadedSandboxArtifacts,
+      thinkingTimeSelection,
       warnings: sandboxArtifactResult.warnings,
     };
   } catch (error) {
@@ -1499,6 +1512,7 @@ async function runRemoteBrowserMode(
   let connectionClosedUnexpectedly = false;
   let stopThinkingMonitor: (() => void) | null = null;
   let removeDialogHandler: (() => void) | null = null;
+  let thinkingTimeSelection: ThinkingTimeSelectionResult | undefined;
 
   try {
     const connection = await connectToRemoteChrome(host, port, logger, config.url, {
@@ -1569,17 +1583,25 @@ async function runRemoteBrowserMode(
     // Handle thinking time selection if specified
     const thinkingTime = config.thinkingTime;
     if (thinkingTime) {
-      await withRetries(() => ensureThinkingTime(Runtime, thinkingTime, logger), {
-        retries: 2,
-        delayMs: 300,
-        onRetry: (attempt, error) => {
-          if (options.verbose) {
-            logger(
-              `[retry] Thinking time (${thinkingTime}) attempt ${attempt + 1}: ${error instanceof Error ? error.message : error}`,
-            );
-          }
+      thinkingTimeSelection = await withRetries(
+        () => ensureThinkingTimeIfAvailable(Runtime, thinkingTime, logger),
+        {
+          retries: 2,
+          delayMs: 300,
+          onRetry: (attempt, error) => {
+            if (options.verbose) {
+              logger(
+                `[retry] Thinking time (${thinkingTime}) attempt ${attempt + 1}: ${error instanceof Error ? error.message : error}`,
+              );
+            }
+          },
         },
-      });
+      );
+      if (thinkingTimeSelection.fallbackUsed && config.thinkingFallback === "fail") {
+        throw new Error(
+          `Unable to set requested thinking time ${thinkingTime}: ${thinkingTimeSelection.reason ?? thinkingTimeSelection.status}`,
+        );
+      }
     }
 
     const submitOnce = async (prompt: string, submissionAttachments: BrowserAttachment[]) => {
@@ -1675,8 +1697,9 @@ async function runRemoteBrowserMode(
 
     let baselineTurns: number | null = null;
     let baselineAssistantText: string | null = null;
-    let baselineSandboxArtifacts: Awaited<ReturnType<typeof extractSandboxArtifactRefsFromRuntime>> =
-      [];
+    let baselineSandboxArtifacts: Awaited<
+      ReturnType<typeof extractSandboxArtifactRefsFromRuntime>
+    > = [];
     try {
       const submission = await submitOnce(promptText, attachments);
       baselineTurns = submission.baselineTurns;
@@ -1899,79 +1922,79 @@ async function runRemoteBrowserMode(
           }),
         ]);
 
-    answerMarkdown = copiedMarkdown ?? answerText;
-    ({ answerText, answerMarkdown } = await maybeRecoverLongAssistantResponse({
-      runtime: Runtime,
-      baselineTurns,
-      answerText,
-      answerMarkdown,
-      logger,
-      allowMarkdownUpdate: !copiedMarkdown,
-    }));
+      answerMarkdown = copiedMarkdown ?? answerText;
+      ({ answerText, answerMarkdown } = await maybeRecoverLongAssistantResponse({
+        runtime: Runtime,
+        baselineTurns,
+        answerText,
+        answerMarkdown,
+        logger,
+        allowMarkdownUpdate: !copiedMarkdown,
+      }));
 
-    // Final sanity check: ensure we didn't accidentally capture the user prompt instead of the assistant turn.
-    const finalSnapshot = await readSettledAssistantSnapshot(
-      Runtime,
-      baselineTurns ?? undefined,
-      5_000,
-    ).catch(() => null);
-    const finalText = typeof finalSnapshot?.text === "string" ? finalSnapshot.text.trim() : "";
-    if (
-      finalText &&
-      finalText !== answerMarkdown.trim() &&
-      finalText !== promptText.trim() &&
-      finalText.length >= answerMarkdown.trim().length
-    ) {
-      logger("Refreshed assistant response via final DOM snapshot");
-      answerText = finalText;
-      answerMarkdown = finalText;
-    }
+      // Final sanity check: ensure we didn't accidentally capture the user prompt instead of the assistant turn.
+      const finalSnapshot = await readSettledAssistantSnapshot(
+        Runtime,
+        baselineTurns ?? undefined,
+        5_000,
+      ).catch(() => null);
+      const finalText = typeof finalSnapshot?.text === "string" ? finalSnapshot.text.trim() : "";
+      if (
+        finalText &&
+        finalText !== answerMarkdown.trim() &&
+        finalText !== promptText.trim() &&
+        finalText.length >= answerMarkdown.trim().length
+      ) {
+        logger("Refreshed assistant response via final DOM snapshot");
+        answerText = finalText;
+        answerMarkdown = finalText;
+      }
 
-    // Detect prompt echo using normalized comparison (whitespace-insensitive).
-    const promptEchoMatcher = buildPromptEchoMatcher(promptText);
-    const alignedEcho = alignPromptEchoPair(
-      answerText,
-      answerMarkdown,
-      promptEchoMatcher,
-      copiedMarkdown ? logger : undefined,
-      {
-        text: "Aligned assistant response text to copied markdown after prompt echo",
-        markdown: "Aligned assistant markdown to response text after prompt echo",
-      },
-    );
-    answerText = alignedEcho.answerText;
-    answerMarkdown = alignedEcho.answerMarkdown;
-    const isPromptEcho = alignedEcho.isEcho;
-    if (isPromptEcho) {
-      logger("Detected prompt echo in response; waiting for actual assistant response...");
-      const deadline = Date.now() + 15_000;
-      let bestText: string | null = null;
-      let stableCount = 0;
-      while (Date.now() < deadline) {
-        const snapshot = await readAssistantSnapshot(Runtime, baselineTurns ?? undefined).catch(
-          () => null,
-        );
-        const text = typeof snapshot?.text === "string" ? snapshot.text.trim() : "";
-        const isStillEcho = !text || Boolean(promptEchoMatcher?.isEcho(text));
-        if (!isStillEcho) {
-          if (!bestText || text.length > bestText.length) {
-            bestText = text;
-            stableCount = 0;
-          } else if (text === bestText) {
-            stableCount += 1;
+      // Detect prompt echo using normalized comparison (whitespace-insensitive).
+      const promptEchoMatcher = buildPromptEchoMatcher(promptText);
+      const alignedEcho = alignPromptEchoPair(
+        answerText,
+        answerMarkdown,
+        promptEchoMatcher,
+        copiedMarkdown ? logger : undefined,
+        {
+          text: "Aligned assistant response text to copied markdown after prompt echo",
+          markdown: "Aligned assistant markdown to response text after prompt echo",
+        },
+      );
+      answerText = alignedEcho.answerText;
+      answerMarkdown = alignedEcho.answerMarkdown;
+      const isPromptEcho = alignedEcho.isEcho;
+      if (isPromptEcho) {
+        logger("Detected prompt echo in response; waiting for actual assistant response...");
+        const deadline = Date.now() + 15_000;
+        let bestText: string | null = null;
+        let stableCount = 0;
+        while (Date.now() < deadline) {
+          const snapshot = await readAssistantSnapshot(Runtime, baselineTurns ?? undefined).catch(
+            () => null,
+          );
+          const text = typeof snapshot?.text === "string" ? snapshot.text.trim() : "";
+          const isStillEcho = !text || Boolean(promptEchoMatcher?.isEcho(text));
+          if (!isStillEcho) {
+            if (!bestText || text.length > bestText.length) {
+              bestText = text;
+              stableCount = 0;
+            } else if (text === bestText) {
+              stableCount += 1;
+            }
+            if (stableCount >= 2) {
+              break;
+            }
           }
-          if (stableCount >= 2) {
-            break;
-          }
+          await new Promise((resolve) => setTimeout(resolve, 300));
         }
-        await new Promise((resolve) => setTimeout(resolve, 300));
+        if (bestText) {
+          logger("Recovered assistant response after detecting prompt echo");
+          answerText = bestText;
+          answerMarkdown = bestText;
+        }
       }
-      if (bestText) {
-        logger("Recovered assistant response after detecting prompt echo");
-        answerText = bestText;
-        answerMarkdown = bestText;
-      }
-    }
     stopThinkingMonitor?.();
 
     const durationMs = Date.now() - startedAt;
@@ -2000,6 +2023,7 @@ async function runRemoteBrowserMode(
       sandboxArtifacts: sandboxArtifactResult.sandboxArtifacts,
       newSandboxArtifacts: sandboxArtifactResult.newSandboxArtifacts,
       downloadedSandboxArtifacts: sandboxArtifactResult.downloadedSandboxArtifacts,
+      thinkingTimeSelection,
       warnings: sandboxArtifactResult.warnings,
     };
   } catch (error) {

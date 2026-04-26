@@ -95,7 +95,9 @@ describe("ChatGPT project extraction", () => {
       },
     });
 
-    const conversations = Function(`return ${__test__.buildConversationListExpression()}`)() as Array<{
+    const conversations = Function(
+      `return ${__test__.buildConversationListExpression()}`,
+    )() as Array<{
       conversationId: string;
       projectId?: string;
       title: string;

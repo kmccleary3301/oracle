@@ -60,7 +60,11 @@ export function applyBrowserDefaultsFromConfig(
   if (isUnset("browserCookiePath") && browser.chromeCookiePath !== undefined) {
     options.browserCookiePath = browser.chromeCookiePath ?? undefined;
   }
-  if (isUnset("remoteChrome") && browser.remoteChrome !== undefined && browser.remoteChrome !== null) {
+  if (
+    isUnset("remoteChrome") &&
+    browser.remoteChrome !== undefined &&
+    browser.remoteChrome !== null
+  ) {
     options.remoteChrome = `${browser.remoteChrome.host}:${browser.remoteChrome.port}`;
   }
   if (isUnset("browserUrl") && options.browserUrl === undefined && browser.url !== undefined) {

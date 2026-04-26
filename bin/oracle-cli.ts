@@ -819,6 +819,330 @@ bridgeCommand
     await runBridgeDoctor(commandOptions);
   });
 
+const daemonCommand = program
+  .command("daemon")
+  .description("Run and inspect the durable Oracle async job daemon.");
+
+daemonCommand
+  .command("start")
+  .description("Start the Oracle async job daemon.")
+  .option("--host <address>", "Interface to bind.")
+  .option("--port <number>", "Port to listen on.", parseIntOption)
+  .option("--token <value>", "Access token clients must provide.")
+  .option("--job-dir <dir>", "Directory for durable job records.")
+  .option("--connection-path <path>", "Path for the daemon connection artifact.")
+  .option("--max-concurrent-jobs <number>", "Maximum concurrent jobs.", parseIntOption)
+  .option("--background", "Start in the background and return immediately.", false)
+  .option("--foreground", "Run in the foreground.", false)
+  .option("--json", "Print structured JSON.", false)
+  .action(async (commandOptions) => {
+    const { resolveOracleDaemonConfig } = await import("../src/daemon/config.js");
+    const resolved = await resolveOracleDaemonConfig();
+    const host = commandOptions.host ?? resolved.host;
+    const port = commandOptions.port ?? resolved.port;
+    const token = commandOptions.token ?? resolved.token ?? "auto";
+    const jobDir = commandOptions.jobDir ?? resolved.jobDir;
+    const connectionPath = commandOptions.connectionPath ?? resolved.connectionPath;
+    const requestedBackground =
+      commandOptions.background === true || process.argv.includes("--background");
+    const requestedForeground =
+      commandOptions.foreground === true || process.argv.includes("--foreground");
+    if (requestedBackground && !requestedForeground) {
+      const args = [
+        fileURLToPath(import.meta.url),
+        "daemon",
+        "start",
+        "--foreground",
+        "--host",
+        host,
+        "--port",
+        String(port),
+        "--job-dir",
+        jobDir,
+        "--connection-path",
+        connectionPath,
+      ];
+      if (token !== "auto") args.push("--token", token);
+      if (commandOptions.maxConcurrentJobs) {
+        args.push("--max-concurrent-jobs", String(commandOptions.maxConcurrentJobs));
+      }
+      const child = spawn(process.execPath, args, {
+        detached: true,
+        stdio: "ignore",
+      });
+      child.unref();
+      const payload = { started: true, background: true, pid: child.pid, connectionPath };
+      if (commandOptions.json) {
+        console.log(JSON.stringify(payload, null, 2));
+      } else {
+        console.log(`Started Oracle daemon in background (pid ${child.pid}).`);
+        console.log(`Connection: ${connectionPath}`);
+      }
+      return;
+    }
+    const { createOracleDaemonServer } = await import("../src/daemon/server.js");
+    const server = await createOracleDaemonServer({
+      host,
+      port,
+      token: token === "auto" ? undefined : token,
+      jobDir,
+      connectionPath,
+      maxConcurrentJobs: commandOptions.maxConcurrentJobs ?? resolved.maxConcurrentJobs,
+      logger: (message) => {
+        if (!commandOptions.json) console.error(chalk.dim(message));
+      },
+    });
+    const payload = {
+      started: true,
+      background: false,
+      host,
+      port: server.port,
+      token: server.token,
+      jobDir: server.jobDir,
+      connectionPath,
+    };
+    if (commandOptions.json) {
+      console.log(JSON.stringify(payload, null, 2));
+    } else {
+      console.log(`Oracle daemon listening at ${host}:${server.port}`);
+      console.log(`Connection: ${connectionPath}`);
+    }
+    await new Promise<void>((resolve) => {
+      const shutdown = () => {
+        server.close().finally(() => resolve());
+      };
+      process.on("SIGINT", shutdown);
+      process.on("SIGTERM", shutdown);
+    });
+  });
+
+daemonCommand
+  .command("status")
+  .description("Check the configured Oracle async job daemon.")
+  .option("--connection-path <path>", "Path for the daemon connection artifact.")
+  .option("--json", "Print structured JSON.", false)
+  .action(async (commandOptions) => {
+    const client = await resolveDaemonCliClient(commandOptions.connectionPath);
+    const status = await client.status();
+    if (commandOptions.json) {
+      console.log(JSON.stringify(status, null, 2));
+      return;
+    }
+    console.log(JSON.stringify(status, null, 2));
+  });
+
+daemonCommand
+  .command("stop")
+  .description("Stop the configured Oracle async job daemon.")
+  .option("--connection-path <path>", "Path for the daemon connection artifact.")
+  .option("--json", "Print structured JSON.", false)
+  .action(async (commandOptions) => {
+    const client = await resolveDaemonCliClient(commandOptions.connectionPath);
+    const result = await client.stopDaemon();
+    if (commandOptions.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log("Oracle daemon stop requested.");
+  });
+
+const jobCommand = program
+  .command("job")
+  .description("Submit and inspect durable Oracle async jobs.");
+
+jobCommand
+  .command("start <kind>")
+  .description("Submit a durable Oracle async job.")
+  .option("--input-json <json>", "Raw job input JSON.")
+  .option("--prompt <text>", "Prompt text for ChatGPT jobs.")
+  .option("--turn-message <text>", "Alias for --prompt.")
+  .option("--conversation-url <url>", "Conversation URL for turn/extraction jobs.")
+  .option("--project-url <url>", "Project URL for new ChatGPT session jobs.")
+  .option("-f, --file <paths...>", "Files, directories, or globs to attach.", collectPaths, [])
+  .option("-o, --output-dir <dir>", "Output directory for artifacts.")
+  .option("--no-download", "Only report artifact references; do not download bytes.")
+  .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
+  .option("--timeout <ms|s|m|h>", "Job timeout.", (value) =>
+    parseDurationOption(value, "Job timeout"),
+  )
+  .option("--browser-model-strategy <mode>", "Model picker strategy.", "current")
+  .option("--browser-model-label <label>", "Exact/fuzzy ChatGPT model picker label to use.")
+  .option("--browser-thinking-time <level>", "Thinking time intensity.")
+  .option("--thinking-fallback <mode>", "Thinking selector fallback policy (allow|fail).", "allow")
+  .option("--artifact-types <types>", "Comma-separated recovery/extraction types (images,sandbox).")
+  .option("--connection-path <path>", "Path for the daemon connection artifact.")
+  .option("--json", "Print structured JSON.", false)
+  .action(async (kind: string, commandOptions, command: Command) => {
+    const client = await resolveDaemonCliClient(commandOptions.connectionPath);
+    const input = commandOptions.inputJson
+      ? JSON.parse(commandOptions.inputJson)
+      : {
+          prompt:
+            commandOptions.prompt ??
+            commandOptions.turnMessage ??
+            readCliOptionValue("--prompt") ??
+            readCliOptionValue("--turn-message"),
+          conversationUrl: commandOptions.conversationUrl,
+          projectUrl: commandOptions.projectUrl,
+          files: resolveCommandFileInputs(commandOptions, command),
+          outputDir: commandOptions.outputDir,
+          download: commandOptions.download,
+          remoteChrome: commandOptions.remoteChrome,
+          timeoutMs: commandOptions.timeout,
+          browserModelStrategy: commandOptions.browserModelStrategy,
+          browserModelLabel: commandOptions.browserModelLabel,
+          browserThinkingTime: commandOptions.browserThinkingTime,
+          thinkingFallback: commandOptions.thinkingFallback,
+          artifactTypes: parseArtifactTypesOption(commandOptions.artifactTypes),
+        };
+    const result = await client.startJob({ kind: kind as never, input });
+    if (commandOptions.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log(`Started ${result.kind} job ${result.jobId} (${result.status}).`);
+  });
+
+jobCommand
+  .command("status <jobId>")
+  .description("Check a durable Oracle async job.")
+  .option("--connection-path <path>", "Path for the daemon connection artifact.")
+  .option("--json", "Print structured JSON.", false)
+  .action(async (jobId: string, commandOptions) => {
+    const result = await (
+      await resolveDaemonCliClient(commandOptions.connectionPath)
+    ).jobStatus(jobId);
+    console.log(
+      commandOptions.json ? JSON.stringify(result, null, 2) : JSON.stringify(result, null, 2),
+    );
+  });
+
+jobCommand
+  .command("events <jobId>")
+  .description("Read durable Oracle async job events.")
+  .option("--after <seq>", "Only return events after this sequence number.", parseIntOption)
+  .option("--connection-path <path>", "Path for the daemon connection artifact.")
+  .option("--json", "Print structured JSON.", false)
+  .action(async (jobId: string, commandOptions) => {
+    const result = await (
+      await resolveDaemonCliClient(commandOptions.connectionPath)
+    ).jobEvents(jobId, commandOptions.after);
+    console.log(
+      commandOptions.json ? JSON.stringify(result, null, 2) : JSON.stringify(result, null, 2),
+    );
+  });
+
+jobCommand
+  .command("tail <jobId>")
+  .description("Print durable Oracle async job events.")
+  .option("--after <seq>", "Only return events after this sequence number.", parseIntOption)
+  .option("--connection-path <path>", "Path for the daemon connection artifact.")
+  .option("--json", "Print structured JSON.", false)
+  .action(async (jobId: string, commandOptions) => {
+    const result = (await (
+      await resolveDaemonCliClient(commandOptions.connectionPath)
+    ).jobEvents(jobId, commandOptions.after)) as {
+      events?: Array<{ seq?: number; message?: string }>;
+    };
+    if (commandOptions.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    for (const event of result.events ?? []) {
+      console.log(`${event.seq ?? ""} ${event.message ?? ""}`.trim());
+    }
+  });
+
+jobCommand
+  .command("result <jobId>")
+  .description("Read a durable Oracle async job result.")
+  .option("--connection-path <path>", "Path for the daemon connection artifact.")
+  .option("--json", "Print structured JSON.", false)
+  .action(async (jobId: string, commandOptions) => {
+    const result = await (
+      await resolveDaemonCliClient(commandOptions.connectionPath)
+    ).jobResult(jobId);
+    console.log(
+      commandOptions.json ? JSON.stringify(result, null, 2) : JSON.stringify(result, null, 2),
+    );
+  });
+
+jobCommand
+  .command("cancel <jobId>")
+  .description("Cancel a durable Oracle async job.")
+  .option("--connection-path <path>", "Path for the daemon connection artifact.")
+  .option("--json", "Print structured JSON.", false)
+  .action(async (jobId: string, commandOptions) => {
+    const result = await (
+      await resolveDaemonCliClient(commandOptions.connectionPath)
+    ).cancelJob(jobId);
+    console.log(
+      commandOptions.json ? JSON.stringify(result, null, 2) : JSON.stringify(result, null, 2),
+    );
+  });
+
+jobCommand
+  .command("recover <jobId>")
+  .description("Recover artifacts for a stale durable Oracle async job.")
+  .option("--conversation-url <url>", "Explicit ChatGPT conversation URL to recover from.")
+  .option("-o, --output-dir <dir>", "Output directory for recovered artifacts.")
+  .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
+  .option("--artifact-types <types>", "Comma-separated types: images,sandbox.", "images,sandbox")
+  .option("--no-download", "Only report artifact references; do not download bytes.")
+  .option("--keep-tab", "Leave the opened recovery tab alive.", false)
+  .option("--timeout <ms|s|m|h>", "Recovery extraction timeout.", (value) =>
+    parseDurationOption(value, "Job recovery timeout"),
+  )
+  .option("--connection-path <path>", "Path for the daemon connection artifact.")
+  .option("--json", "Print structured JSON.", false)
+  .action(async (jobId: string, commandOptions) => {
+    const result = await (
+      await resolveDaemonCliClient(commandOptions.connectionPath)
+    ).recoverJob(jobId, {
+      conversationUrl: commandOptions.conversationUrl,
+      outputDir: commandOptions.outputDir,
+      remoteChrome: commandOptions.remoteChrome,
+      artifactTypes: parseArtifactTypesOption(commandOptions.artifactTypes),
+      download: commandOptions.download,
+      keepTab: commandOptions.keepTab,
+      timeoutMs: commandOptions.timeout,
+    });
+    console.log(
+      commandOptions.json ? JSON.stringify(result, null, 2) : JSON.stringify(result, null, 2),
+    );
+  });
+
+jobCommand
+  .command("list")
+  .alias("ls")
+  .description("List durable Oracle async jobs.")
+  .option("--limit <number>", "Maximum jobs to return.", parseIntOption)
+  .option("--connection-path <path>", "Path for the daemon connection artifact.")
+  .option("--json", "Print structured JSON.", false)
+  .action(async (commandOptions) => {
+    const result = await (
+      await resolveDaemonCliClient(commandOptions.connectionPath)
+    ).listJobs(commandOptions.limit);
+    console.log(
+      commandOptions.json ? JSON.stringify(result, null, 2) : JSON.stringify(result, null, 2),
+    );
+  });
+
+program
+  .command("jobs")
+  .description("List durable Oracle async jobs.")
+  .option("--limit <number>", "Maximum jobs to return.", parseIntOption)
+  .option("--connection-path <path>", "Path for the daemon connection artifact.")
+  .option("--json", "Print structured JSON.", false)
+  .action(async (commandOptions) => {
+    const result = await (
+      await resolveDaemonCliClient(commandOptions.connectionPath)
+    ).listJobs(commandOptions.limit);
+    console.log(
+      commandOptions.json ? JSON.stringify(result, null, 2) : JSON.stringify(result, null, 2),
+    );
+  });
+
 bridgeCommand
   .command("codex-config")
   .description("Print a Codex CLI MCP server config snippet for oracle-mcp.")
@@ -845,9 +1169,7 @@ program
     await launchTui({ version: VERSION, printIntro: false });
   });
 
-const imageCommand = program
-  .command("image")
-  .description("ChatGPT browser image utilities.");
+const imageCommand = program.command("image").description("ChatGPT browser image utilities.");
 
 const DEFAULT_CHATGPT_IMAGE_TURN_TIMEOUT_MS = 30 * 60_000;
 
@@ -920,6 +1242,9 @@ imageCommand
   .option("--timeout <ms|s|m|h>", "Generation timeout.", (value) =>
     parseDurationOption(value, "Image generation timeout"),
   )
+  .option("--extraction-timeout <ms|s|m|h>", "Post-turn artifact extraction timeout.", (value) =>
+    parseDurationOption(value, "Image extraction timeout"),
+  )
   .option(
     "--browser-model-strategy <mode>",
     "Model picker strategy for this generation.",
@@ -929,6 +1254,12 @@ imageCommand
   .option(
     "--browser-thinking-time <level>",
     "Thinking time intensity for image generation: light, standard, extended, heavy.",
+  )
+  .option("--thinking-fallback <mode>", "Thinking selector fallback policy (allow|fail).", "allow")
+  .option(
+    "--artifact-types <types>",
+    "Comma-separated extraction types (images,sandbox).",
+    "images,sandbox",
   )
   .option("--no-download", "Only report generated image references; do not download bytes.")
   .option("--json", "Print structured JSON.", false)
@@ -952,27 +1283,61 @@ imageCommand
         modelStrategy: commandOptions.browserModelStrategy,
         desiredModel: commandOptions.browserModelLabel ?? config.desiredModel,
         thinkingTime: commandOptions.browserThinkingTime ?? config.thinkingTime,
+        thinkingFallback: commandOptions.thinkingFallback ?? config.thinkingFallback,
       },
       log: (message) => {
         if (!commandOptions.json) console.log(chalk.dim(message));
       },
     });
+    const extractionWarnings: string[] = [];
+    const artifactTypes = parseArtifactTypesOption(commandOptions.artifactTypes) ?? [
+      "images",
+      "sandbox",
+    ];
+    const extractionTimeoutMs =
+      commandOptions.extractionTimeout ??
+      Math.min(commandOptions.timeout ?? DEFAULT_CHATGPT_IMAGE_TURN_TIMEOUT_MS, 60_000);
     const extraction =
-      generation.conversationUrl && generation.newGeneratedImages?.length
+      generation.conversationUrl && artifactTypes.includes("images")
         ? await extractChatgptImagesFromConfiguredBrowser({
             conversationUrl: generation.conversationUrl,
             outputDir: commandOptions.outputDir,
             download: commandOptions.download,
-            timeoutMs: Math.min(
-              commandOptions.timeout ?? DEFAULT_CHATGPT_IMAGE_TURN_TIMEOUT_MS,
-              60_000,
-            ),
+            timeoutMs: extractionTimeoutMs,
             config,
             log: (message) => {
               if (!commandOptions.json) console.log(chalk.dim(message));
             },
+          }).catch((error: unknown) => {
+            extractionWarnings.push(
+              `Post-generation image extraction failed: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            return undefined;
           })
         : undefined;
+    const sandboxExtraction =
+      generation.conversationUrl && artifactTypes.includes("sandbox")
+        ? await extractChatgptSandboxArtifactsFromConfiguredBrowser({
+            conversationUrl: generation.conversationUrl,
+            outputDir: commandOptions.outputDir,
+            download: commandOptions.download,
+            timeoutMs: extractionTimeoutMs,
+            config,
+            log: (message) => {
+              if (!commandOptions.json) console.log(chalk.dim(message));
+            },
+          }).catch((error: unknown) => {
+            extractionWarnings.push(
+              `Post-generation sandbox artifact extraction failed: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            return undefined;
+          })
+        : undefined;
+    const detectedImageCount = Math.max(
+      extraction?.images.length ?? 0,
+      generation.newGeneratedImages?.length ?? 0,
+      generation.generatedImages?.length ?? 0,
+    );
     const result = {
       generation,
       extraction: extraction
@@ -986,12 +1351,25 @@ imageCommand
             warnings: extraction.warnings,
           }
         : undefined,
-      warnings:
-        generation.newGeneratedImages?.length || generation.generatedImages?.length
+      sandboxExtraction: sandboxExtraction
+        ? {
+            conversationUrl: sandboxExtraction.page.href,
+            outputDir: sandboxExtraction.outputDir,
+            sandboxArtifacts: sandboxExtraction.sandboxArtifacts,
+            downloadedArtifacts: sandboxExtraction.downloadedArtifacts,
+            warnings: sandboxExtraction.warnings,
+          }
+        : undefined,
+      warnings: [
+        ...extractionWarnings,
+        ...(extraction?.warnings ?? []),
+        ...(sandboxExtraction?.warnings ?? []),
+        ...(detectedImageCount > 0
           ? []
           : [
               "No generated image artifacts were detected in the completed turn. Ensure the current ChatGPT mode is the image model before relying on this command.",
-            ],
+            ]),
+      ],
     };
     if (commandOptions.json) {
       console.log(JSON.stringify(result, null, 2));
@@ -1005,6 +1383,12 @@ imageCommand
         console.log(`- ${artifact.downloadedPath}`);
       }
     }
+    if (sandboxExtraction?.downloadedArtifacts.length) {
+      console.log(`Downloaded sandbox artifacts: ${sandboxExtraction.downloadedArtifacts.length}`);
+      for (const artifact of sandboxExtraction.downloadedArtifacts) {
+        console.log(`- ${artifact.downloadedPath}`);
+      }
+    }
     for (const warning of result.warnings) {
       console.log(chalk.yellow(`Warning: ${warning}`));
     }
@@ -1012,24 +1396,36 @@ imageCommand
 
 imageCommand
   .command("edit")
-  .description("Send an image-editing prompt with local image/reference attachments through ChatGPT browser mode.")
+  .description(
+    "Send an image-editing prompt with local image/reference attachments through ChatGPT browser mode.",
+  )
   .requiredOption("--turn-message <text>", "Image editing prompt text to send.")
-  .requiredOption("-f, --file <paths...>", "Image files, zips, directories, or globs to attach.", collectPaths, [])
+  .requiredOption(
+    "-f, --file <paths...>",
+    "Image files, zips, directories, or globs to attach.",
+    collectPaths,
+    [],
+  )
   .option("-o, --output-dir <dir>", "Directory for downloaded generated images and JSON sidecars.")
   .option("--project-url <url>", "Start from a ChatGPT project URL.")
   .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
   .option("--timeout <ms|s|m|h>", "Edit timeout.", (value) =>
     parseDurationOption(value, "Image edit timeout"),
   )
-  .option(
-    "--browser-model-strategy <mode>",
-    "Model picker strategy for this edit.",
-    "current",
+  .option("--extraction-timeout <ms|s|m|h>", "Post-turn artifact extraction timeout.", (value) =>
+    parseDurationOption(value, "Image extraction timeout"),
   )
+  .option("--browser-model-strategy <mode>", "Model picker strategy for this edit.", "current")
   .option("--browser-model-label <label>", "Exact/fuzzy ChatGPT model picker label to use.")
   .option(
     "--browser-thinking-time <level>",
     "Thinking time intensity for image editing: light, standard, extended, heavy.",
+  )
+  .option("--thinking-fallback <mode>", "Thinking selector fallback policy (allow|fail).", "allow")
+  .option(
+    "--artifact-types <types>",
+    "Comma-separated extraction types (images,sandbox).",
+    "images,sandbox",
   )
   .option("--no-download", "Only report generated image references; do not download bytes.")
   .option("--json", "Print structured JSON.", false)
@@ -1055,27 +1451,61 @@ imageCommand
         modelStrategy: commandOptions.browserModelStrategy,
         desiredModel: commandOptions.browserModelLabel ?? config.desiredModel,
         thinkingTime: commandOptions.browserThinkingTime ?? config.thinkingTime,
+        thinkingFallback: commandOptions.thinkingFallback ?? config.thinkingFallback,
       },
       log: (message) => {
         if (!commandOptions.json) console.log(chalk.dim(message));
       },
     });
+    const extractionWarnings: string[] = [];
+    const artifactTypes = parseArtifactTypesOption(commandOptions.artifactTypes) ?? [
+      "images",
+      "sandbox",
+    ];
+    const extractionTimeoutMs =
+      commandOptions.extractionTimeout ??
+      Math.min(commandOptions.timeout ?? DEFAULT_CHATGPT_IMAGE_TURN_TIMEOUT_MS, 60_000);
     const extraction =
-      generation.conversationUrl && generation.newGeneratedImages?.length
+      generation.conversationUrl && artifactTypes.includes("images")
         ? await extractChatgptImagesFromConfiguredBrowser({
             conversationUrl: generation.conversationUrl,
             outputDir: commandOptions.outputDir,
             download: commandOptions.download,
-            timeoutMs: Math.min(
-              commandOptions.timeout ?? DEFAULT_CHATGPT_IMAGE_TURN_TIMEOUT_MS,
-              60_000,
-            ),
+            timeoutMs: extractionTimeoutMs,
             config,
             log: (message) => {
               if (!commandOptions.json) console.log(chalk.dim(message));
             },
+          }).catch((error: unknown) => {
+            extractionWarnings.push(
+              `Post-generation image extraction failed: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            return undefined;
           })
         : undefined;
+    const sandboxExtraction =
+      generation.conversationUrl && artifactTypes.includes("sandbox")
+        ? await extractChatgptSandboxArtifactsFromConfiguredBrowser({
+            conversationUrl: generation.conversationUrl,
+            outputDir: commandOptions.outputDir,
+            download: commandOptions.download,
+            timeoutMs: extractionTimeoutMs,
+            config,
+            log: (message) => {
+              if (!commandOptions.json) console.log(chalk.dim(message));
+            },
+          }).catch((error: unknown) => {
+            extractionWarnings.push(
+              `Post-generation sandbox artifact extraction failed: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            return undefined;
+          })
+        : undefined;
+    const detectedImageCount = Math.max(
+      extraction?.images.length ?? 0,
+      generation.newGeneratedImages?.length ?? 0,
+      generation.generatedImages?.length ?? 0,
+    );
     const result = {
       generation,
       inputAttachments: attachments.map((attachment) => ({
@@ -1094,12 +1524,25 @@ imageCommand
             warnings: extraction.warnings,
           }
         : undefined,
-      warnings:
-        generation.newGeneratedImages?.length || generation.generatedImages?.length
+      sandboxExtraction: sandboxExtraction
+        ? {
+            conversationUrl: sandboxExtraction.page.href,
+            outputDir: sandboxExtraction.outputDir,
+            sandboxArtifacts: sandboxExtraction.sandboxArtifacts,
+            downloadedArtifacts: sandboxExtraction.downloadedArtifacts,
+            warnings: sandboxExtraction.warnings,
+          }
+        : undefined,
+      warnings: [
+        ...extractionWarnings,
+        ...(extraction?.warnings ?? []),
+        ...(sandboxExtraction?.warnings ?? []),
+        ...(detectedImageCount > 0
           ? []
           : [
               "No generated image artifacts were detected in the completed edit turn. Ensure the current ChatGPT mode is the image model before relying on this command.",
-            ],
+            ]),
+      ],
     };
     if (commandOptions.json) {
       console.log(JSON.stringify(result, null, 2));
@@ -1111,6 +1554,12 @@ imageCommand
     if (extraction?.artifacts.length) {
       console.log(`Downloaded artifacts: ${extraction.artifacts.length}`);
       for (const artifact of extraction.artifacts) {
+        console.log(`- ${artifact.downloadedPath}`);
+      }
+    }
+    if (sandboxExtraction?.downloadedArtifacts.length) {
+      console.log(`Downloaded sandbox artifacts: ${sandboxExtraction.downloadedArtifacts.length}`);
+      for (const artifact of sandboxExtraction.downloadedArtifacts) {
         console.log(`- ${artifact.downloadedPath}`);
       }
     }
@@ -1140,7 +1589,10 @@ browserCommand
   .option("--otp-attempts <count>", "Maximum interactive OTP attempts.", (value) =>
     parseIntOption(value),
   )
-  .option("--remote-chrome <host:port>", "Attach to an existing Chrome DevTools endpoint instead of launching a profile.")
+  .option(
+    "--remote-chrome <host:port>",
+    "Attach to an existing Chrome DevTools endpoint instead of launching a profile.",
+  )
   .option(
     "--manual-login-profile-dir <path>",
     "Profile directory to launch/reuse for persistent ChatGPT login.",
@@ -1155,8 +1607,7 @@ browserCommand
       (typeof rawCommandOptions?.opts === "function"
         ? rawCommandOptions.opts()
         : rawCommandOptions);
-    const remoteChromeOption =
-      commandOptions.remoteChrome ?? readCliOptionValue("--remote-chrome");
+    const remoteChromeOption = commandOptions.remoteChrome ?? readCliOptionValue("--remote-chrome");
     const baseConfig = await resolveChatgptCliBrowserConfig(remoteChromeOption);
     const previousRemoteDebugHost = process.env.ORACLE_BROWSER_REMOTE_DEBUG_HOST;
     if (!remoteChromeOption && baseConfig.remoteChrome?.host) {
@@ -1297,8 +1748,7 @@ browserCommand
       (typeof rawCommandOptions?.opts === "function"
         ? rawCommandOptions.opts()
         : rawCommandOptions);
-    const remoteChromeOption =
-      commandOptions.remoteChrome ?? readCliOptionValue("--remote-chrome");
+    const remoteChromeOption = commandOptions.remoteChrome ?? readCliOptionValue("--remote-chrome");
     const config = await resolveChatgptCliBrowserConfig(remoteChromeOption);
     const { runBrowserDoctor } = await import("../src/cli/browserDoctor.js");
     await runBrowserDoctor({
@@ -1307,16 +1757,22 @@ browserCommand
         ...config,
         remoteChrome: remoteChromeOption ? config.remoteChrome : null,
         manualLogin: !remoteChromeOption,
-        manualLoginProfileDir:
-          commandOptions.manualLoginProfileDir ?? config.manualLoginProfileDir,
+        manualLoginProfileDir: commandOptions.manualLoginProfileDir ?? config.manualLoginProfileDir,
       },
     });
   });
 
 browserCommand
   .command("probe-attachments")
-  .description("Upload attachments into the ChatGPT composer, verify readiness, then clear them without sending.")
-  .requiredOption("-f, --file <paths...>", "Files, directories, or globs to probe.", collectPaths, [])
+  .description(
+    "Upload attachments into the ChatGPT composer, verify readiness, then clear them without sending.",
+  )
+  .requiredOption(
+    "-f, --file <paths...>",
+    "Files, directories, or globs to probe.",
+    collectPaths,
+    [],
+  )
   .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
   .option("--timeout <ms|s|m|h>", "Probe timeout.", (value) =>
     parseDurationOption(value, "Attachment probe timeout"),
@@ -1387,6 +1843,73 @@ browserCommand
     console.log(`Composer: ${result.page.hasComposer ? "yes" : "no"}`);
     console.log(`Generated images: ${result.page.uniqueGeneratedImageCount}`);
   });
+
+const tabsCommand = program.command("tabs").description("Inspect and prune remote ChatGPT tabs.");
+
+tabsCommand
+  .command("list")
+  .description("List page targets on a Chrome DevTools endpoint.")
+  .option("--remote-chrome <host:port>", "Chrome DevTools endpoint.")
+  .option("--all", "Include non-ChatGPT page targets.", false)
+  .option("--json", "Print structured JSON.", false)
+  .action(async (commandOptions) => {
+    const { listRemoteChromePageTargets } = await import("../src/browser/remoteChromeTabs.js");
+    const remote = await resolveRemoteChromeForTabs(commandOptions.remoteChrome);
+    const targets = await listRemoteChromePageTargets(remote.host, remote.port, {
+      chatgptOnly: !commandOptions.all,
+    });
+    if (commandOptions.json) {
+      console.log(JSON.stringify({ targets }, null, 2));
+      return;
+    }
+    for (const target of targets) {
+      console.log(`${target.id}\t${target.url ?? ""}\t${target.title ?? ""}`);
+    }
+  });
+
+tabsCommand
+  .command("prune")
+  .description("Close excess ChatGPT/about:blank tabs on a Chrome DevTools endpoint.")
+  .option("--remote-chrome <host:port>", "Chrome DevTools endpoint.")
+  .option("--max-tabs <number>", "Maximum ChatGPT tabs to keep.", parseIntOption, 4)
+  .option("--reserve-slots <number>", "Slots to reserve for new work.", parseIntOption, 0)
+  .option("--include-non-chatgpt", "Allow pruning any page target.", false)
+  .option("--json", "Print structured JSON.", false)
+  .action(async (commandOptions) => {
+    const { pruneRemoteChromeTargets } = await import("../src/browser/remoteChromeTabs.js");
+    const remote = await resolveRemoteChromeForTabs(commandOptions.remoteChrome);
+    const result = await pruneRemoteChromeTargets(
+      remote.host,
+      remote.port,
+      (message) => {
+        if (!commandOptions.json) console.log(chalk.dim(message));
+      },
+      {
+        maxTabs: commandOptions.maxTabs,
+        reserveSlots: commandOptions.reserveSlots,
+        includeNonChatgpt: commandOptions.includeNonChatgpt,
+      },
+    );
+    console.log(
+      commandOptions.json ? JSON.stringify(result, null, 2) : JSON.stringify(result, null, 2),
+    );
+  });
+
+async function resolveRemoteChromeForTabs(
+  remoteChrome?: string,
+): Promise<{ host: string; port: number }> {
+  const remoteChromeOption = remoteChrome ?? readCliOptionValue("--remote-chrome");
+  if (remoteChromeOption) {
+    return parseChatgptRemoteChromeTarget(remoteChromeOption);
+  }
+  const config = await resolveChatgptCliBrowserConfig();
+  if (config.remoteChrome) {
+    return config.remoteChrome;
+  }
+  throw new Error(
+    "Remote Chrome configuration missing. Pass --remote-chrome <host:port> or configure browser.remoteChrome.",
+  );
+}
 
 const chatCommand = program.command("chat").description("ChatGPT browser conversation utilities.");
 
@@ -1550,11 +2073,7 @@ chatCommand
   .option("--timeout <ms|s|m|h>", "Turn timeout.", (value) =>
     parseDurationOption(value, "Chat turn timeout"),
   )
-  .option(
-    "--browser-model-strategy <mode>",
-    "Model picker strategy for this turn.",
-    "current",
-  )
+  .option("--browser-model-strategy <mode>", "Model picker strategy for this turn.", "current")
   .option("--browser-model-label <label>", "Exact/fuzzy ChatGPT model picker label to use.")
   .option("--include-snapshot", "Include the resulting conversation snapshot.", false)
   .option("--json", "Print structured JSON.", false)
@@ -1643,7 +2162,10 @@ chatCommand
 chatCommand
   .command("delete <conversationUrl>")
   .description("Delete a ChatGPT conversation after exact id confirmation.")
-  .requiredOption("--confirm <conversationId>", "Required exact ChatGPT conversation id from the URL.")
+  .requiredOption(
+    "--confirm <conversationId>",
+    "Required exact ChatGPT conversation id from the URL.",
+  )
   .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
   .option("--timeout <ms|s|m|h>", "Delete timeout.", (value) =>
     parseDurationOption(value, "Chat delete timeout"),
@@ -1683,7 +2205,10 @@ chatCommand
   .command("move <conversationUrl>")
   .description("Move a ChatGPT conversation into a project after exact id confirmation.")
   .requiredOption("--project-url <url>", "Target ChatGPT project URL.")
-  .requiredOption("--confirm <conversationId>", "Required exact ChatGPT conversation id from the URL.")
+  .requiredOption(
+    "--confirm <conversationId>",
+    "Required exact ChatGPT conversation id from the URL.",
+  )
   .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
   .option("--timeout <ms|s|m|h>", "Move timeout.", (value) =>
     parseDurationOption(value, "Chat move timeout"),
@@ -1974,7 +2499,9 @@ program
     await restartSession(sessionId, restartOptions);
   });
 
-async function resolveChatgptCliBrowserConfig(remoteChrome?: string): Promise<BrowserSessionConfig> {
+async function resolveChatgptCliBrowserConfig(
+  remoteChrome?: string,
+): Promise<BrowserSessionConfig> {
   const { config: userConfig } = await loadUserConfig();
   const cliBrowserConfig = remoteChrome
     ? await buildBrowserConfig({
@@ -1986,8 +2513,8 @@ async function resolveChatgptCliBrowserConfig(remoteChrome?: string): Promise<Br
     ...(userConfig.browser ?? {}),
     ...cliBrowserConfig,
     remoteChrome: remoteChrome
-      ? cliBrowserConfig.remoteChrome ?? parseChatgptRemoteChromeTarget(remoteChrome)
-      : cliBrowserConfig.remoteChrome ?? userConfig.browser?.remoteChrome ?? null,
+      ? (cliBrowserConfig.remoteChrome ?? parseChatgptRemoteChromeTarget(remoteChrome))
+      : (cliBrowserConfig.remoteChrome ?? userConfig.browser?.remoteChrome ?? null),
   };
 }
 
@@ -2011,7 +2538,9 @@ function normalizeCommandActionOptions<T extends OptionValues = OptionValues>(
 function parseChatgptRemoteChromeTarget(raw: string): { host: string; port: number } {
   const target = raw.trim();
   if (!target) {
-    throw new Error("Invalid remote-chrome value: expected host:port but received an empty string.");
+    throw new Error(
+      "Invalid remote-chrome value: expected host:port but received an empty string.",
+    );
   }
 
   const ipv6Match = target.match(/^\[(.+)]:(\d+)$/);
@@ -2039,6 +2568,38 @@ function parseChatgptRemoteChromeTarget(raw: string): { host: string; port: numb
     throw new Error(`Invalid remote-chrome format: ${target}. Expected host:port.`);
   }
   return { host, port };
+}
+
+async function resolveDaemonCliClient(connectionPath?: string) {
+  const { resolveOracleDaemonConfig } = await import("../src/daemon/config.js");
+  const { createDaemonClientFromConnection, readDaemonConnectionArtifact } =
+    await import("../src/daemon/client.js");
+  const config = await resolveOracleDaemonConfig();
+  const resolvedPath = connectionPath ?? config.connectionPath;
+  const connection = await readDaemonConnectionArtifact(resolvedPath);
+  if (!connection) {
+    throw new Error(
+      `Oracle daemon connection not found at ${resolvedPath}. Start it with: oracle daemon start --background`,
+    );
+  }
+  return createDaemonClientFromConnection(connection);
+}
+
+function parseArtifactTypesOption(
+  raw: string | undefined,
+): Array<"images" | "sandbox"> | undefined {
+  if (!raw) return undefined;
+  const values = raw
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  const allowed = new Set(["images", "sandbox"]);
+  for (const value of values) {
+    if (!allowed.has(value)) {
+      throw new Error(`Unsupported artifact type "${value}". Expected images,sandbox.`);
+    }
+  }
+  return values as Array<"images" | "sandbox">;
 }
 
 function readCliOptionValue(name: string): string | undefined {

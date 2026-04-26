@@ -6,6 +6,7 @@ import type {
   ChatgptDownloadedSandboxArtifact,
   ChatgptSandboxArtifactRef,
 } from "./chatgpt/types.js";
+import type { ThinkingTimeSelectionResult } from "./actions/thinkingTime.js";
 
 export type ChromeClient = Awaited<ReturnType<typeof CDP>>;
 export type CookieParam = Protocol.Network.CookieParam;
@@ -67,6 +68,8 @@ export interface BrowserAutomationConfig {
   sandboxArtifactsOutputDir?: string | null;
   /** Thinking time intensity level for Thinking/Pro models: light, standard, extended, heavy */
   thinkingTime?: ThinkingTimeLevel;
+  /** Whether missing Thinking controls should fail the run or continue with current/default mode. */
+  thinkingFallback?: "allow" | "fail";
 }
 
 export interface BrowserRunOptions {
@@ -102,6 +105,7 @@ export interface BrowserRunResult {
   sandboxArtifacts?: ChatgptSandboxArtifactRef[];
   newSandboxArtifacts?: ChatgptSandboxArtifactRef[];
   downloadedSandboxArtifacts?: ChatgptDownloadedSandboxArtifact[];
+  thinkingTimeSelection?: ThinkingTimeSelectionResult;
   warnings?: string[];
 }
 
@@ -114,6 +118,7 @@ export type ResolvedBrowserConfig = Required<
     | "desiredModel"
     | "remoteChrome"
     | "thinkingTime"
+    | "thinkingFallback"
     | "modelStrategy"
   >
 > & {
@@ -123,6 +128,7 @@ export type ResolvedBrowserConfig = Required<
   desiredModel?: string | null;
   modelStrategy?: BrowserModelStrategy;
   thinkingTime?: ThinkingTimeLevel;
+  thinkingFallback?: "allow" | "fail";
   debugPort?: number | null;
   inlineCookiesSource?: string | null;
   remoteChrome?: { host: string; port: number } | null;

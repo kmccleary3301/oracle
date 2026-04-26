@@ -58,6 +58,8 @@ export interface BrowserSessionConfig {
   sandboxArtifactsOutputDir?: string | null;
   /** Thinking time intensity: 'light', 'standard', 'extended', 'heavy' */
   thinkingTime?: ThinkingTimeLevel;
+  /** Whether missing Thinking controls should continue with current/default mode or fail. */
+  thinkingFallback?: "allow" | "fail";
 }
 
 export interface BrowserRuntimeMetadata {

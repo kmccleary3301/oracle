@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { loadUserConfig } from "../src/config.js";
+import { resolveOracleDaemonConfig } from "../src/daemon/config.js";
 import { setOracleHomeDirOverrideForTest } from "../src/oracleHome.js";
 
 describe("loadUserConfig", () => {
@@ -57,6 +58,32 @@ describe("loadUserConfig", () => {
     const result = await loadUserConfig();
     expect(result.loaded).toBe(false);
     expect(result.config).toEqual({});
+  });
+
+  it("resolves daemon config defaults and overrides", async () => {
+    const configPath = path.join(tempDir, "config.json");
+    await fs.writeFile(
+      configPath,
+      `{
+        daemon: {
+          host: "127.0.0.2",
+          port: 9555,
+          connectionPath: "/tmp/oracle-daemon.json",
+          jobDir: "/tmp/oracle-jobs",
+          maxConcurrentJobs: 2,
+          maxOpenChatgptTabs: 3,
+        }
+      }`,
+      "utf8",
+    );
+
+    const resolved = await resolveOracleDaemonConfig();
+    expect(resolved.host).toBe("127.0.0.2");
+    expect(resolved.port).toBe(9555);
+    expect(resolved.connectionPath).toBe("/tmp/oracle-daemon.json");
+    expect(resolved.jobDir).toBe("/tmp/oracle-jobs");
+    expect(resolved.maxConcurrentJobs).toBe(2);
+    expect(resolved.maxOpenChatgptTabs).toBe(3);
   });
 
   afterAll(() => {

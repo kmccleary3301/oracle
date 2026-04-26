@@ -10,6 +10,7 @@ import { registerSessionResources } from "./tools/sessionResources.js";
 import { registerChatgptImagesTool } from "./tools/chatgptImages.js";
 import { registerChatgptSessionTools } from "./tools/chatgptSession.js";
 import { registerChatgptProjectsTool } from "./tools/chatgptProjects.js";
+import { registerMcpJobTools } from "./tools/jobs.js";
 
 export async function startMcpServer(): Promise<void> {
   const server = new McpServer(
@@ -29,6 +30,7 @@ export async function startMcpServer(): Promise<void> {
   registerChatgptImagesTool(server);
   registerChatgptSessionTools(server);
   registerChatgptProjectsTool(server);
+  registerMcpJobTools(server);
   registerSessionResources(server);
 
   const transport = new StdioServerTransport();

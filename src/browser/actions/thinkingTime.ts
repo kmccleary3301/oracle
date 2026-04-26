@@ -11,6 +11,21 @@ type ThinkingTimeOutcome =
   | { status: "menu-not-found" }
   | { status: "option-not-found" };
 
+export type ThinkingTimeSelectionStatus =
+  | "selected"
+  | "already-selected"
+  | "unavailable"
+  | "option-not-found"
+  | "failed";
+
+export interface ThinkingTimeSelectionResult {
+  requestedThinkingTime: ThinkingTimeLevel;
+  actualThinkingTime?: string | null;
+  status: ThinkingTimeSelectionStatus;
+  fallbackUsed: boolean;
+  reason?: string;
+}
+
 /**
  * Selects a specific thinking time level in ChatGPT's composer pill menu.
  * @param level - The thinking time intensity: 'light', 'standard', 'extended', or 'heavy'
@@ -58,7 +73,7 @@ export async function ensureThinkingTimeIfAvailable(
   Runtime: ChromeClient["Runtime"],
   level: ThinkingTimeLevel,
   logger: BrowserLogger,
-): Promise<boolean> {
+): Promise<ThinkingTimeSelectionResult> {
   try {
     const result = await evaluateThinkingTimeSelection(Runtime, level);
     const capitalizedLevel = level.charAt(0).toUpperCase() + level.slice(1);
@@ -66,22 +81,51 @@ export async function ensureThinkingTimeIfAvailable(
     switch (result?.status) {
       case "already-selected":
         logger(`Thinking time: ${result.label ?? capitalizedLevel} (already selected)`);
-        return true;
+        return {
+          requestedThinkingTime: level,
+          actualThinkingTime: result.label ?? capitalizedLevel,
+          status: "already-selected",
+          fallbackUsed: false,
+        };
       case "switched":
         logger(`Thinking time: ${result.label ?? capitalizedLevel}`);
-        return true;
+        return {
+          requestedThinkingTime: level,
+          actualThinkingTime: result.label ?? capitalizedLevel,
+          status: "selected",
+          fallbackUsed: false,
+        };
       case "chip-not-found":
       case "menu-not-found":
+        if (logger.verbose) {
+          logger(`Thinking time: ${result.status.replaceAll("-", " ")}; continuing with default.`);
+        }
+        return {
+          requestedThinkingTime: level,
+          status: "unavailable",
+          fallbackUsed: true,
+          reason: result.status,
+        };
       case "option-not-found":
         if (logger.verbose) {
           logger(`Thinking time: ${result.status.replaceAll("-", " ")}; continuing with default.`);
         }
-        return false;
+        return {
+          requestedThinkingTime: level,
+          status: "option-not-found",
+          fallbackUsed: true,
+          reason: result.status,
+        };
       default:
         if (logger.verbose) {
           logger("Thinking time: unknown outcome; continuing with default.");
         }
-        return false;
+        return {
+          requestedThinkingTime: level,
+          status: "failed",
+          fallbackUsed: true,
+          reason: "unknown-outcome",
+        };
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -89,7 +133,12 @@ export async function ensureThinkingTimeIfAvailable(
       logger(`Thinking time selection failed (${message}); continuing with default.`);
       await logDomFailure(Runtime, logger, "thinking-time");
     }
-    return false;
+    return {
+      requestedThinkingTime: level,
+      status: "failed",
+      fallbackUsed: true,
+      reason: message,
+    };
   }
 }
 

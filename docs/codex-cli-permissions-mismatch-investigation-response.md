@@ -14,9 +14,9 @@ Approval policy: never
 
 That exact policy explains all three symptoms:
 
-* `/mnt/c` is read-only because it is outside the writable roots and is being exposed to the sandbox as read-only.
-* `git fetch` fails because `workspace-write` does **not** imply network access; network is off unless explicitly enabled.
-* `connect EPERM 172.25.16.1:42339` is the expected shape of an outbound socket blocked by the sandbox/network policy.
+- `/mnt/c` is read-only because it is outside the writable roots and is being exposed to the sandbox as read-only.
+- `git fetch` fails because `workspace-write` does **not** imply network access; network is off unless explicitly enabled.
+- `connect EPERM 172.25.16.1:42339` is the expected shape of an outbound socket blocked by the sandbox/network policy.
 
 Codex docs define the sandbox as the technical boundary for file and network access, while approval policy only controls when Codex asks before crossing that boundary. So `approval_policy = "never"` does **not** grant more access; it means “do not ask,” which makes restricted actions fail closed. ([OpenAI Developers][1])
 
@@ -77,11 +77,11 @@ The practical conclusion: **“Full Access” is not a single universal bit unle
 
 Your stated needs include:
 
-* write under `/home/skra/projects/ql_homepage/docs_tmp/oracle`
-* write Windows-local Chrome profiles under `/mnt/c/Users/subje/AppData/Local/Oracle/browser-profiles`
-* connect to Windows Chrome DevTools at `172.25.16.1:<port>`
-* fetch/push GitHub
-* no approval prompts
+- write under `/home/skra/projects/ql_homepage/docs_tmp/oracle`
+- write Windows-local Chrome profiles under `/mnt/c/Users/subje/AppData/Local/Oracle/browser-profiles`
+- connect to Windows Chrome DevTools at `172.25.16.1:<port>`
+- fetch/push GitHub
+- no approval prompts
 
 Because actual `git fetch`/`push` modifies `.git`, and Codex notes `.git/` may remain read-only in `workspace-write`, the **only configuration that cleanly satisfies all of this without prompts is true full access**. ([OpenAI Developers][6])
 
@@ -276,9 +276,9 @@ Run inside the Codex agent session:
 
 Interpretation:
 
-* If `/status` says Full Access but this script shows `/mnt/c` read-only, DNS failure, or `connect EPERM`, `/status` is not reflecting the effective tool sandbox.
-* If `mount | rg /mnt/c` shows `ro` inside Codex but `rw` in a normal WSL shell, the read-only state is Codex’s sandbox view, not WSL itself.
-* If `git ls-remote` works but `git fetch` fails later, check `.git` write protection under `workspace-write`; use `danger-full-access` for real fetch/push workflows.
+- If `/status` says Full Access but this script shows `/mnt/c` read-only, DNS failure, or `connect EPERM`, `/status` is not reflecting the effective tool sandbox.
+- If `mount | rg /mnt/c` shows `ro` inside Codex but `rw` in a normal WSL shell, the read-only state is Codex’s sandbox view, not WSL itself.
+- If `git ls-remote` works but `git fetch` fails later, check `.git` write protection under `workspace-write`; use `danger-full-access` for real fetch/push workflows.
 
 You can also use the documented `codex sandbox` helper to run a command under the same internal policies Codex uses, which is useful for isolating CLI config from model behavior. ([OpenAI Developers][7])
 
@@ -345,12 +345,12 @@ I did **not** find a public issue that exactly says: “Codex CLI 0.124.0 `/stat
 
 I did find several close matches:
 
-* The 0.124.0 changelog says it fixed “permission-mode drift” so `/permissions` changes survive side conversations and updated Full Access state is reflected in MCP approval handling. ([OpenAI Developers][2])
-* PR #18924 explains the bug: `/permissions` updated the active TUI session state, but a cached session snapshot could restore old approval/sandbox settings, causing the next turn to fall back to the old permission mode. ([GitHub][10])
-* PR #19033 describes MCP permission sync using stale per-turn config after switching to Full Access. ([GitHub][11])
-* A Codex.app issue reports local config enabling network, while effective session instructions still said “Network access is restricted,” causing GitHub CLI/API commands to fail. ([GitHub][12])
-* A desktop automation issue reports full-access app state but first-turn metadata showing `workspace-write` and `network_access=false`, breaking Git operations. ([GitHub][13])
-* Another issue says setting Full Access after the initiating prompt did not take effect immediately. ([GitHub][14])
+- The 0.124.0 changelog says it fixed “permission-mode drift” so `/permissions` changes survive side conversations and updated Full Access state is reflected in MCP approval handling. ([OpenAI Developers][2])
+- PR #18924 explains the bug: `/permissions` updated the active TUI session state, but a cached session snapshot could restore old approval/sandbox settings, causing the next turn to fall back to the old permission mode. ([GitHub][10])
+- PR #19033 describes MCP permission sync using stale per-turn config after switching to Full Access. ([GitHub][11])
+- A Codex.app issue reports local config enabling network, while effective session instructions still said “Network access is restricted,” causing GitHub CLI/API commands to fail. ([GitHub][12])
+- A desktop automation issue reports full-access app state but first-turn metadata showing `workspace-write` and `network_access=false`, breaking Git operations. ([GitHub][13])
+- Another issue says setting Full Access after the initiating prompt did not take effect immediately. ([GitHub][14])
 
 So: this looks like a real, documented **class** of permission propagation bugs, even if this exact WSL CLI case is not separately confirmed.
 
