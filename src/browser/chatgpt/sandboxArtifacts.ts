@@ -59,7 +59,11 @@ export async function extractChatgptSandboxArtifactsFromConfiguredBrowser(
     await waitForDocumentReady(Runtime, timeoutMs);
     const page = await snapshotChatgptPage(Runtime);
     const refs = await waitForSandboxArtifactRefs(Runtime, timeoutMs);
-    const outputDir = resolveSandboxArtifactOutputDir(options.outputDir, page, options.conversationUrl);
+    const outputDir = resolveSandboxArtifactOutputDir(
+      options.outputDir,
+      page,
+      options.conversationUrl,
+    );
     const downloadedArtifacts =
       options.download === false || refs.length === 0
         ? []
@@ -145,8 +149,8 @@ export async function extractSandboxArtifactRefsFromRuntime(
           typeof item.documentIndex === "number" && Number.isFinite(item.documentIndex)
             ? item.documentIndex
             : 0,
-        },
-      ];
+      },
+    ];
   });
   return dedupeSandboxArtifactRefs(refs);
 }
@@ -239,7 +243,7 @@ export function resolveSandboxArtifactOutputDir(
   const href =
     typeof pageOrConversation === "string"
       ? pageOrConversation
-      : pageOrConversation?.href ?? fallbackConversationUrl ?? "";
+      : (pageOrConversation?.href ?? fallbackConversationUrl ?? "");
   const conversationId =
     extractConversationIdFromUrl(href) ??
     (typeof pageOrConversation === "object" ? pageOrConversation?.conversationId : undefined) ??
@@ -286,8 +290,8 @@ async function resolveSandboxArtifactsFromRuntime(
         sandboxPath: typeof item.sandboxPath === "string" ? item.sandboxPath : undefined,
         fileId: typeof item.fileId === "string" ? item.fileId : undefined,
         downloadUrl: typeof item.downloadUrl === "string" ? item.downloadUrl : undefined,
-        },
-      ];
+      },
+    ];
   });
   return dedupeResolvedArtifacts(resolved);
 }
@@ -299,8 +303,11 @@ function resolveArtifactFileName(
   usedNames: Set<string>,
 ): string {
   const sandboxBase = lastNonEmptyPathSegment(artifact.sandboxPath);
-  const messageTag = artifact.messageId ? sanitizeSegment(artifact.messageId.slice(0, 8)) : "unknown";
-  const labelBase = sanitizeSegment(sandboxBase ?? artifact.label) || `artifact-${artifact.documentIndex}`;
+  const messageTag = artifact.messageId
+    ? sanitizeSegment(artifact.messageId.slice(0, 8))
+    : "unknown";
+  const labelBase =
+    sanitizeSegment(sandboxBase ?? artifact.label) || `artifact-${artifact.documentIndex}`;
   const labelWithExt = ensureExtension(labelBase, mimeType);
   const prefix = `${String(index + 1).padStart(2, "0")}_turn-${String(artifact.turnIndex + 1).padStart(2, "0")}_msg-${messageTag}`;
   let candidate = `${prefix}_${labelWithExt}`;
@@ -373,7 +380,9 @@ function dedupeResolvedArtifacts(artifacts: ResolvedArtifact[]): ResolvedArtifac
     const key =
       artifact.fileId ??
       artifact.sandboxPath ??
-      (artifact.downloadUrl ? `download:${artifact.downloadUrl}` : buildSandboxArtifactIdentity(artifact));
+      (artifact.downloadUrl
+        ? `download:${artifact.downloadUrl}`
+        : buildSandboxArtifactIdentity(artifact));
     const existing = seen.get(key);
     if (!existing) {
       seen.set(key, artifact);
@@ -388,7 +397,10 @@ function dedupeResolvedArtifacts(artifacts: ResolvedArtifact[]): ResolvedArtifac
   });
 }
 
-function preferResolvedArtifact(existing: ResolvedArtifact, next: ResolvedArtifact): ResolvedArtifact {
+function preferResolvedArtifact(
+  existing: ResolvedArtifact,
+  next: ResolvedArtifact,
+): ResolvedArtifact {
   if (!existing.messageId && next.messageId) {
     return next;
   }

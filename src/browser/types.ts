@@ -11,6 +11,7 @@ import type {
   ChatgptDownloadedSandboxArtifact,
   ChatgptSandboxArtifactRef,
 } from "./chatgpt/types.js";
+import type { ThinkingTimeSelectionResult } from "./actions/thinkingTime.js";
 
 export type ChromeClient = Awaited<ReturnType<typeof CDP>>;
 export type CookieParam = Protocol.Network.CookieParam;
@@ -125,6 +126,8 @@ export interface BrowserAutomationConfig {
   archiveConversations?: BrowserArchiveMode;
   /** Existing ChatGPT conversation URL to open before submitting the prompt. */
   resumeConversationUrl?: string | null;
+  /** Whether missing Thinking controls should fail the run or continue with current/default mode. */
+  thinkingFallback?: "allow" | "fail";
 }
 
 export interface BrowserRunOptions {
@@ -199,6 +202,7 @@ export interface BrowserRunResult {
   sandboxArtifacts?: ChatgptSandboxArtifactRef[];
   newSandboxArtifacts?: ChatgptSandboxArtifactRef[];
   downloadedSandboxArtifacts?: ChatgptDownloadedSandboxArtifact[];
+  thinkingTimeSelection?: ThinkingTimeSelectionResult;
   warnings?: string[];
 }
 
@@ -213,6 +217,7 @@ export type ResolvedBrowserConfig = Required<
     | "remoteChromeBrowserWSEndpoint"
     | "remoteChromeProfileRoot"
     | "thinkingTime"
+    | "thinkingFallback"
     | "modelStrategy"
     | "maxConcurrentTabs"
     | "researchMode"
@@ -227,6 +232,7 @@ export type ResolvedBrowserConfig = Required<
   desiredModel?: string | null;
   modelStrategy?: BrowserModelStrategy;
   thinkingTime?: ThinkingTimeLevel;
+  thinkingFallback?: "allow" | "fail";
   debugPort?: number | null;
   inlineCookiesSource?: string | null;
   remoteChrome?: { host: string; port: number } | null;

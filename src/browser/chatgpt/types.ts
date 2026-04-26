@@ -1,3 +1,5 @@
+import type { ThinkingTimeSelectionResult } from "../actions/thinkingTime.js";
+
 export interface ChatgptPageSnapshot {
   href: string;
   title: string;
@@ -158,6 +160,7 @@ export interface ChatgptTurnResult {
   sandboxArtifacts?: ChatgptSandboxArtifactRef[];
   newSandboxArtifacts?: ChatgptSandboxArtifactRef[];
   downloadedSandboxArtifacts?: ChatgptDownloadedSandboxArtifact[];
+  thinkingTimeSelection?: ThinkingTimeSelectionResult;
   warnings: string[];
 }
 
@@ -226,7 +229,11 @@ export interface ChatgptConversationMoveResult {
   targetProject: ChatgptProjectRef;
   movedConversation?: ChatgptProjectConversationRef;
   moved: boolean;
-  verification: "project_link_found" | "page_title_project" | "url_changed_to_project" | "not_verified";
+  verification:
+    | "project_link_found"
+    | "page_title_project"
+    | "url_changed_to_project"
+    | "not_verified";
   warnings: string[];
 }
 

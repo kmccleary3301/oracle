@@ -17,7 +17,13 @@ import { detectChromeBinary } from "../detect.js";
 import { ensureNotBlocked, navigateToChatGPT } from "../actions/navigation.js";
 import { delay } from "../utils.js";
 import { getOracleHomeDir } from "../../oracleHome.js";
-import { readChromePid, readDevToolsPort, verifyDevToolsReachable, writeChromePid, writeDevToolsActivePort } from "../profileState.js";
+import {
+  readChromePid,
+  readDevToolsPort,
+  verifyDevToolsReachable,
+  writeChromePid,
+  writeDevToolsActivePort,
+} from "../profileState.js";
 import type { BrowserAutomationConfig, BrowserLogger, ChromeClient } from "../types.js";
 
 const CHATGPT_LOGIN_URL = "https://chatgpt.com/auth/login";
@@ -253,7 +259,9 @@ export async function submitChatgptLoginOtp(
       };
     }
     if (pageBefore.phase !== "otp") {
-      throw new Error(`Saved login flow is not waiting for OTP (current phase: ${pageBefore.phase}).`);
+      throw new Error(
+        `Saved login flow is not waiting for OTP (current phase: ${pageBefore.phase}).`,
+      );
     }
 
     const warnings: string[] = [];
@@ -429,7 +437,7 @@ async function driveChatgptLoginToOtp(
         if (identifierSubmissions < 3) {
           const identifierValue =
             page.provider === "google"
-              ? credentials.googleEmail ?? credentials.email
+              ? (credentials.googleEmail ?? credentials.email)
               : credentials.email;
           logger("[login] filling identifier");
           const filled = await fillAuthIdentifier(Runtime, identifierValue);
@@ -451,7 +459,7 @@ async function driveChatgptLoginToOtp(
         if (passwordSubmissions < 3) {
           const passwordValue =
             page.provider === "google"
-              ? credentials.googlePassword ?? credentials.password
+              ? (credentials.googlePassword ?? credentials.password)
               : credentials.password;
           logger("[login] filling password");
           const filled = await fillAuthPassword(Runtime, passwordValue);
@@ -483,7 +491,10 @@ async function driveChatgptLoginToOtp(
   }
 
   const page = await readChatgptAuthPageState(Runtime);
-  return { page, warnings: [...warnings, `Timed out waiting for OTP/login state from phase ${page.phase}.`] };
+  return {
+    page,
+    warnings: [...warnings, `Timed out waiting for OTP/login state from phase ${page.phase}.`],
+  };
 }
 
 async function openChatgptLoginSession(
@@ -594,12 +605,7 @@ async function resolveLocalLoginProfileDir(
     : await convertWindowsPathToWsl(localAppData);
   const slug = sanitizeProfileLabel(path.basename(resolved) || "browser-profile");
   const hash = crypto.createHash("sha1").update(resolved).digest("hex").slice(0, 10);
-  const mapped = path.join(
-    localAppDataWsl,
-    "Oracle",
-    "browser-profiles",
-    `${slug}-${hash}`,
-  );
+  const mapped = path.join(localAppDataWsl, "Oracle", "browser-profiles", `${slug}-${hash}`);
   logger(
     `WSL detected with Windows Chrome; using Windows-local login profile ${mapped} for DevTools compatibility.`,
   );
@@ -789,10 +795,7 @@ async function clickAuthLoginCta(Runtime: ChromeClient["Runtime"]): Promise<void
   });
 }
 
-async function clickAccountPicker(
-  Runtime: ChromeClient["Runtime"],
-  email: string,
-): Promise<void> {
+async function clickAccountPicker(Runtime: ChromeClient["Runtime"], email: string): Promise<void> {
   await Runtime.evaluate({
     expression: `(() => {
       const normalizedEmail = ${JSON.stringify(email)}.toLowerCase().trim();
@@ -836,29 +839,37 @@ async function fillAuthIdentifier(
   Runtime: ChromeClient["Runtime"],
   email: string,
 ): Promise<FillAuthInputResult> {
-  return await fillAuthInput(Runtime, [
-    "#identifierId",
-    "input[type='email']",
-    "input[name='identifier']",
-    "input[autocomplete='username']",
-    "input[autocomplete='username webauthn']",
-    "input[name='email']",
-    "input[name='username']",
-    "input[id*='email' i]",
-  ], email);
+  return await fillAuthInput(
+    Runtime,
+    [
+      "#identifierId",
+      "input[type='email']",
+      "input[name='identifier']",
+      "input[autocomplete='username']",
+      "input[autocomplete='username webauthn']",
+      "input[name='email']",
+      "input[name='username']",
+      "input[id*='email' i]",
+    ],
+    email,
+  );
 }
 
 async function fillAuthPassword(
   Runtime: ChromeClient["Runtime"],
   password: string,
 ): Promise<FillAuthInputResult> {
-  return await fillAuthInput(Runtime, [
-    "input[type='password']",
-    "input[name='Passwd']",
-    "input[autocomplete='current-password']",
-    "input[name='password']",
-    "input[id*='password' i]",
-  ], password);
+  return await fillAuthInput(
+    Runtime,
+    [
+      "input[type='password']",
+      "input[name='Passwd']",
+      "input[autocomplete='current-password']",
+      "input[name='password']",
+      "input[id*='password' i]",
+    ],
+    password,
+  );
 }
 
 async function fillAuthInput(
@@ -920,9 +931,7 @@ async function fillAuthInput(
       outcome.exceptionDetails.exception?.value ||
       outcome.exceptionDetails.text ||
       "unknown error";
-    throw new Error(
-      `Failed to evaluate auth input helper: ${description}`,
-    );
+    throw new Error(`Failed to evaluate auth input helper: ${description}`);
   }
   const valueResult = outcome.result?.value;
   if (!valueResult || typeof valueResult !== "object") {
@@ -1294,9 +1303,7 @@ function normalizeAuthPageState(raw: unknown): ChatgptAuthPageState {
   return {
     phase,
     provider:
-      value.provider === "chatgpt" ||
-      value.provider === "openai" ||
-      value.provider === "google"
+      value.provider === "chatgpt" || value.provider === "openai" || value.provider === "google"
         ? value.provider
         : "unknown",
     href: typeof value.href === "string" ? value.href : "",
@@ -1304,7 +1311,8 @@ function normalizeAuthPageState(raw: unknown): ChatgptAuthPageState {
     readyState: typeof value.readyState === "string" ? value.readyState : "",
     statusCode: typeof value.statusCode === "number" ? value.statusCode : undefined,
     loginCtaLabel: typeof value.loginCtaLabel === "string" ? value.loginCtaLabel : null,
-    primaryButtonLabel: typeof value.primaryButtonLabel === "string" ? value.primaryButtonLabel : null,
+    primaryButtonLabel:
+      typeof value.primaryButtonLabel === "string" ? value.primaryButtonLabel : null,
     accountPickerLabels: Array.isArray(value.accountPickerLabels)
       ? value.accountPickerLabels.filter((item): item is string => typeof item === "string")
       : [],
@@ -1334,9 +1342,7 @@ function normalizeLoginPhase(value: unknown): ChatgptLoginPhase {
   }
 }
 
-async function saveChatgptLoginContinuation(
-  value: SavedChatgptLoginContinuation,
-): Promise<string> {
+async function saveChatgptLoginContinuation(value: SavedChatgptLoginContinuation): Promise<string> {
   const statePath = resolveChatgptLoginStatePath();
   await fs.mkdir(path.dirname(statePath), { recursive: true });
   await fs.writeFile(statePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");

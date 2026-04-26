@@ -176,6 +176,23 @@ export function matchesThinkingStatusLabelForTest(text: string): boolean {
 
 export function buildActiveThinkingStatusPredicateJsForTest(fnName: string): string {
   return buildActiveThinkingStatusPredicateJs(fnName);
+function hasGeneratedImages(
+  snapshot: Pick<AssistantSnapshot, "generatedImageFileIds"> | null | undefined,
+): boolean {
+  return (
+    Array.isArray(snapshot?.generatedImageFileIds) && snapshot.generatedImageFileIds.length > 0
+  );
+}
+
+function isGeneratedImageTerminalPlaceholderText(normalized: string): boolean {
+  const text = normalized.trim();
+  return (
+    text === "done" ||
+    text === "stopped thinking" ||
+    text === "chatgpt said:done" ||
+    text === "chatgpt said:stopped thinking" ||
+    text.endsWith("\nstopped thinking")
+  );
 }
 
 export async function waitForAssistantResponse(
@@ -520,9 +537,25 @@ async function parseAssistantEvaluationResult(
         ? ((result.value as { messageId?: string }).messageId ?? undefined)
         : undefined;
     const text = cleanAssistantText(String((result.value as { text: unknown }).text ?? ""));
+    const generatedImageFileIds = Array.isArray(
+      (result.value as { generatedImageFileIds?: unknown }).generatedImageFileIds,
+    )
+      ? ((result.value as { generatedImageFileIds: unknown[] }).generatedImageFileIds.filter(
+          (id): id is string => typeof id === "string" && id.length > 0,
+        ) ?? [])
+      : [];
     const normalized = text.toLowerCase();
     if (isAnswerNowPlaceholderText(normalized)) {
+      if (generatedImageFileIds.length > 0) {
+        return { text: "Generated image", html, meta: { turnId, messageId } };
+      }
       return null;
+    }
+    if (
+      generatedImageFileIds.length > 0 &&
+      (!text.trim() || isGeneratedImageTerminalPlaceholderText(normalized))
+    ) {
+      return { text: "Generated image", html, meta: { turnId, messageId } };
     }
     return { text, html, meta: { turnId, messageId } };
   }
@@ -809,13 +842,43 @@ function normalizeAssistantSnapshot(snapshot: AssistantSnapshot | null): {
 } | null {
   const text = snapshot?.text ? cleanAssistantText(snapshot.text) : "";
   if (!text.trim()) {
+    if (hasGeneratedImages(snapshot)) {
+      return {
+        text: "Generated image",
+        html: snapshot?.html ?? undefined,
+        meta: {
+          turnId: snapshot?.turnId ?? undefined,
+          messageId: snapshot?.messageId ?? undefined,
+        },
+      };
+    }
     return null;
   }
   const normalized = text.toLowerCase();
   // "Pro thinking" often renders a placeholder turn containing an "Answer now" gate.
   // Treat it as incomplete so browser mode keeps waiting for the real assistant text.
   if (isAnswerNowPlaceholderText(normalized)) {
+    if (hasGeneratedImages(snapshot)) {
+      return {
+        text: "Generated image",
+        html: snapshot?.html ?? undefined,
+        meta: {
+          turnId: snapshot?.turnId ?? undefined,
+          messageId: snapshot?.messageId ?? undefined,
+        },
+      };
+    }
     return null;
+  }
+  if (hasGeneratedImages(snapshot) && isGeneratedImageTerminalPlaceholderText(normalized)) {
+    return {
+      text: "Generated image",
+      html: snapshot?.html ?? undefined,
+      meta: {
+        turnId: snapshot?.turnId ?? undefined,
+        messageId: snapshot?.messageId ?? undefined,
+      },
+    };
   }
   // Ignore user echo turns that can show up in project view fallbacks.
   if (normalized.startsWith("you said")) {
@@ -881,6 +944,8 @@ function buildAssistantSnapshotExpression(
     const extracted = extractAssistantTurn();
     const isPlaceholder = (snapshot) => {
       const normalized = String(snapshot?.text ?? '').toLowerCase().trim();
+      const hasGeneratedImages = Array.isArray(snapshot?.generatedImageFileIds) && snapshot.generatedImageFileIds.length > 0;
+      if (hasGeneratedImages) return false;
       if (normalized === 'chatgpt said:' || normalized === 'chatgpt said') return true;
       if (normalized.includes('file upload request') && (normalized.includes('pro thinking') || normalized.includes('chatgpt said'))) {
         return true;
@@ -941,6 +1006,8 @@ function buildResponseObserverExpression(
     };
     const isAnswerNowPlaceholder = (snapshot) => {
       const normalized = String(snapshot?.text ?? '').toLowerCase().trim();
+      const hasGeneratedImages = Array.isArray(snapshot?.generatedImageFileIds) && snapshot.generatedImageFileIds.length > 0;
+      if (hasGeneratedImages) return false;
       if (normalized === 'chatgpt said:' || normalized === 'chatgpt said') return true;
       if (normalized.includes('file upload request') && (normalized.includes('pro thinking') || normalized.includes('chatgpt said'))) {
         return true;
@@ -1218,24 +1285,33 @@ function buildAssistantExtractor(functionName: string): string {
       const textContent = contentRoot?.textContent ?? '';
       const text = innerText.trim().length > 0 ? innerText : textContent;
       const html = contentRoot?.innerHTML ?? '';
-      const messageId = messageRoot.getAttribute('data-message-id');
-      const turnId = messageRoot.getAttribute('data-testid');
-      const generatedImages = Array.from(messageRoot.querySelectorAll('img')).filter((img) =>
-        String(img?.src || '').includes('/backend-api/estuary/content?id=file_')
-      );
-      const normalizedText = String(text || '').toLowerCase().replace(/\\s+/g, ' ').trim();
-      const imageOnlyChrome =
-        !normalizedText ||
-        normalizedText === 'edit' ||
-        normalizedText === 'stopped thinking' ||
-        normalizedText === 'stopped thinking edit' ||
-        /^(?:reasoning\\s+|pro thinking\\s+)?thought for \\d+(?:\\.\\d+)?\\s*(?:s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours)\\s+edit$/.test(normalizedText);
-      if (generatedImages.length > 0 && imageOnlyChrome) {
-        const label = generatedImages.length === 1 ? 'Generated image.' : \`Generated \${generatedImages.length} images.\`;
-        return { text: label, html: messageRoot?.innerHTML ?? html, messageId, turnId, turnIndex: index };
-      }
-      if (text.trim()) {
-        return { text, html, messageId, turnId, turnIndex: index };
+      const messageId =
+        messageRoot.getAttribute('data-message-id') ||
+        turn.getAttribute('data-message-id');
+      const turnId = messageRoot.getAttribute('data-testid') || turn.getAttribute('data-testid');
+      const fileIdFor = (src) => {
+        try {
+          const url = new URL(src, location.href);
+          const id = (url.searchParams.get('id') || '').trim();
+          if (/^file_[A-Za-z0-9]+$/.test(id) && url.pathname.includes('/backend-api/estuary/')) {
+            return id;
+          }
+          const pathMatch = url.pathname.match(/\\/(file_[A-Za-z0-9]+)(?:\\/|$)/);
+          if (pathMatch && url.pathname.includes('/backend-api/estuary/')) {
+            return pathMatch[1];
+          }
+          return null;
+        } catch {
+          return null;
+        }
+      };
+      const generatedImageFileIds = Array.from(new Set(
+        Array.from(turn.querySelectorAll('img'))
+          .map((img) => fileIdFor(img.currentSrc || img.src || ''))
+          .filter(Boolean)
+      ));
+      if (text.trim() || generatedImageFileIds.length > 0) {
+        return { text, html, messageId, turnId, turnIndex: index, generatedImageFileIds };
       }
     }
     return null;
@@ -1569,6 +1645,7 @@ interface AssistantSnapshot {
   turnId?: string | null;
   turnIndex?: number | null;
   completionVisible?: boolean;
+  generatedImageFileIds?: string[];
 }
 
 const LANGUAGE_TAGS = new Set(

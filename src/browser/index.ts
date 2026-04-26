@@ -46,7 +46,11 @@ import {
   readAssistantSnapshot,
 } from "./pageActions.js";
 import { INPUT_SELECTORS } from "./constants.js";
-import { ensureThinkingTime } from "./actions/thinkingTime.js";
+import {
+  ensureThinkingTime,
+  ensureThinkingTimeIfAvailable,
+  type ThinkingTimeSelectionResult,
+} from "./actions/thinkingTime.js";
 import { startThinkingStatusMonitor } from "./actions/thinkingStatus.js";
 import {
   activateDeepResearch,
@@ -1157,6 +1161,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
   let removeDialogHandler: (() => void) | null = null;
   let appliedCookies = 0;
   let preserveBrowserOnError = false;
+  let thinkingTimeSelection: ThinkingTimeSelectionResult | undefined;
 
   try {
     try {
@@ -1512,8 +1517,10 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     const thinkingTime = config.thinkingTime;
     if (thinkingTime && !deepResearch) {
       const thinkingTargetModel = modelStrategy === "select" ? config.desiredModel : null;
-      await raceWithDisconnect(
-        withRetries(() => ensureThinkingTime(Runtime, thinkingTime, logger, thinkingTargetModel), {
+      thinkingTimeSelection = await raceWithDisconnect(
+        withRetries(
+          () => ensureThinkingTimeIfAvailable(Runtime, thinkingTime, logger, thinkingTargetModel),
+          {
           retries: 2,
           delayMs: 300,
           onRetry: (attempt, error) => {
@@ -1525,6 +1532,11 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
           },
         }),
       );
+      if (thinkingTimeSelection.fallbackUsed && config.thinkingFallback === "fail") {
+        throw new Error(
+          `Unable to set requested thinking time ${thinkingTime}: ${thinkingTimeSelection.reason ?? thinkingTimeSelection.status}`,
+        );
+      }
     }
     const profileLockTimeoutMs = manualLogin ? (config.profileLockTimeoutMs ?? 0) : 0;
     let profileLock: ProfileRunLock | null = null;
@@ -2288,6 +2300,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       sandboxArtifacts: sandboxArtifactResult.sandboxArtifacts,
       newSandboxArtifacts: sandboxArtifactResult.newSandboxArtifacts,
       downloadedSandboxArtifacts: sandboxArtifactResult.downloadedSandboxArtifacts,
+      thinkingTimeSelection,
       warnings: sandboxArtifactResult.warnings,
     };
   } catch (error) {
@@ -2949,6 +2962,7 @@ async function runRemoteBrowserMode(
   let connection: Awaited<ReturnType<typeof connectToRemoteChrome>> | null = null;
   const browserWSEndpoint = config.remoteChromeBrowserWSEndpoint ?? undefined;
   const chromeProfileRoot = config.remoteChromeProfileRoot ?? undefined;
+  let thinkingTimeSelection: ThinkingTimeSelectionResult | undefined;
 
   try {
     const remoteLeaseProfileDir = config.browserTabRef
@@ -3120,8 +3134,8 @@ async function runRemoteBrowserMode(
     const thinkingTime = config.thinkingTime;
     if (thinkingTime && !deepResearch) {
       const thinkingTargetModel = modelStrategy === "select" ? config.desiredModel : null;
-      await withRetries(
-        () => ensureThinkingTime(Runtime, thinkingTime, logger, thinkingTargetModel),
+      thinkingTimeSelection = await withRetries(
+        () => ensureThinkingTimeIfAvailable(Runtime, thinkingTime, logger, thinkingTargetModel),
         {
           retries: 2,
           delayMs: 300,
@@ -3134,6 +3148,11 @@ async function runRemoteBrowserMode(
           },
         },
       );
+      if (thinkingTimeSelection.fallbackUsed && config.thinkingFallback === "fail") {
+        throw new Error(
+          `Unable to set requested thinking time ${thinkingTime}: ${thinkingTimeSelection.reason ?? thinkingTimeSelection.status}`,
+        );
+      }
     }
     const submitOnce = async (prompt: string, submissionAttachments: BrowserAttachment[]) => {
       const baselineSnapshot = await readAssistantSnapshot(Runtime).catch(() => null);
@@ -3797,6 +3816,7 @@ async function runRemoteBrowserMode(
       sandboxArtifacts: sandboxArtifactResult.sandboxArtifacts,
       newSandboxArtifacts: sandboxArtifactResult.newSandboxArtifacts,
       downloadedSandboxArtifacts: sandboxArtifactResult.downloadedSandboxArtifacts,
+      thinkingTimeSelection,
       warnings: sandboxArtifactResult.warnings,
     };
   } catch (error) {

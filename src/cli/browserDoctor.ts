@@ -57,7 +57,7 @@ export async function createBrowserDoctorReport(
   const chromePath = config.chromePath ?? detectedChrome.path;
   const chromeKind = classifyChromePath(chromePath);
   const isWslRuntime = isWsl();
-  const configuredProfileDir = config.remoteChrome ? null : config.manualLoginProfileDir ?? null;
+  const configuredProfileDir = config.remoteChrome ? null : (config.manualLoginProfileDir ?? null);
   const profileDir =
     configuredProfileDir && isWslRuntime && chromeKind === "windows"
       ? await resolveWindowsLocalProfileDir(configuredProfileDir)
@@ -120,16 +120,22 @@ function formatBrowserDoctorReport(report: BrowserDoctorReport): string {
   lines.push(chalk.dim(`WSL: ${report.isWsl ? "yes" : "no"}`));
   lines.push("");
   lines.push(chalk.bold("Chrome"));
-  lines.push(`Binary: ${report.chromePath ? chalk.green(report.chromePath) : chalk.red("not found")}`);
+  lines.push(
+    `Binary: ${report.chromePath ? chalk.green(report.chromePath) : chalk.red("not found")}`,
+  );
   lines.push(`Kind: ${formatState(report.chromeKind, report.chromeKind !== "unknown")}`);
   lines.push("");
   lines.push(chalk.bold("Session"));
   if (report.remoteChrome) {
-    lines.push(`Remote Chrome: ${chalk.green(`${report.remoteChrome.host}:${report.remoteChrome.port}`)}`);
+    lines.push(
+      `Remote Chrome: ${chalk.green(`${report.remoteChrome.host}:${report.remoteChrome.port}`)}`,
+    );
   } else {
     lines.push("Remote Chrome: not configured");
   }
-  lines.push(`Manual login: ${formatState(report.manualLogin ? "enabled" : "disabled", report.manualLogin)}`);
+  lines.push(
+    `Manual login: ${formatState(report.manualLogin ? "enabled" : "disabled", report.manualLogin)}`,
+  );
   if (report.configuredProfileDir && report.configuredProfileDir !== report.profileDir) {
     lines.push(`Configured profile dir: ${report.configuredProfileDir}`);
   }
@@ -245,7 +251,9 @@ function formatState(value: string, ok: boolean): string {
   return ok ? chalk.green(value) : chalk.yellow(value);
 }
 
-function classifyChromePath(candidate: string | null | undefined): BrowserDoctorReport["chromeKind"] {
+function classifyChromePath(
+  candidate: string | null | undefined,
+): BrowserDoctorReport["chromeKind"] {
   const value = (candidate ?? "").trim();
   if (!value) return "unknown";
   if ((/[a-z]:\\/i.test(value) || /^\/mnt\/[a-z]\//i.test(value)) && /\.exe$/i.test(value)) {

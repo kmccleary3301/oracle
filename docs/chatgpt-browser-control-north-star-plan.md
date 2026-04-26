@@ -89,18 +89,18 @@ Total: 1000 points.
 
 The project should not be considered production-ready until all must-pass gates are green and the score is at least 950/1000. Anything below 850/1000 is prototype-grade, even if demos work.
 
-| Area | Weight | Score | Status |
-| --- | ---: | ---: | --- |
-| Persistent browser/session foundation | 90 | 90 | Complete for current WSL boot; literal reboot verification remains an environmental follow-up |
-| DOM provider and state-machine architecture | 100 | 100 | Complete |
-| Conversation lifecycle and turn-based work | 115 | 115 | Complete |
-| Model, mode, and thinking selection | 85 | 85 | Image generate/edit expose thinking-time controls; direct browser model-label selection is available where applicable |
-| Attachments, large text, and bundled inputs | 105 | 105 | Live text, multi-file, image/SVG, >10-image no-send probe, zip bundle, directory/glob, MCP, and large-paste interaction green |
-| ChatGPT Images 2.0 generation/edit/download | 170 | 170 | Fresh generation, recovered reference-image edits, multi-output extraction, and artifact download are live-proven |
-| Projects, sidebar organization, and deletion | 85 | 85 | List/get/create/move/rename and guarded conversation deletion are live-proven |
-| CLI, MCP, and API product surface | 100 | 100 | Complete |
-| Reliability, observability, and recovery | 95 | 95 | Complete |
-| Test harness, docs, and release discipline | 55 | 55 | Complete |
+| Area                                         | Weight | Score | Status                                                                                                                        |
+| -------------------------------------------- | -----: | ----: | ----------------------------------------------------------------------------------------------------------------------------- |
+| Persistent browser/session foundation        |     90 |    90 | Complete for current WSL boot; literal reboot verification remains an environmental follow-up                                 |
+| DOM provider and state-machine architecture  |    100 |   100 | Complete                                                                                                                      |
+| Conversation lifecycle and turn-based work   |    115 |   115 | Complete                                                                                                                      |
+| Model, mode, and thinking selection          |     85 |    85 | Image generate/edit expose thinking-time controls; direct browser model-label selection is available where applicable         |
+| Attachments, large text, and bundled inputs  |    105 |   105 | Live text, multi-file, image/SVG, >10-image no-send probe, zip bundle, directory/glob, MCP, and large-paste interaction green |
+| ChatGPT Images 2.0 generation/edit/download  |    170 |   170 | Fresh generation, recovered reference-image edits, multi-output extraction, and artifact download are live-proven             |
+| Projects, sidebar organization, and deletion |     85 |    85 | List/get/create/move/rename and guarded conversation deletion are live-proven                                                 |
+| CLI, MCP, and API product surface            |    100 |   100 | Complete                                                                                                                      |
+| Reliability, observability, and recovery     |     95 |    95 | Complete                                                                                                                      |
+| Test harness, docs, and release discipline   |     55 |    55 | Complete                                                                                                                      |
 
 Current measured implementation score: 1000/1000.
 
@@ -1016,21 +1016,21 @@ Questions to answer through probing:
 
 Update this table as implementation proceeds.
 
-| Milestone | Points Unlocked | Required Evidence |
-| --- | ---: | --- |
-| Baseline and fixture harness | 60/60 | Build, lint/typecheck, sample read-only smoke, sanitized sample fixture, browser status smoke |
-| Provider split | 55/75 | Typed ChatGPT image artifact, page snapshot, conversation snapshot, project list, and status modules |
-| Session create/resume/turn | 100/115 | First-class create, get, and turn append live smokes passed through CLI/MCP |
-| Model/mode/thinking selection | 80/85 | Picker mapping updated for current generic Instant/Thinking/Pro labels; direct CLI/MCP calls now accept browser model labels; image generate/edit commands and MCP tools support image thinking-time selection |
-| Attachment expansion | 105/105 | Text, multi-file, image/SVG, >10-image no-send probe, generated zip bundle, directory/glob, MCP, and large-paste-plus-file workflows live-proven; broader stress/regression coverage remains a reliability gate |
-| Image extraction | 65/65 | Sample conversation exact unique image count and downloads |
-| Image generation | 70/70 | Fresh Images 2.0 generation in the Image Gen project produced one generated image and downloaded the PNG artifact |
-| Image editing | 35/35 | Reference-image edit sessions recovered after long-running completion and downloaded generated PNG artifacts |
-| Projects | 55/55 | Project list/get/create/move/rename implemented; create/move/rename live-smoked with exact-target verification |
-| Deletion/destructive safety | 30/30 | Dry-run delete planning and guarded confirmed delete both live-smoked against a throwaway generated-image conversation |
-| CLI/MCP/API polish | 80/80 | Image extract/generate/edit, browser status, conversation create/get/turn, project list/get/create/rename/move, and delete/delete-plan CLI/MCP surfaces implemented |
-| Reliability hardening | 85/85 | Stable image-set wait, conversation/project hydration waits, final URL persistence, file-id dedupe, bounded direct-chat input budget, WSL path fallback, expected-name attachment preflight guard, attachment send-button hardening, snapshot answer reconciliation, no-send attachment probes, and status navigation fix |
-| Docs/release | 40/40 | Progress ledger updated with live attachment matrix evidence and known gaps |
+| Milestone                     | Points Unlocked | Required Evidence                                                                                                                                                                                                                                                                                                         |
+| ----------------------------- | --------------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Baseline and fixture harness  |           60/60 | Build, lint/typecheck, sample read-only smoke, sanitized sample fixture, browser status smoke                                                                                                                                                                                                                             |
+| Provider split                |           55/75 | Typed ChatGPT image artifact, page snapshot, conversation snapshot, project list, and status modules                                                                                                                                                                                                                      |
+| Session create/resume/turn    |         100/115 | First-class create, get, and turn append live smokes passed through CLI/MCP                                                                                                                                                                                                                                               |
+| Model/mode/thinking selection |           80/85 | Picker mapping updated for current generic Instant/Thinking/Pro labels; direct CLI/MCP calls now accept browser model labels; image generate/edit commands and MCP tools support image thinking-time selection                                                                                                            |
+| Attachment expansion          |         105/105 | Text, multi-file, image/SVG, >10-image no-send probe, generated zip bundle, directory/glob, MCP, and large-paste-plus-file workflows live-proven; broader stress/regression coverage remains a reliability gate                                                                                                           |
+| Image extraction              |           65/65 | Sample conversation exact unique image count and downloads                                                                                                                                                                                                                                                                |
+| Image generation              |           70/70 | Fresh Images 2.0 generation in the Image Gen project produced one generated image and downloaded the PNG artifact                                                                                                                                                                                                         |
+| Image editing                 |           35/35 | Reference-image edit sessions recovered after long-running completion and downloaded generated PNG artifacts                                                                                                                                                                                                              |
+| Projects                      |           55/55 | Project list/get/create/move/rename implemented; create/move/rename live-smoked with exact-target verification                                                                                                                                                                                                            |
+| Deletion/destructive safety   |           30/30 | Dry-run delete planning and guarded confirmed delete both live-smoked against a throwaway generated-image conversation                                                                                                                                                                                                    |
+| CLI/MCP/API polish            |           80/80 | Image extract/generate/edit, browser status, conversation create/get/turn, project list/get/create/rename/move, and delete/delete-plan CLI/MCP surfaces implemented                                                                                                                                                       |
+| Reliability hardening         |           85/85 | Stable image-set wait, conversation/project hydration waits, final URL persistence, file-id dedupe, bounded direct-chat input budget, WSL path fallback, expected-name attachment preflight guard, attachment send-button hardening, snapshot answer reconciliation, no-send attachment probes, and status navigation fix |
+| Docs/release                  |           40/40 | Progress ledger updated with live attachment matrix evidence and known gaps                                                                                                                                                                                                                                               |
 
 The point unlock table intentionally overlaps with the scorecard categories. The scorecard tracks product capability; the milestone table tracks implementation progress.
 

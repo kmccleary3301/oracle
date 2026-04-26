@@ -3,6 +3,7 @@ import type { ThinkingTimeLevel } from "../../src/oracle/types.js";
 import {
   buildThinkingTimeExpressionForTest,
   ensureThinkingTime,
+  ensureThinkingTimeIfAvailable,
   inferThinkingTargetModelKindForTest,
 } from "../../src/browser/actions/thinkingTime.js";
 

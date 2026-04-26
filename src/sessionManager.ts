@@ -86,6 +86,8 @@ export interface BrowserSessionConfig {
   archiveConversations?: BrowserArchiveMode;
   /** Browser-only: existing ChatGPT conversation URL to resume before submitting. */
   resumeConversationUrl?: string | null;
+  /** Whether missing Thinking controls should continue with current/default mode or fail. */
+  thinkingFallback?: "allow" | "fail";
 }
 
 export interface BrowserRuntimeMetadata {

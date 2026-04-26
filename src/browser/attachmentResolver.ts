@@ -47,8 +47,7 @@ export async function resolveBrowserAttachments(
   }
   const cwd = options.cwd ?? process.cwd();
   const maxAttachments = options.maxAttachments ?? DEFAULT_MAX_CHATGPT_ATTACHMENTS;
-  const maxImageAttachments =
-    options.maxImageAttachments ?? DEFAULT_MAX_CHATGPT_IMAGE_ATTACHMENTS;
+  const maxImageAttachments = options.maxImageAttachments ?? DEFAULT_MAX_CHATGPT_IMAGE_ATTACHMENTS;
   const maxTotalBytes = options.maxTotalBytes ?? DEFAULT_MAX_CHATGPT_ATTACHMENT_BYTES;
   const resolvedFiles = await readFiles(inputs, {
     cwd,
@@ -73,7 +72,9 @@ export async function resolveBrowserAttachments(
   }
 
   if (maxAttachments > 0 && attachments.length > maxAttachments) {
-    const imageAttachments = attachments.filter((attachment) => isImageAttachmentPath(attachment.path));
+    const imageAttachments = attachments.filter((attachment) =>
+      isImageAttachmentPath(attachment.path),
+    );
     const otherAttachments = attachments.filter(
       (attachment) => !isImageAttachmentPath(attachment.path),
     );
@@ -163,7 +164,9 @@ async function createZipBundle(
     for (const attachment of attachments) {
       const data = await fs.readFile(attachment.path);
       const entryName = makeUniqueZipEntryName(
-        normalizeZipEntryName(attachment.displayPath || path.relative(options.cwd, attachment.path)),
+        normalizeZipEntryName(
+          attachment.displayPath || path.relative(options.cwd, attachment.path),
+        ),
         usedNames,
       );
       usedNames.add(entryName);

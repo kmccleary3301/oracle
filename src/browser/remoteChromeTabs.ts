@@ -28,6 +28,28 @@ export interface RemoteChromePageTarget {
   title?: string;
 }
 
+export function isClosableChatgptPageTarget(target: RemoteChromePageTarget): boolean {
+  const normalizedUrl = String(target.url || "");
+  return normalizedUrl.startsWith("https://chatgpt.com/") || normalizedUrl === "about:blank";
+}
+
+export async function listRemoteChromePageTargets(
+  host: string,
+  port: number,
+  options: { chatgptOnly?: boolean } = {},
+): Promise<RemoteChromePageTarget[]> {
+  const targets = await CDP.List({ host, port });
+  const pages = targets
+    .filter((target) => target.type === "page")
+    .map((target) => ({
+      id: target.id,
+      type: target.type,
+      url: target.url,
+      title: target.title,
+    }));
+  return options.chatgptOnly ? pages.filter(isClosableChatgptPageTarget) : pages;
+}
+
 async function closeRemoteChromePageTargetViaBrowser(
   host: string,
   port: number,
@@ -122,9 +144,7 @@ function upsertTarget(
   const existing = targets.find((entry) => entry.targetId === targetId);
   if (existing) {
     return targets.map((entry) =>
-      entry.targetId === targetId
-        ? { ...entry, url: url ?? entry.url, updatedAt: now }
-        : entry,
+      entry.targetId === targetId ? { ...entry, url: url ?? entry.url, updatedAt: now } : entry,
     );
   }
   return [...targets, { targetId, url, createdAt: now, updatedAt: now }];
@@ -186,8 +206,10 @@ export async function pruneRemoteChromeTargets(
   const trackedById = new Map(tracked.map((entry) => [entry.targetId, entry]));
   const closableLivePages = livePages.filter((target) => {
     if (options.includeNonChatgpt) return true;
-    const normalizedUrl = String(target.url || trackedById.get(target.id)?.url || "");
-    return normalizedUrl.startsWith("https://chatgpt.com/") || normalizedUrl === "about:blank";
+    return isClosableChatgptPageTarget({
+      ...target,
+      url: target.url || trackedById.get(target.id)?.url,
+    });
   });
   const trackedClosable = tracked.flatMap((entry): RemoteChromePageTarget[] => {
     const live = livePages.find((target) => target.id === entry.targetId);

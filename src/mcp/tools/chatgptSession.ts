@@ -12,6 +12,8 @@ import {
 } from "../../browser/chatgpt/session.js";
 import { extractChatgptSandboxArtifactsFromConfiguredBrowser } from "../../browser/chatgpt/sandboxArtifacts.js";
 import { resolveBrowserAttachments } from "../../browser/attachmentResolver.js";
+import { startMcpJob } from "../jobs.js";
+import { resolveDaemonClientWithOptionalAutostart } from "../../daemon/resolve.js";
 
 const browserStatusInputShape = {
   conversationUrl: z.string().url().optional(),
@@ -172,7 +174,67 @@ const extractSandboxArtifactsOutputShape = {
   warnings: z.array(z.string()),
 } satisfies z.ZodRawShape;
 
+const createSessionInputSchema = z.object(createSessionInputShape);
+const sendTurnInputSchema = z.object(sendTurnInputShape);
+
+const asyncJobStartOutputShape = {
+  jobId: z.string(),
+  kind: z.string(),
+  status: z.string(),
+  phase: z.string().optional(),
+  startedAt: z.string().optional(),
+  updatedAt: z.string().optional(),
+  attachTool: z.literal("oracle_job_events").optional(),
+  resultTool: z.literal("oracle_job_result").optional(),
+  pollTool: z.literal("oracle_job_status"),
+} satisfies z.ZodRawShape;
+
 export function registerChatgptSessionTools(server: McpServer): void {
+  server.registerTool(
+    "chatgpt_create_session_async",
+    {
+      title: "Start async ChatGPT conversation",
+      description:
+        "Start a long-running ChatGPT conversation turn and return immediately with a job id. Poll oracle_job_status to collect the completed text, images, and sandbox artifacts.",
+      inputSchema: createSessionInputShape,
+      outputSchema: asyncJobStartOutputShape,
+    },
+    async (input: unknown) => {
+      const parsed = createSessionInputSchema.parse(input);
+      const daemonJob = await maybeStartDaemonJob("chatgpt_create_session", parsed);
+      if (daemonJob) {
+        const structuredContent = { ...daemonJob };
+        return {
+          structuredContent,
+          content: [
+            {
+              type: "text" as const,
+              text: `Started daemon-backed ChatGPT create-session job ${daemonJob.jobId}. Poll oracle_job_status with this jobId.`,
+            },
+          ],
+        };
+      }
+      const job = startMcpJob("chatgpt_create_session", () => runCreateSession(parsed));
+      const structuredContent = {
+        jobId: job.id,
+        kind: job.kind,
+        status: job.status,
+        startedAt: job.startedAt,
+        updatedAt: job.updatedAt,
+        pollTool: "oracle_job_status" as const,
+      };
+      return {
+        structuredContent,
+        content: [
+          {
+            type: "text" as const,
+            text: `Started ChatGPT create-session job ${job.id}. Poll oracle_job_status with this jobId.`,
+          },
+        ],
+      };
+    },
+  );
+
   server.registerTool(
     "chatgpt_create_session",
     {
@@ -183,23 +245,8 @@ export function registerChatgptSessionTools(server: McpServer): void {
       outputSchema: sendTurnOutputShape,
     },
     async (input: unknown) => {
-      const parsed = z.object(createSessionInputShape).parse(input);
-      const config = await resolveMcpBrowserConfig(parsed.remoteChrome);
-      const attachments = await resolveBrowserAttachments(parsed.files ?? []);
-      const result = await createChatgptSession({
-        prompt: parsed.prompt,
-        attachments,
-        timeoutMs: parsed.timeoutMs,
-        includeSnapshot: parsed.includeSnapshot,
-        config: {
-          ...config,
-          modelStrategy: parsed.browserModelStrategy as BrowserModelStrategy,
-          desiredModel: parsed.browserModelLabel ?? config.desiredModel,
-          sandboxArtifactsOutputDir:
-            parsed.sandboxArtifactsOutputDir ?? config.sandboxArtifactsOutputDir,
-        },
-      });
-      const structuredContent = serializeTurnResult(result);
+      const parsed = createSessionInputSchema.parse(input);
+      const structuredContent = await runCreateSession(parsed);
       return {
         structuredContent,
         content: [
@@ -263,7 +310,9 @@ export function registerChatgptSessionTools(server: McpServer): void {
       });
       const structuredContent = {
         ...result,
-        generatedImages: result.generatedImages.map(({ domRecords: _domRecords, ...image }) => image),
+        generatedImages: result.generatedImages.map(
+          ({ domRecords: _domRecords, ...image }) => image,
+        ),
       };
       return {
         structuredContent,
@@ -317,6 +366,51 @@ export function registerChatgptSessionTools(server: McpServer): void {
   );
 
   server.registerTool(
+    "chatgpt_send_turn_async",
+    {
+      title: "Start async ChatGPT conversation turn",
+      description:
+        "Start a long-running turn on an existing ChatGPT conversation and return immediately with a job id. Poll oracle_job_status to collect the completed result.",
+      inputSchema: sendTurnInputShape,
+      outputSchema: asyncJobStartOutputShape,
+    },
+    async (input: unknown) => {
+      const parsed = sendTurnInputSchema.parse(input);
+      const daemonJob = await maybeStartDaemonJob("chatgpt_send_turn", parsed);
+      if (daemonJob) {
+        const structuredContent = { ...daemonJob };
+        return {
+          structuredContent,
+          content: [
+            {
+              type: "text" as const,
+              text: `Started daemon-backed ChatGPT send-turn job ${daemonJob.jobId}. Poll oracle_job_status with this jobId.`,
+            },
+          ],
+        };
+      }
+      const job = startMcpJob("chatgpt_send_turn", () => runSendTurn(parsed));
+      const structuredContent = {
+        jobId: job.id,
+        kind: job.kind,
+        status: job.status,
+        startedAt: job.startedAt,
+        updatedAt: job.updatedAt,
+        pollTool: "oracle_job_status" as const,
+      };
+      return {
+        structuredContent,
+        content: [
+          {
+            type: "text" as const,
+            text: `Started ChatGPT send-turn job ${job.id}. Poll oracle_job_status with this jobId.`,
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
     "chatgpt_send_turn",
     {
       title: "Send ChatGPT conversation turn",
@@ -326,24 +420,8 @@ export function registerChatgptSessionTools(server: McpServer): void {
       outputSchema: sendTurnOutputShape,
     },
     async (input: unknown) => {
-      const parsed = z.object(sendTurnInputShape).parse(input);
-      const config = await resolveMcpBrowserConfig(parsed.remoteChrome);
-      const attachments = await resolveBrowserAttachments(parsed.files ?? []);
-      const structuredContent = await sendChatgptTurn({
-        conversationUrl: parsed.conversationUrl,
-        prompt: parsed.prompt,
-        attachments,
-        timeoutMs: parsed.timeoutMs,
-        includeSnapshot: parsed.includeSnapshot,
-        config: {
-          ...config,
-          modelStrategy: parsed.browserModelStrategy as BrowserModelStrategy,
-          desiredModel: parsed.browserModelLabel ?? config.desiredModel,
-          sandboxArtifactsOutputDir:
-            parsed.sandboxArtifactsOutputDir ?? config.sandboxArtifactsOutputDir,
-        },
-      });
-      const serialized = serializeTurnResult(structuredContent);
+      const parsed = sendTurnInputSchema.parse(input);
+      const serialized = await runSendTurn(parsed);
       return {
         structuredContent: serialized,
         content: [
@@ -355,6 +433,45 @@ export function registerChatgptSessionTools(server: McpServer): void {
       };
     },
   );
+}
+
+async function runCreateSession(parsed: z.infer<typeof createSessionInputSchema>) {
+  const config = await resolveMcpBrowserConfig(parsed.remoteChrome);
+  const attachments = await resolveBrowserAttachments(parsed.files ?? []);
+  const result = await createChatgptSession({
+    prompt: parsed.prompt,
+    attachments,
+    timeoutMs: parsed.timeoutMs,
+    includeSnapshot: parsed.includeSnapshot,
+    config: {
+      ...config,
+      modelStrategy: parsed.browserModelStrategy as BrowserModelStrategy,
+      desiredModel: parsed.browserModelLabel ?? config.desiredModel,
+      sandboxArtifactsOutputDir:
+        parsed.sandboxArtifactsOutputDir ?? config.sandboxArtifactsOutputDir,
+    },
+  });
+  return serializeTurnResult(result);
+}
+
+async function runSendTurn(parsed: z.infer<typeof sendTurnInputSchema>) {
+  const config = await resolveMcpBrowserConfig(parsed.remoteChrome);
+  const attachments = await resolveBrowserAttachments(parsed.files ?? []);
+  const result = await sendChatgptTurn({
+    conversationUrl: parsed.conversationUrl,
+    prompt: parsed.prompt,
+    attachments,
+    timeoutMs: parsed.timeoutMs,
+    includeSnapshot: parsed.includeSnapshot,
+    config: {
+      ...config,
+      modelStrategy: parsed.browserModelStrategy as BrowserModelStrategy,
+      desiredModel: parsed.browserModelLabel ?? config.desiredModel,
+      sandboxArtifactsOutputDir:
+        parsed.sandboxArtifactsOutputDir ?? config.sandboxArtifactsOutputDir,
+    },
+  });
+  return serializeTurnResult(result);
 }
 
 async function resolveMcpBrowserConfig(remoteChrome?: string) {
@@ -385,4 +502,13 @@ function serializeTurnResult(result: Awaited<ReturnType<typeof sendChatgptTurn>>
       ({ domRecords: _domRecords, ...image }) => image,
     ),
   };
+}
+
+async function maybeStartDaemonJob(
+  kind: "chatgpt_create_session" | "chatgpt_send_turn",
+  input: unknown,
+) {
+  const daemon = await resolveDaemonClientWithOptionalAutostart();
+  if (!daemon) return null;
+  return await daemon.startJob({ kind, input });
 }

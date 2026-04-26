@@ -141,8 +141,9 @@ export async function readChatgptProject(
     const projectId = fallbackProject.projectId ?? projectIdFromUrl(options.projectUrl);
     const listedProjects = await readProjectsFromRuntime(Runtime);
     const project =
-      listedProjects.find((candidate) => candidate.projectId && candidate.projectId === projectId) ??
-      fallbackProject;
+      listedProjects.find(
+        (candidate) => candidate.projectId && candidate.projectId === projectId,
+      ) ?? fallbackProject;
     const conversations = await waitForProjectConversations(Runtime, options.timeoutMs ?? 20_000);
     return { page, project, conversations, warnings: [] };
   } finally {
@@ -204,7 +205,10 @@ export async function createChatgptProject(
     await waitForDocumentReady(Runtime, options.timeoutMs ?? 20_000);
     await delay(1_500);
     const pageAfter = await snapshotChatgptPage(Runtime);
-    const projectAfter = await readCurrentProjectFromRuntime(Runtime, project.url ?? pageAfter.href);
+    const projectAfter = await readCurrentProjectFromRuntime(
+      Runtime,
+      project.url ?? pageAfter.href,
+    );
     const verification =
       pageAfter.href.includes(`/g/${project.projectId ?? ""}/project`) ||
       (project.url ? normalizeUrl(pageAfter.href) === normalizeUrl(project.url) : false) ||
@@ -368,7 +372,9 @@ export async function deleteChatgptConversation(
       verification,
       warnings:
         verification === "not_verified"
-          ? ["Delete confirmation was clicked, but the browser still appears to be on the target conversation URL."]
+          ? [
+              "Delete confirmation was clicked, but the browser still appears to be on the target conversation URL.",
+            ]
           : [],
     };
   } finally {
@@ -455,9 +461,10 @@ export async function moveChatgptConversationToProject(
       : pageAfter.title.startsWith(`${targetProject.name} -`) ||
           pageAfter.title === targetProject.name
         ? "page_title_project"
-      : pageAfter.href.includes(`/g/${targetProjectId}/`) && pageAfter.href.includes(`/c/${conversationId}`)
-        ? "url_changed_to_project"
-        : "not_verified";
+        : pageAfter.href.includes(`/g/${targetProjectId}/`) &&
+            pageAfter.href.includes(`/c/${conversationId}`)
+          ? "url_changed_to_project"
+          : "not_verified";
     return {
       pageBefore,
       pageAfter,
@@ -469,7 +476,9 @@ export async function moveChatgptConversationToProject(
       verification,
       warnings:
         verification === "not_verified"
-          ? ["Move target was clicked, but the moved conversation was not verified in the target project."]
+          ? [
+              "Move target was clicked, but the moved conversation was not verified in the target project.",
+            ]
           : [],
     };
   } finally {
@@ -729,7 +738,7 @@ async function readCurrentProjectFromRuntime(
     name:
       typeof value?.name === "string" && value.name.trim() && value.name.trim() !== "Chat history"
         ? value.name.trim()
-        : projectNameFromProjectId(fallbackId) ?? "Project",
+        : (projectNameFromProjectId(fallbackId) ?? "Project"),
     url: typeof value?.url === "string" && value.url ? value.url : fallbackUrl,
     projectId:
       typeof value?.projectId === "string" && value.projectId ? value.projectId : fallbackId,

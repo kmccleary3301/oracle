@@ -275,10 +275,7 @@ async function fetchImageInBrowser(
   return value;
 }
 
-function resolveOutputDir(
-  options: ExtractChatgptImagesOptions,
-  page: ChatgptPageSnapshot,
-): string {
+function resolveOutputDir(options: ExtractChatgptImagesOptions, page: ChatgptPageSnapshot): string {
   if (options.outputDir) {
     return path.resolve(options.outputDir);
   }

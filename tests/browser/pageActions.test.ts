@@ -1438,6 +1438,28 @@ describe("waitForAssistantResponse", () => {
     }
   });
 
+  test("treats image-only assistant payloads as completed responses", async () => {
+    const runtime = {
+      evaluate: vi.fn().mockResolvedValue({
+        result: {
+          type: "object",
+          value: {
+            text: "ChatGPT said:",
+            html: '<img src="/backend-api/estuary/content?id=file_123">',
+            messageId: "mid",
+            turnId: "tid",
+            generatedImageFileIds: ["file_123"],
+          },
+        },
+      }),
+    } as unknown as ChromeClient["Runtime"];
+
+    const result = await waitForAssistantResponse(runtime, 1000, logger);
+
+    expect(result.text).toBe("Generated image");
+    expect(result.meta).toEqual({ messageId: "mid", turnId: "tid" });
+  });
+
   test("aborts poller when evaluation wins (no background polling)", async () => {
     vi.useFakeTimers();
     try {
@@ -1700,6 +1722,8 @@ describe("waitForAssistantResponse", () => {
     expect(capturedExpression).not.toContain("document.querySelectorAll('.markdown')");
     expect(capturedExpression).toContain("data-message-author-role");
     expect(capturedExpression).toContain("role === 'assistant'");
+    expect(capturedExpression).toContain("generatedImageFileIds");
+    expect(capturedExpression).toContain("/backend-api/estuary/");
   });
 
   test("falls back to snapshot when observer fails", async () => {
@@ -1731,6 +1755,39 @@ describe("waitForAssistantResponse", () => {
     const runtime = { evaluate } as unknown as ChromeClient["Runtime"];
     const result = await waitForAssistantResponse(runtime, 10_000, logger);
     expect(result.text).toBe("Recovered assistant response.");
+    expect(evaluate).toHaveBeenCalled();
+  });
+
+  test("recovers image-only assistant snapshots when observer fails", async () => {
+    const evaluate = vi
+      .fn()
+      .mockImplementation(async (params: { expression?: string; awaitPromise?: boolean }) => {
+        if (params?.awaitPromise) {
+          throw new Error("observer failed");
+        }
+        if (
+          typeof params?.expression === "string" &&
+          params.expression.includes("extractAssistantTurn")
+        ) {
+          return {
+            result: {
+              value: {
+                text: "ChatGPT said:",
+                html: '<img src="/backend-api/estuary/content?id=file_456">',
+                messageId: "mid",
+                turnId: "tid",
+                generatedImageFileIds: ["file_456"],
+              },
+            },
+          };
+        }
+        return { result: { value: null } };
+      });
+    const runtime = { evaluate } as unknown as ChromeClient["Runtime"];
+
+    const result = await waitForAssistantResponse(runtime, 200, logger);
+
+    expect(result.text).toBe("Generated image");
     expect(evaluate).toHaveBeenCalled();
   });
 });

@@ -70,6 +70,7 @@ export const DEFAULT_BROWSER_CONFIG: ResolvedBrowserConfig = {
   archiveConversations: "auto",
   resumeConversationUrl: null,
   sandboxArtifactsOutputDir: null,
+  thinkingFallback: "allow",
 };
 
 export function resolveBrowserConfig(
@@ -156,6 +157,7 @@ export function resolveBrowserConfig(
     remoteChromeMaxTabs:
       config?.remoteChromeMaxTabs ?? DEFAULT_BROWSER_CONFIG.remoteChromeMaxTabs,
     thinkingTime: config?.thinkingTime,
+    thinkingFallback: config?.thinkingFallback ?? DEFAULT_BROWSER_CONFIG.thinkingFallback,
     researchMode,
     archiveConversations,
     resumeConversationUrl:

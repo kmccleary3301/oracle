@@ -8,13 +8,11 @@ import { runBrowserMode } from "../index.js";
 import type {
   BrowserAttachment,
   BrowserAutomationConfig,
+  BrowserRunOptions,
   BrowserLogger,
   ChromeClient,
 } from "../types.js";
-import {
-  extractGeneratedImagesFromRuntime,
-  snapshotChatgptPage,
-} from "./imageArtifacts.js";
+import { extractGeneratedImagesFromRuntime, snapshotChatgptPage } from "./imageArtifacts.js";
 import { extractSandboxArtifactRefsFromRuntime } from "./sandboxArtifacts.js";
 import type {
   ChatgptBrowserStatus,
@@ -63,6 +61,7 @@ export interface ChatgptSendTurnOptions {
   config?: BrowserAutomationConfig;
   timeoutMs?: number;
   includeSnapshot?: boolean;
+  runtimeHintCb?: BrowserRunOptions["runtimeHintCb"];
   log?: BrowserLogger;
 }
 
@@ -72,6 +71,7 @@ export interface ChatgptCreateSessionOptions {
   config?: BrowserAutomationConfig;
   timeoutMs?: number;
   includeSnapshot?: boolean;
+  runtimeHintCb?: BrowserRunOptions["runtimeHintCb"];
   log?: BrowserLogger;
 }
 
@@ -188,12 +188,9 @@ export async function probeChatgptAttachments(
     for (let attachmentIndex = 0; attachmentIndex < attachments.length; attachmentIndex += 1) {
       const attachment = attachments[attachmentIndex];
       logger(`Probe uploading attachment: ${attachment.displayPath}`);
-      await uploadAttachmentFile(
-        { runtime: Runtime, dom: DOM, input: Input },
-        attachment,
-        logger,
-        { expectedCount: attachmentIndex + 1 },
-      );
+      await uploadAttachmentFile({ runtime: Runtime, dom: DOM, input: Input }, attachment, logger, {
+        expectedCount: attachmentIndex + 1,
+      });
       await delay(300);
     }
 
@@ -241,7 +238,9 @@ export async function readChatgptConversationSnapshot(
   const config = resolveBrowserConfig(options.config);
   const remoteChrome = config.remoteChrome;
   if (!remoteChrome) {
-    throw new Error("ChatGPT conversation snapshot requires browser.remoteChrome or --remote-chrome.");
+    throw new Error(
+      "ChatGPT conversation snapshot requires browser.remoteChrome or --remote-chrome.",
+    );
   }
   const connection = await connectToRemoteChrome(
     remoteChrome.host,
@@ -273,9 +272,7 @@ export async function readChatgptConversationSnapshot(
   }
 }
 
-export async function sendChatgptTurn(
-  options: ChatgptSendTurnOptions,
-): Promise<ChatgptTurnResult> {
+export async function sendChatgptTurn(options: ChatgptSendTurnOptions): Promise<ChatgptTurnResult> {
   const baselineSnapshot = options.includeSnapshot
     ? await readChatgptConversationSnapshot({
         conversationUrl: options.conversationUrl,
@@ -296,6 +293,7 @@ export async function sendChatgptTurn(
     prompt: options.prompt,
     attachments: options.attachments ?? [],
     config,
+    runtimeHintCb: options.runtimeHintCb,
     log: options.log,
   });
   const snapshot =
@@ -339,6 +337,7 @@ export async function sendChatgptTurn(
           ),
       ),
     downloadedSandboxArtifacts: result.downloadedSandboxArtifacts ?? [],
+    thinkingTimeSelection: result.thinkingTimeSelection,
     warnings: result.warnings ?? [],
   };
 }
@@ -357,6 +356,7 @@ export async function createChatgptSession(
     prompt: options.prompt,
     attachments: options.attachments ?? [],
     config,
+    runtimeHintCb: options.runtimeHintCb,
     log: options.log,
   });
   const snapshot =
@@ -386,6 +386,7 @@ export async function createChatgptSession(
     sandboxArtifacts: result.sandboxArtifacts ?? snapshot?.sandboxArtifacts ?? [],
     newSandboxArtifacts: result.newSandboxArtifacts ?? result.sandboxArtifacts ?? [],
     downloadedSandboxArtifacts: result.downloadedSandboxArtifacts ?? [],
+    thinkingTimeSelection: result.thinkingTimeSelection,
     warnings: result.warnings ?? [],
   };
 }
@@ -526,8 +527,7 @@ async function readTurnsFromRuntime(
         turnId: typeof item.turnId === "string" ? item.turnId : null,
         messageId: typeof item.messageId === "string" ? item.messageId : null,
         text,
-        textPreview:
-          typeof item.textPreview === "string" ? item.textPreview : text.slice(0, 240),
+        textPreview: typeof item.textPreview === "string" ? item.textPreview : text.slice(0, 240),
         generatedImageFileIds: Array.isArray(item.generatedImageFileIds)
           ? item.generatedImageFileIds.filter((id): id is string => typeof id === "string")
           : [],

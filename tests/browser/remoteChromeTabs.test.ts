@@ -42,9 +42,8 @@ describe("remoteChromeTabs", () => {
   });
 
   test("records and forgets tracked targets", async () => {
-    const { forgetRemoteChromeTarget, recordRemoteChromeTarget } = await import(
-      "../../src/browser/remoteChromeTabs.js"
-    );
+    const { forgetRemoteChromeTarget, recordRemoteChromeTarget } =
+      await import("../../src/browser/remoteChromeTabs.js");
 
     await recordRemoteChromeTarget("127.0.0.1", 9222, "target-1", "https://chatgpt.com/c/1");
     await recordRemoteChromeTarget("127.0.0.1", 9222, "target-2", "https://chatgpt.com/c/2");
@@ -56,9 +55,8 @@ describe("remoteChromeTabs", () => {
   });
 
   test("prunes oldest tracked tabs to honor the cap", async () => {
-    const { pruneRemoteChromeTargets, recordRemoteChromeTarget } = await import(
-      "../../src/browser/remoteChromeTabs.js"
-    );
+    const { pruneRemoteChromeTargets, recordRemoteChromeTarget } =
+      await import("../../src/browser/remoteChromeTabs.js");
 
     await recordRemoteChromeTarget("127.0.0.1", 9222, "target-1", "https://chatgpt.com/c/1");
     await new Promise((resolve) => setTimeout(resolve, 5));
@@ -83,9 +81,8 @@ describe("remoteChromeTabs", () => {
   });
 
   test("reserves a slot before opening a new tab", async () => {
-    const { pruneRemoteChromeTargets, recordRemoteChromeTarget } = await import(
-      "../../src/browser/remoteChromeTabs.js"
-    );
+    const { pruneRemoteChromeTargets, recordRemoteChromeTarget } =
+      await import("../../src/browser/remoteChromeTabs.js");
 
     await recordRemoteChromeTarget("127.0.0.1", 9222, "target-1", "https://chatgpt.com/c/1");
     await new Promise((resolve) => setTimeout(resolve, 5));
@@ -125,5 +122,21 @@ describe("remoteChromeTabs", () => {
 
     expect(result.closedTargetIds).toEqual(["target-1"]);
     expect(targetCloseMock).toHaveBeenCalledWith({ targetId: "target-1" });
+  });
+
+  test("lists only ChatGPT page targets when requested", async () => {
+    const { listRemoteChromePageTargets } = await import("../../src/browser/remoteChromeTabs.js");
+    cdpListMock.mockResolvedValue([
+      { id: "target-1", type: "page", url: "https://chatgpt.com/c/1", title: "ChatGPT" },
+      { id: "target-2", type: "page", url: "https://example.com", title: "Example" },
+      { id: "target-3", type: "service_worker", url: "https://chatgpt.com/sw.js" },
+      { id: "target-4", type: "page", url: "about:blank", title: "" },
+    ]);
+
+    const targets = await listRemoteChromePageTargets("127.0.0.1", 9222, {
+      chatgptOnly: true,
+    });
+
+    expect(targets.map((target) => target.id)).toEqual(["target-1", "target-4"]);
   });
 });

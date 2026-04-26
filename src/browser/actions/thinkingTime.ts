@@ -32,6 +32,21 @@ function formatBrowserThinkingLog(message: string): string {
   return `${BROWSER_THINKING_LOG_PREFIX} ${message.replace(/^Thinking time:\s*/, "")}`;
 }
 
+export type ThinkingTimeSelectionStatus =
+  | "selected"
+  | "already-selected"
+  | "unavailable"
+  | "option-not-found"
+  | "failed";
+
+export interface ThinkingTimeSelectionResult {
+  requestedThinkingTime: ThinkingTimeLevel;
+  actualThinkingTime?: string | null;
+  status: ThinkingTimeSelectionStatus;
+  fallbackUsed: boolean;
+  reason?: string;
+}
+
 /**
  * Surfaces the model-picker snapshot captured alongside a failed detection.
  *
@@ -127,20 +142,39 @@ export async function ensureThinkingTimeIfAvailable(
   level: ThinkingTimeLevel,
   logger: BrowserLogger,
   desiredModel?: string | null,
-): Promise<boolean> {
+): Promise<ThinkingTimeSelectionResult> {
   try {
     const result = await evaluateThinkingTimeSelection(Runtime, level, desiredModel);
     const capitalizedLevel = level.charAt(0).toUpperCase() + level.slice(1);
 
     switch (result?.status) {
       case "already-selected":
-        logger(formatBrowserThinkingLog(`${result.label ?? capitalizedLevel} (already selected)`));
-        return true;
+        logger(`Thinking time: ${result.label ?? capitalizedLevel} (already selected)`);
+        return {
+          requestedThinkingTime: level,
+          actualThinkingTime: result.label ?? capitalizedLevel,
+          status: "already-selected",
+          fallbackUsed: false,
+        };
       case "switched":
-        logger(formatBrowserThinkingLog(result.label ?? capitalizedLevel));
-        return true;
+        logger(`Thinking time: ${result.label ?? capitalizedLevel}`);
+        return {
+          requestedThinkingTime: level,
+          actualThinkingTime: result.label ?? capitalizedLevel,
+          status: "selected",
+          fallbackUsed: false,
+        };
       case "chip-not-found":
       case "menu-not-found":
+        if (logger.verbose) {
+          logger(`Thinking time: ${result.status.replaceAll("-", " ")}; continuing with default.`);
+        }
+        return {
+          requestedThinkingTime: level,
+          status: "unavailable",
+          fallbackUsed: true,
+          reason: result.status,
+        };
       case "option-not-found":
       case "selection-unverified":
       case "model-kind-not-found":
@@ -151,12 +185,22 @@ export async function ensureThinkingTimeIfAvailable(
             ),
           );
         }
-        return false;
+        return {
+          requestedThinkingTime: level,
+          status: "option-not-found",
+          fallbackUsed: true,
+          reason: result.status,
+        };
       default:
         if (logger.verbose) {
           logger(formatBrowserThinkingLog("unknown outcome; continuing with default."));
         }
-        return false;
+        return {
+          requestedThinkingTime: level,
+          status: "failed",
+          fallbackUsed: true,
+          reason: "unknown-outcome",
+        };
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -164,7 +208,12 @@ export async function ensureThinkingTimeIfAvailable(
       logger(formatBrowserThinkingLog(`selection failed (${message}); continuing with default.`));
       await logDomFailure(Runtime, logger, "thinking-time");
     }
-    return false;
+    return {
+      requestedThinkingTime: level,
+      status: "failed",
+      fallbackUsed: true,
+      reason: message,
+    };
   }
 }
 

@@ -29,9 +29,7 @@ describe("ChatGPT generated image artifact helpers", () => {
     const url =
       "https://chatgpt.com/backend-api/estuary/content?id=file_000000009f0c71f78a1184c4d28dd7b5&ts=1&p=fs";
 
-    expect(extractGeneratedImageFileId(url)).toBe(
-      "file_000000009f0c71f78a1184c4d28dd7b5",
-    );
+    expect(extractGeneratedImageFileId(url)).toBe("file_000000009f0c71f78a1184c4d28dd7b5");
     expect(isLikelyChatgptGeneratedImageUrl(url)).toBe(true);
   });
 
