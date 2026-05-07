@@ -67,6 +67,7 @@ import { BrowserAutomationError } from "../oracle/errors.js";
 import { alignPromptEchoPair, buildPromptEchoMatcher } from "./reattachHelpers.js";
 import { buildConversationTurnCountExpression } from "./conversationTurns.js";
 import type { ProfileRunLock } from "./profileState.js";
+import { normalizePromptText } from "../oracle/promptText.js";
 import {
   cleanupStaleProfileState,
   acquireProfileRunLock,
@@ -920,8 +921,8 @@ function buildSkippedModelSelectionEvidence(
   };
 }
 export async function runBrowserMode(options: BrowserRunOptions): Promise<BrowserRunResult> {
-  const promptText = options.prompt?.trim();
-  if (!promptText) {
+  const promptText = normalizePromptText(options.prompt ?? "");
+  if (!promptText.trim()) {
     throw new Error("Prompt text is required when using browser mode.");
   }
 

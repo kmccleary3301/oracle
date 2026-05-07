@@ -11,14 +11,16 @@ import { DEFAULT_SYSTEM_PROMPT } from "./config.js";
 import { createFileSections, readFiles } from "./files.js";
 import { formatFileSections } from "./markdown.js";
 import { createFsAdapter } from "./fsAdapter.js";
+import { hasPromptText, normalizePromptText } from "./promptText.js";
 
 export function buildPrompt(basePrompt: string, files: FileContent[], cwd = process.cwd()): string {
+  const normalizedPrompt = normalizePromptText(basePrompt);
   if (!files.length) {
-    return basePrompt;
+    return normalizedPrompt;
   }
   const sections = createFileSections(files, cwd);
   const sectionText = formatFileSections(sections, { includeFileIndex: true });
-  return `${basePrompt.trim()}\n\n${sectionText}`;
+  return normalizedPrompt.length > 0 ? `${normalizedPrompt}\n\n${sectionText}` : sectionText;
 }
 
 export function buildRequestBody({
@@ -77,8 +79,8 @@ export async function renderPromptMarkdown(
     maxFileSizeBytes: options.maxFileSizeBytes,
   });
   const sections = createFileSections(files, cwd);
-  const systemPrompt = options.system?.trim() || DEFAULT_SYSTEM_PROMPT;
-  const userPrompt = (options.prompt ?? "").trim();
+  const systemPrompt = hasPromptText(options.system) ? normalizePromptText(options.system) : DEFAULT_SYSTEM_PROMPT;
+  const userPrompt = normalizePromptText(options.prompt ?? "");
   const lines = ["[SYSTEM]", systemPrompt, ""];
   lines.push("[USER]", userPrompt, "");
   lines.push(formatFileSections(sections));

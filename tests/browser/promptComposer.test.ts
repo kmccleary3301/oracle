@@ -2,12 +2,14 @@ import { describe, expect, test, vi } from "vitest";
 import {
   __test__ as promptComposer,
   clearPromptComposer,
+  insertPromptText,
   submitPrompt,
 } from "../../src/browser/actions/promptComposer.js";
 import {
   CONVERSATION_TURN_CONTAINER_SELECTOR,
   CONVERSATION_TURN_SELECTOR,
 } from "../../src/browser/constants.js";
+import type { BrowserLogger } from "../../src/browser/types.js";
 
 describe("promptComposer", () => {
   test("fails composer clearing when stale text remains", async () => {
@@ -320,6 +322,59 @@ describe("promptComposer", () => {
       await expect(result).resolves.toBe(true);
       expect(evaluate).toHaveBeenCalledTimes(1);
       expect(input.dispatchMouseEvent).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("preserves leading and trailing newlines in inserted prompts", async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = {
+        evaluate: vi
+          .fn()
+          .mockResolvedValueOnce({
+            result: { value: { ready: true, composer: true, fileInput: true } },
+          })
+          .mockResolvedValueOnce({ result: { value: { focused: true } } })
+          .mockResolvedValueOnce({
+            result: {
+              value: {
+                editorText: "\nHello\n",
+                fallbackValue: "\nHello\n",
+                activeValue: "\nHello\n",
+              },
+            },
+          })
+          .mockResolvedValueOnce({
+            result: {
+              value: {
+                editorText: "\nHello\n",
+                fallbackValue: "\nHello\n",
+                activeValue: "\nHello\n",
+              },
+            },
+          }),
+      };
+      const input = {
+        insertText: vi.fn().mockResolvedValue(undefined),
+        dispatchKeyEvent: vi.fn().mockResolvedValue(undefined),
+      };
+      const logger = vi.fn() as unknown as BrowserLogger;
+      const promise = insertPromptText(
+        {
+          runtime: runtime as never,
+          input: input as never,
+          inputTimeoutMs: 1_000,
+        },
+        "\nHello\n",
+        logger,
+      );
+
+      await vi.advanceTimersByTimeAsync(500);
+      await promise;
+
+      expect(input.insertText).toHaveBeenCalledWith({ text: "\nHello\n" });
     } finally {
       vi.useRealTimers();
     }

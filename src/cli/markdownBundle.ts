@@ -4,6 +4,7 @@ import { buildPrompt } from "../oracle/request.js";
 import { createFileSections, readFiles } from "../oracle/files.js";
 import { createFsAdapter } from "../oracle/fsAdapter.js";
 import { buildPromptMarkdown } from "../oracle/promptAssembly.js";
+import { hasPromptText, normalizePromptText } from "../oracle/promptText.js";
 import type { MinimalFsModule, RunOracleOptions, FileContent } from "../oracle/types.js";
 
 export interface MarkdownBundle {
@@ -25,8 +26,10 @@ export async function buildMarkdownBundle(
     maxFileSizeBytes: options.maxFileSizeBytes,
   });
   const sections = createFileSections(files, cwd);
-  const systemPrompt = options.system?.trim() || DEFAULT_SYSTEM_PROMPT;
-  const userPrompt = (options.prompt ?? "").trim();
+  const systemPrompt = hasPromptText(options.system)
+    ? normalizePromptText(options.system)
+    : DEFAULT_SYSTEM_PROMPT;
+  const userPrompt = normalizePromptText(options.prompt ?? "");
 
   const markdown = buildPromptMarkdown(systemPrompt, userPrompt, sections);
   const promptWithFiles = buildPrompt(userPrompt, files, cwd);
