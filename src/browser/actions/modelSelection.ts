@@ -335,20 +335,32 @@ function buildModelSelectionExpression(
       try {
         if (dispatchClickSequence(button)) {
           lastPointerClick = performance.now();
-          return;
         }
       } catch {}
+      await new Promise((resolve) => setTimeout(resolve, 60));
       try {
-        document.dispatchEvent(
-          new KeyboardEvent('keydown', {
-            key: 'Escape',
-            code: 'Escape',
-            keyCode: 27,
-            which: 27,
-            bubbles: true,
-          }),
-        );
+        for (const target of [document, window]) {
+          target.dispatchEvent(
+            new KeyboardEvent('keydown', {
+              key: 'Escape',
+              code: 'Escape',
+              keyCode: 27,
+              which: 27,
+              bubbles: true,
+            }),
+          );
+          target.dispatchEvent(
+            new KeyboardEvent('keyup', {
+              key: 'Escape',
+              code: 'Escape',
+              keyCode: 27,
+              which: 27,
+              bubbles: true,
+            }),
+          );
+        }
       } catch {}
+      await new Promise((resolve) => setTimeout(resolve, 60));
     };
 
     const getButtonLabel = () => (findModelButton()?.textContent ?? '').trim();
@@ -610,6 +622,7 @@ function buildModelSelectionExpression(
     }
 
     let lastPointerClick = 0;
+    let selectionAttempted = false;
     const pointerClick = () => {
       if (dispatchClickSequence(button)) {
         lastPointerClick = performance.now();
@@ -752,7 +765,11 @@ function buildModelSelectionExpression(
                       ? '5-0'
                       : null;
           // If a candidate advertises a different version, ignore it entirely.
-          if (candidateVersion && candidateVersion !== desiredVersion) {
+          if (
+            candidateVersion &&
+            candidateVersion !== desiredVersion &&
+            candidateVersion !== latestVersion
+          ) {
             return 0;
           }
           // When targeting an explicit version, avoid selecting submenu wrappers that can contain legacy models.
@@ -1102,6 +1119,11 @@ function buildModelSelectionExpression(
       dispatchClickSequence(node);
     };
 
+    if (MODEL_STRATEGY === 'current') {
+      const selected = findBestOption(true);
+      return { status: 'already-selected', label: selected?.label ?? getButtonLabel() };
+    }
+
     return new Promise((resolve) => {
       const start = performance.now();
       const detectTemporaryChat = () => {
@@ -1148,7 +1170,16 @@ function buildModelSelectionExpression(
           await openDelay();
         }
         ensureMenuOpen();
-        const match = findBestOption();
+        const selectedMatch = findBestOption(true);
+        const match = findBestOption(false);
+        if (selectedMatch && selectedMatch.score > 0 && (!match || selectedMatch.score >= match.score)) {
+          await closeMenu();
+          resolve({
+            status: selectionAttempted ? 'switched' : 'already-selected',
+            label: getOptionLabel(selectedMatch.node) || selectedMatch.label,
+          });
+          return;
+        }
         if (match) {
           if (
             activeSelectionMatchesTarget() ||

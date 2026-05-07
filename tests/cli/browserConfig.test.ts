@@ -494,6 +494,8 @@ describe("resolveBrowserModelLabel", () => {
     expect(resolveBrowserModelLabel("gpt-5.5", "gpt-5.5")).toBe("Thinking 5.5");
     expect(resolveBrowserModelLabel("gpt-5.4-pro", "gpt-5.4-pro")).toBe("Pro");
     expect(resolveBrowserModelLabel("gpt-5.4", "gpt-5.4")).toBe("Thinking 5.4");
+    expect(resolveBrowserModelLabel("gpt-5.5-pro", "gpt-5.5-pro")).toBe("Pro");
+    expect(resolveBrowserModelLabel("gpt-5.5", "gpt-5.5")).toBe("Thinking 5.5");
     expect(resolveBrowserModelLabel("gpt-5-pro", "gpt-5-pro")).toBe("Pro");
     expect(resolveBrowserModelLabel("gpt-5.2-pro", "gpt-5.2-pro")).toBe("Pro");
     expect(resolveBrowserModelLabel("gpt-5.1-pro", "gpt-5.1-pro")).toBe("Pro");

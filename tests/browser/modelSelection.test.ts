@@ -1120,9 +1120,9 @@ describe("browser model selection matchers", () => {
 
   it("closes the menu after a successful selection path", () => {
     const expression = buildModelSelectionExpressionForTest("gpt-5.4");
-    expect(expression).toContain("const closeMenu = () =>");
+    expect(expression).toContain("const closeMenu = async () =>");
     expect(expression).toContain("key: 'Escape'");
-    expect(expression).toContain("closeMenu();");
+    expect(expression).toContain("await closeMenu();");
   });
 
   it("recognizes current GPT-5.5 visible aliases in the picker expression", () => {
