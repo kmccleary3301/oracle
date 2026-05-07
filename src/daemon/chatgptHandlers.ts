@@ -35,12 +35,16 @@ const imageJobInputSchema = z.object({
 const createSessionJobInputSchema = z.object({
   prompt: z.string().min(1),
   files: z.array(z.string()).optional().default([]),
+  projectUrl: z.string().url().optional(),
   sandboxArtifactsOutputDir: z.string().optional(),
   remoteChrome: z.string().optional(),
   timeoutMs: z.number().optional(),
   browserModelStrategy: z.enum(["select", "current", "ignore"]).optional().default("current"),
   browserModelLabel: z.string().optional(),
+  browserThinkingTime: z.enum(["light", "standard", "extended", "heavy"]).optional(),
+  thinkingFallback: z.enum(["allow", "fail"]).optional().default("allow"),
   includeSnapshot: z.boolean().optional().default(false),
+  returnAfterSubmit: z.boolean().optional().default(false),
 });
 
 const sendTurnJobInputSchema = createSessionJobInputSchema.extend({
@@ -237,11 +241,18 @@ async function runCreateSessionJob(context: OracleDaemonJobHandlerContext, input
     prompt: parsed.prompt,
     attachments,
     timeoutMs: parsed.timeoutMs,
-    includeSnapshot: parsed.includeSnapshot,
+    includeSnapshot: parsed.returnAfterSubmit ? false : parsed.includeSnapshot,
+    returnAfterSubmit: parsed.returnAfterSubmit,
     config: {
       ...config,
+      url: parsed.projectUrl ?? config.url,
+      chatgptUrl: parsed.projectUrl ?? config.chatgptUrl,
       modelStrategy: parsed.browserModelStrategy as BrowserModelStrategy,
       desiredModel: parsed.browserModelLabel ?? config.desiredModel,
+      thinkingTime: (parsed.browserThinkingTime ?? config.thinkingTime) as
+        | ThinkingTimeLevel
+        | undefined,
+      thinkingFallback: parsed.thinkingFallback ?? config.thinkingFallback,
       sandboxArtifactsOutputDir:
         parsed.sandboxArtifactsOutputDir ?? config.sandboxArtifactsOutputDir,
     },
@@ -264,11 +275,16 @@ async function runSendTurnJob(context: OracleDaemonJobHandlerContext, input: unk
     prompt: parsed.prompt,
     attachments,
     timeoutMs: parsed.timeoutMs,
-    includeSnapshot: parsed.includeSnapshot,
+    includeSnapshot: parsed.returnAfterSubmit ? false : parsed.includeSnapshot,
+    returnAfterSubmit: parsed.returnAfterSubmit,
     config: {
       ...config,
       modelStrategy: parsed.browserModelStrategy as BrowserModelStrategy,
       desiredModel: parsed.browserModelLabel ?? config.desiredModel,
+      thinkingTime: (parsed.browserThinkingTime ?? config.thinkingTime) as
+        | ThinkingTimeLevel
+        | undefined,
+      thinkingFallback: parsed.thinkingFallback ?? config.thinkingFallback,
       sandboxArtifactsOutputDir:
         parsed.sandboxArtifactsOutputDir ?? config.sandboxArtifactsOutputDir,
     },

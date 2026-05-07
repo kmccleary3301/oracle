@@ -25,6 +25,7 @@ export interface BrowserDefaultsOptions {
   browserKeepBrowser?: boolean;
   browserModelStrategy?: BrowserModelStrategy;
   browserThinkingTime?: ThinkingTimeLevel;
+  browserThinkingFallback?: "allow" | "fail";
   browserManualLogin?: boolean;
   browserManualLoginProfileDir?: string | null;
   remoteChrome?: string;
@@ -120,6 +121,9 @@ export function applyBrowserDefaultsFromConfig(
   }
   if (isUnset("browserThinkingTime") && browser.thinkingTime !== undefined) {
     options.browserThinkingTime = browser.thinkingTime;
+  }
+  if (isUnset("browserThinkingFallback") && browser.thinkingFallback !== undefined) {
+    options.browserThinkingFallback = browser.thinkingFallback;
   }
   if (isUnset("browserManualLogin") && browser.manualLogin !== undefined) {
     options.browserManualLogin = browser.manualLogin;

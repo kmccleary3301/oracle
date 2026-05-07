@@ -172,6 +172,7 @@ interface CliOptions extends OptionValues {
   browserManualLogin?: boolean;
   browserManualLoginProfileDir?: string;
   browserThinkingTime?: "light" | "standard" | "extended" | "heavy";
+  browserThinkingFallback?: "allow" | "fail";
   browserAllowCookieErrors?: boolean;
   browserAttachments?: string;
   browserInlineFiles?: boolean;
@@ -626,6 +627,14 @@ program
   )
   .addOption(
     new Option(
+      "--browser-thinking-fallback <mode>",
+      "Thinking selector fallback policy: allow continues if unavailable; fail aborts if the requested level cannot be selected.",
+    )
+      .choices(["allow", "fail"])
+      .hideHelp(),
+  )
+  .addOption(
+    new Option(
       "--browser-allow-cookie-errors",
       "Continue even if Chrome cookies cannot be copied.",
     ).hideHelp(),
@@ -969,6 +978,11 @@ jobCommand
   .option("--browser-model-label <label>", "Exact/fuzzy ChatGPT model picker label to use.")
   .option("--browser-thinking-time <level>", "Thinking time intensity.")
   .option("--thinking-fallback <mode>", "Thinking selector fallback policy (allow|fail).", "allow")
+  .option(
+    "--return-after-submit",
+    "For ChatGPT create-session jobs, submit the prompt and persist the conversation URL without waiting for the answer.",
+    false,
+  )
   .option("--artifact-types <types>", "Comma-separated recovery/extraction types (images,sandbox).")
   .option("--connection-path <path>", "Path for the daemon connection artifact.")
   .option("--json", "Print structured JSON.", false)
@@ -993,6 +1007,7 @@ jobCommand
           browserModelLabel: commandOptions.browserModelLabel,
           browserThinkingTime: commandOptions.browserThinkingTime,
           thinkingFallback: commandOptions.thinkingFallback,
+          returnAfterSubmit: commandOptions.returnAfterSubmit,
           artifactTypes: parseArtifactTypesOption(commandOptions.artifactTypes),
         };
     const result = await client.startJob({ kind: kind as never, input });
@@ -1185,10 +1200,7 @@ imageCommand
   .option("--keep-tab", "Leave the opened conversation tab attached to Chrome.", false)
   .option("--json", "Print structured JSON.", false)
   .action(async (conversationUrl: string, rawCommandOptions, command?: Command) => {
-    const { options: commandOptions } = normalizeCommandActionOptions(
-      rawCommandOptions,
-      command,
-    );
+    const { options: commandOptions } = normalizeCommandActionOptions(rawCommandOptions, command);
     const { config: userConfig } = await loadUserConfig();
     const remoteChromeOption = commandOptions.remoteChrome ?? readCliOptionValue("--remote-chrome");
     const cliBrowserConfig = remoteChromeOption
@@ -1258,14 +1270,16 @@ imageCommand
   .option("--thinking-fallback <mode>", "Thinking selector fallback policy (allow|fail).", "allow")
   .option(
     "--artifact-types <types>",
-    "Comma-separated extraction types (images,sandbox).",
-    "images,sandbox",
+    "Comma-separated extraction types (images,sandbox). Defaults to images only for image generation.",
+    "images",
   )
   .option("--no-download", "Only report generated image references; do not download bytes.")
   .option("--json", "Print structured JSON.", false)
   .action(async (rawCommandOptions, command?: Command) => {
-    const { options: commandOptions, command: actionCommand } =
-      normalizeCommandActionOptions(rawCommandOptions, command);
+    const { options: commandOptions, command: actionCommand } = normalizeCommandActionOptions(
+      rawCommandOptions,
+      command,
+    );
     const remoteChromeOption = commandOptions.remoteChrome ?? readCliOptionValue("--remote-chrome");
     const config = await resolveChatgptCliBrowserConfig(remoteChromeOption);
     const attachments = await resolveBrowserAttachments(
@@ -1424,14 +1438,16 @@ imageCommand
   .option("--thinking-fallback <mode>", "Thinking selector fallback policy (allow|fail).", "allow")
   .option(
     "--artifact-types <types>",
-    "Comma-separated extraction types (images,sandbox).",
-    "images,sandbox",
+    "Comma-separated extraction types (images,sandbox). Defaults to images only for image editing.",
+    "images",
   )
   .option("--no-download", "Only report generated image references; do not download bytes.")
   .option("--json", "Print structured JSON.", false)
   .action(async (rawCommandOptions, command?: Command) => {
-    const { options: commandOptions, command: actionCommand } =
-      normalizeCommandActionOptions(rawCommandOptions, command);
+    const { options: commandOptions, command: actionCommand } = normalizeCommandActionOptions(
+      rawCommandOptions,
+      command,
+    );
     const fileInputs = resolveCommandFileInputs(commandOptions, actionCommand);
     if (fileInputs.length === 0) {
       throw new Error("Image edit requires at least one --file attachment.");
@@ -1670,10 +1686,7 @@ browserCommand
   )
   .option("--json", "Print structured JSON.", false)
   .action(async (rawCommandOptions, command?: Command) => {
-    const { options: commandOptions } = normalizeCommandActionOptions(
-      rawCommandOptions,
-      command,
-    );
+    const { options: commandOptions } = normalizeCommandActionOptions(rawCommandOptions, command);
     const code = commandOptions.code ?? (commandOptions.codeStdin ? await readTrimmedStdin() : "");
     if (!code) {
       throw new Error("OTP code is required. Pass --code or --code-stdin.");
@@ -1703,10 +1716,7 @@ browserCommand
   .option("--clear", "Delete the saved login continuation state.", false)
   .option("--json", "Print structured JSON.", false)
   .action(async (rawCommandOptions, command?: Command) => {
-    const { options: commandOptions } = normalizeCommandActionOptions(
-      rawCommandOptions,
-      command,
-    );
+    const { options: commandOptions } = normalizeCommandActionOptions(rawCommandOptions, command);
     if (commandOptions.clear) {
       await clearChatgptLoginState();
       if (!commandOptions.json) {
@@ -1780,8 +1790,10 @@ browserCommand
   .option("--keep-tab", "Leave the opened probe tab alive.", false)
   .option("--json", "Print structured JSON.", false)
   .action(async (rawCommandOptions, command?: Command) => {
-    const { options: commandOptions, command: actionCommand } =
-      normalizeCommandActionOptions(rawCommandOptions, command);
+    const { options: commandOptions, command: actionCommand } = normalizeCommandActionOptions(
+      rawCommandOptions,
+      command,
+    );
     const remoteChromeOption = commandOptions.remoteChrome ?? readCliOptionValue("--remote-chrome");
     const config = await resolveChatgptCliBrowserConfig(remoteChromeOption);
     const attachments = await resolveBrowserAttachments(
@@ -1817,10 +1829,7 @@ browserCommand
   .option("--keep-tab", "Leave the opened status tab alive.", false)
   .option("--json", "Print structured JSON.", false)
   .action(async (rawCommandOptions, command?: Command) => {
-    const { options: commandOptions } = normalizeCommandActionOptions(
-      rawCommandOptions,
-      command,
-    );
+    const { options: commandOptions } = normalizeCommandActionOptions(rawCommandOptions, command);
     const remoteChromeOption = commandOptions.remoteChrome ?? readCliOptionValue("--remote-chrome");
     const config = await resolveChatgptCliBrowserConfig(remoteChromeOption);
     const result = await readChatgptBrowserStatus({
@@ -1935,8 +1944,10 @@ chatCommand
   .option("--include-snapshot", "Include the resulting conversation snapshot.", false)
   .option("--json", "Print structured JSON.", false)
   .action(async (rawCommandOptions, command?: Command) => {
-    const { options: commandOptions, command: actionCommand } =
-      normalizeCommandActionOptions(rawCommandOptions, command);
+    const { options: commandOptions, command: actionCommand } = normalizeCommandActionOptions(
+      rawCommandOptions,
+      command,
+    );
     const remoteChromeOption = commandOptions.remoteChrome ?? readCliOptionValue("--remote-chrome");
     const config = await resolveChatgptCliBrowserConfig(remoteChromeOption);
     const attachments = await resolveBrowserAttachments(
@@ -1985,10 +1996,7 @@ chatCommand
   .option("--keep-tab", "Leave the opened conversation tab alive.", false)
   .option("--json", "Print structured JSON.", false)
   .action(async (conversationUrl: string, rawCommandOptions, command?: Command) => {
-    const { options: commandOptions } = normalizeCommandActionOptions(
-      rawCommandOptions,
-      command,
-    );
+    const { options: commandOptions } = normalizeCommandActionOptions(rawCommandOptions, command);
     const remoteChromeOption = commandOptions.remoteChrome ?? readCliOptionValue("--remote-chrome");
     const config = await resolveChatgptCliBrowserConfig(remoteChromeOption);
     const result = await readChatgptConversationSnapshot({
@@ -2026,10 +2034,7 @@ chatCommand
   .option("--keep-tab", "Leave the opened conversation tab alive.", false)
   .option("--json", "Print structured JSON.", false)
   .action(async (conversationUrl: string, rawCommandOptions, command?: Command) => {
-    const { options: commandOptions } = normalizeCommandActionOptions(
-      rawCommandOptions,
-      command,
-    );
+    const { options: commandOptions } = normalizeCommandActionOptions(rawCommandOptions, command);
     const remoteChromeOption = commandOptions.remoteChrome ?? readCliOptionValue("--remote-chrome");
     const config = await resolveChatgptCliBrowserConfig(remoteChromeOption);
     const result = await extractChatgptSandboxArtifactsFromConfiguredBrowser({
@@ -2078,8 +2083,10 @@ chatCommand
   .option("--include-snapshot", "Include the resulting conversation snapshot.", false)
   .option("--json", "Print structured JSON.", false)
   .action(async (conversationUrl: string, rawCommandOptions, command?: Command) => {
-    const { options: commandOptions, command: actionCommand } =
-      normalizeCommandActionOptions(rawCommandOptions, command);
+    const { options: commandOptions, command: actionCommand } = normalizeCommandActionOptions(
+      rawCommandOptions,
+      command,
+    );
     const remoteChromeOption = commandOptions.remoteChrome ?? readCliOptionValue("--remote-chrome");
     const config = await resolveChatgptCliBrowserConfig(remoteChromeOption);
     const attachments = await resolveBrowserAttachments(
@@ -2129,10 +2136,7 @@ chatCommand
   .option("--keep-tab", "Leave the opened conversation tab alive.", false)
   .option("--json", "Print structured JSON.", false)
   .action(async (conversationUrl: string, rawCommandOptions, command?: Command) => {
-    const { options: commandOptions } = normalizeCommandActionOptions(
-      rawCommandOptions,
-      command,
-    );
+    const { options: commandOptions } = normalizeCommandActionOptions(rawCommandOptions, command);
     const remoteChromeOption = commandOptions.remoteChrome ?? readCliOptionValue("--remote-chrome");
     const config = await resolveChatgptCliBrowserConfig(remoteChromeOption);
     const result = await planChatgptConversationDelete({
@@ -2173,10 +2177,7 @@ chatCommand
   .option("--keep-tab", "Leave the opened conversation tab alive.", false)
   .option("--json", "Print structured JSON.", false)
   .action(async (conversationUrl: string, rawCommandOptions, command?: Command) => {
-    const { options: commandOptions } = normalizeCommandActionOptions(
-      rawCommandOptions,
-      command,
-    );
+    const { options: commandOptions } = normalizeCommandActionOptions(rawCommandOptions, command);
     const remoteChromeOption = commandOptions.remoteChrome ?? readCliOptionValue("--remote-chrome");
     const config = await resolveChatgptCliBrowserConfig(remoteChromeOption);
     const result = await deleteChatgptConversation({
@@ -2216,10 +2217,7 @@ chatCommand
   .option("--keep-tab", "Leave the opened conversation tab alive.", false)
   .option("--json", "Print structured JSON.", false)
   .action(async (conversationUrl: string, rawCommandOptions, command?: Command) => {
-    const { options: commandOptions } = normalizeCommandActionOptions(
-      rawCommandOptions,
-      command,
-    );
+    const { options: commandOptions } = normalizeCommandActionOptions(rawCommandOptions, command);
     const remoteChromeOption = commandOptions.remoteChrome ?? readCliOptionValue("--remote-chrome");
     const config = await resolveChatgptCliBrowserConfig(remoteChromeOption);
     const result = await moveChatgptConversationToProject({
@@ -2259,10 +2257,7 @@ projectCommand
   .option("--keep-tab", "Leave the created project tab alive.", false)
   .option("--json", "Print structured JSON.", false)
   .action(async (name: string, rawCommandOptions, command?: Command) => {
-    const { options: commandOptions } = normalizeCommandActionOptions(
-      rawCommandOptions,
-      command,
-    );
+    const { options: commandOptions } = normalizeCommandActionOptions(rawCommandOptions, command);
     const remoteChromeOption = commandOptions.remoteChrome ?? readCliOptionValue("--remote-chrome");
     const config = await resolveChatgptCliBrowserConfig(remoteChromeOption);
     const result = await createChatgptProject({
@@ -2298,10 +2293,7 @@ projectCommand
   .option("--keep-tab", "Leave the opened tab alive.", false)
   .option("--json", "Print structured JSON.", false)
   .action(async (rawCommandOptions, command?: Command) => {
-    const { options: commandOptions } = normalizeCommandActionOptions(
-      rawCommandOptions,
-      command,
-    );
+    const { options: commandOptions } = normalizeCommandActionOptions(rawCommandOptions, command);
     const remoteChromeOption = commandOptions.remoteChrome ?? readCliOptionValue("--remote-chrome");
     const config = await resolveChatgptCliBrowserConfig(remoteChromeOption);
     const result = await listChatgptProjects({
@@ -2332,10 +2324,7 @@ projectCommand
   .option("--keep-tab", "Leave the opened project tab alive.", false)
   .option("--json", "Print structured JSON.", false)
   .action(async (projectUrl: string, rawCommandOptions, command?: Command) => {
-    const { options: commandOptions } = normalizeCommandActionOptions(
-      rawCommandOptions,
-      command,
-    );
+    const { options: commandOptions } = normalizeCommandActionOptions(rawCommandOptions, command);
     const remoteChromeOption = commandOptions.remoteChrome ?? readCliOptionValue("--remote-chrome");
     const config = await resolveChatgptCliBrowserConfig(remoteChromeOption);
     const result = await readChatgptProject({
@@ -2371,10 +2360,7 @@ projectCommand
   .option("--keep-tab", "Leave the opened project tab alive.", false)
   .option("--json", "Print structured JSON.", false)
   .action(async (projectUrl: string, rawCommandOptions, command?: Command) => {
-    const { options: commandOptions } = normalizeCommandActionOptions(
-      rawCommandOptions,
-      command,
-    );
+    const { options: commandOptions } = normalizeCommandActionOptions(rawCommandOptions, command);
     const remoteChromeOption = commandOptions.remoteChrome ?? readCliOptionValue("--remote-chrome");
     const config = await resolveChatgptCliBrowserConfig(remoteChromeOption);
     const result = await renameChatgptProject({

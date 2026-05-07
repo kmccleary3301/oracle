@@ -63,6 +63,7 @@ export interface OracleJobInputSummary {
   modelLabel?: string;
   thinkingTime?: string;
   projectUrl?: string;
+  returnAfterSubmit?: boolean;
 }
 
 export interface OracleJobRuntime {

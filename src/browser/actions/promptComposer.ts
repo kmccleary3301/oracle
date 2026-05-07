@@ -103,7 +103,58 @@ export async function insertPromptText(
     throw new Error("Failed to focus prompt textarea");
   }
 
-  await input.insertText({ text: prompt });
+  const pasteResult = await runtime.evaluate({
+    expression: `(() => {
+      const inputSelectors = ${JSON.stringify(INPUT_SELECTORS)};
+      const prompt = ${encodedPrompt};
+      const readValue = (node) => {
+        if (!node) return '';
+        if (node instanceof HTMLTextAreaElement) return node.value ?? '';
+        return node.innerText ?? node.textContent ?? '';
+      };
+      const isVisible = (node) => {
+        if (!node || typeof node.getBoundingClientRect !== 'function') return false;
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const nodes = inputSelectors
+        .map((selector) => document.querySelector(selector))
+        .filter((node) => Boolean(node));
+      const node = nodes.find((candidate) => isVisible(candidate)) || nodes[0] || null;
+      if (!node) return { inserted: false, reason: 'missing-editor', value: '' };
+      dispatchClickSequence(node);
+      node.focus?.();
+      try {
+        const dt = new DataTransfer();
+        dt.setData('text/plain', prompt);
+        const event = new ClipboardEvent('paste', {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: dt,
+        });
+        node.dispatchEvent(event);
+      } catch {
+        // Older/locked-down browser contexts may not allow synthetic clipboard events.
+      }
+      const value = readValue(node);
+      return { inserted: value.includes(prompt.trim().slice(0, 120)), value };
+    })()`,
+    returnByValue: true,
+    awaitPromise: true,
+  });
+
+  const pasteValue = String(pasteResult.result?.value?.value ?? "");
+  const promptNewlineCount = (prompt.match(/\n/g) ?? []).length;
+  const pasteNewlineCount = (pasteValue.match(/\n/g) ?? []).length;
+  const pastePreservedNewlines =
+    promptNewlineCount < 4 ||
+    pasteNewlineCount >= Math.max(2, Math.floor(promptNewlineCount * 0.5));
+  const pasteInserted = Boolean(pasteResult.result?.value?.inserted) && pastePreservedNewlines;
+  if (!pasteInserted) {
+    await input.insertText({ text: prompt });
+  } else {
+    logger("Inserted prompt via paste event with newline preservation");
+  }
 
   // Some pages (notably ChatGPT when subscriptions/widgets load) need a brief settle
   // before the send button becomes enabled; give it a short breather to avoid races.

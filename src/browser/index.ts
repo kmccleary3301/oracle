@@ -819,6 +819,35 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     } finally {
       await releaseProfileLockIfHeld();
     }
+    if (options.returnAfterSubmit) {
+      await updateConversationHint("submitted", 15_000).catch(() => false);
+      await captureRuntimeSnapshot().catch(() => undefined);
+      const submittedUrl = await waitForConversationUrl(Runtime, 15_000).catch(() => null);
+      if (submittedUrl) {
+        lastUrl = submittedUrl;
+      }
+      await emitRuntimeHint();
+      runStatus = "complete";
+      const durationMs = Date.now() - startedAt;
+      return {
+        answerText: "",
+        answerMarkdown: "",
+        tookMs: durationMs,
+        answerTokens: 0,
+        answerChars: 0,
+        chromePid: chrome.pid,
+        chromePort: chrome.port,
+        chromeHost,
+        userDataDir,
+        chromeTargetId: lastTargetId,
+        tabUrl: lastUrl,
+        controllerPid: process.pid,
+        thinkingTimeSelection,
+        warnings: [
+          "Prompt submitted without waiting for the assistant response; recover the final answer from the conversation URL later.",
+        ],
+      };
+    }
     stopThinkingMonitor = startThinkingStatusMonitor(Runtime, logger, options.verbose ?? false);
     // Helper to normalize text for echo detection (collapse whitespace, lowercase)
     const normalizeForComparison = (text: string): string =>
@@ -1724,6 +1753,32 @@ async function runRemoteBrowserMode(
         throw error;
       }
     }
+    if (options.returnAfterSubmit) {
+      const submittedUrl = await waitForConversationUrl(Runtime, 15_000).catch(() => null);
+      if (submittedUrl) {
+        lastUrl = submittedUrl;
+      }
+      await emitRuntimeHint();
+      const durationMs = Date.now() - startedAt;
+      return {
+        answerText: "",
+        answerMarkdown: "",
+        tookMs: durationMs,
+        answerTokens: 0,
+        answerChars: 0,
+        chromePid: undefined,
+        chromePort: port,
+        chromeHost: host,
+        userDataDir: undefined,
+        chromeTargetId: remoteTargetId ?? undefined,
+        tabUrl: lastUrl,
+        controllerPid: process.pid,
+        thinkingTimeSelection,
+        warnings: [
+          "Prompt submitted without waiting for the assistant response; recover the final answer from the conversation URL later.",
+        ],
+      };
+    }
     stopThinkingMonitor = startThinkingStatusMonitor(Runtime, logger, options.verbose ?? false);
     // Helper to normalize text for echo detection (collapse whitespace, lowercase)
     const normalizeForComparison = (text: string): string =>
@@ -1922,79 +1977,79 @@ async function runRemoteBrowserMode(
           }),
         ]);
 
-      answerMarkdown = copiedMarkdown ?? answerText;
-      ({ answerText, answerMarkdown } = await maybeRecoverLongAssistantResponse({
-        runtime: Runtime,
-        baselineTurns,
-        answerText,
-        answerMarkdown,
-        logger,
-        allowMarkdownUpdate: !copiedMarkdown,
-      }));
+    answerMarkdown = copiedMarkdown ?? answerText;
+    ({ answerText, answerMarkdown } = await maybeRecoverLongAssistantResponse({
+      runtime: Runtime,
+      baselineTurns,
+      answerText,
+      answerMarkdown,
+      logger,
+      allowMarkdownUpdate: !copiedMarkdown,
+    }));
 
-      // Final sanity check: ensure we didn't accidentally capture the user prompt instead of the assistant turn.
-      const finalSnapshot = await readSettledAssistantSnapshot(
-        Runtime,
-        baselineTurns ?? undefined,
-        5_000,
-      ).catch(() => null);
-      const finalText = typeof finalSnapshot?.text === "string" ? finalSnapshot.text.trim() : "";
-      if (
-        finalText &&
-        finalText !== answerMarkdown.trim() &&
-        finalText !== promptText.trim() &&
-        finalText.length >= answerMarkdown.trim().length
-      ) {
-        logger("Refreshed assistant response via final DOM snapshot");
-        answerText = finalText;
-        answerMarkdown = finalText;
-      }
+    // Final sanity check: ensure we didn't accidentally capture the user prompt instead of the assistant turn.
+    const finalSnapshot = await readSettledAssistantSnapshot(
+      Runtime,
+      baselineTurns ?? undefined,
+      5_000,
+    ).catch(() => null);
+    const finalText = typeof finalSnapshot?.text === "string" ? finalSnapshot.text.trim() : "";
+    if (
+      finalText &&
+      finalText !== answerMarkdown.trim() &&
+      finalText !== promptText.trim() &&
+      finalText.length >= answerMarkdown.trim().length
+    ) {
+      logger("Refreshed assistant response via final DOM snapshot");
+      answerText = finalText;
+      answerMarkdown = finalText;
+    }
 
-      // Detect prompt echo using normalized comparison (whitespace-insensitive).
-      const promptEchoMatcher = buildPromptEchoMatcher(promptText);
-      const alignedEcho = alignPromptEchoPair(
-        answerText,
-        answerMarkdown,
-        promptEchoMatcher,
-        copiedMarkdown ? logger : undefined,
-        {
-          text: "Aligned assistant response text to copied markdown after prompt echo",
-          markdown: "Aligned assistant markdown to response text after prompt echo",
-        },
-      );
-      answerText = alignedEcho.answerText;
-      answerMarkdown = alignedEcho.answerMarkdown;
-      const isPromptEcho = alignedEcho.isEcho;
-      if (isPromptEcho) {
-        logger("Detected prompt echo in response; waiting for actual assistant response...");
-        const deadline = Date.now() + 15_000;
-        let bestText: string | null = null;
-        let stableCount = 0;
-        while (Date.now() < deadline) {
-          const snapshot = await readAssistantSnapshot(Runtime, baselineTurns ?? undefined).catch(
-            () => null,
-          );
-          const text = typeof snapshot?.text === "string" ? snapshot.text.trim() : "";
-          const isStillEcho = !text || Boolean(promptEchoMatcher?.isEcho(text));
-          if (!isStillEcho) {
-            if (!bestText || text.length > bestText.length) {
-              bestText = text;
-              stableCount = 0;
-            } else if (text === bestText) {
-              stableCount += 1;
-            }
-            if (stableCount >= 2) {
-              break;
-            }
+    // Detect prompt echo using normalized comparison (whitespace-insensitive).
+    const promptEchoMatcher = buildPromptEchoMatcher(promptText);
+    const alignedEcho = alignPromptEchoPair(
+      answerText,
+      answerMarkdown,
+      promptEchoMatcher,
+      copiedMarkdown ? logger : undefined,
+      {
+        text: "Aligned assistant response text to copied markdown after prompt echo",
+        markdown: "Aligned assistant markdown to response text after prompt echo",
+      },
+    );
+    answerText = alignedEcho.answerText;
+    answerMarkdown = alignedEcho.answerMarkdown;
+    const isPromptEcho = alignedEcho.isEcho;
+    if (isPromptEcho) {
+      logger("Detected prompt echo in response; waiting for actual assistant response...");
+      const deadline = Date.now() + 15_000;
+      let bestText: string | null = null;
+      let stableCount = 0;
+      while (Date.now() < deadline) {
+        const snapshot = await readAssistantSnapshot(Runtime, baselineTurns ?? undefined).catch(
+          () => null,
+        );
+        const text = typeof snapshot?.text === "string" ? snapshot.text.trim() : "";
+        const isStillEcho = !text || Boolean(promptEchoMatcher?.isEcho(text));
+        if (!isStillEcho) {
+          if (!bestText || text.length > bestText.length) {
+            bestText = text;
+            stableCount = 0;
+          } else if (text === bestText) {
+            stableCount += 1;
           }
-          await new Promise((resolve) => setTimeout(resolve, 300));
+          if (stableCount >= 2) {
+            break;
+          }
         }
-        if (bestText) {
-          logger("Recovered assistant response after detecting prompt echo");
-          answerText = bestText;
-          answerMarkdown = bestText;
-        }
+        await new Promise((resolve) => setTimeout(resolve, 300));
       }
+      if (bestText) {
+        logger("Recovered assistant response after detecting prompt echo");
+        answerText = bestText;
+        answerMarkdown = bestText;
+      }
+    }
     stopThinkingMonitor?.();
 
     const durationMs = Date.now() - startedAt;
@@ -2170,6 +2225,22 @@ async function readConversationUrl(Runtime: ChromeClient["Runtime"]): Promise<st
   } catch {
     return null;
   }
+}
+
+async function waitForConversationUrl(
+  Runtime: ChromeClient["Runtime"],
+  timeoutMs = 15_000,
+): Promise<string | null> {
+  const deadline = Date.now() + timeoutMs;
+  let latest: string | null = null;
+  while (Date.now() < deadline) {
+    latest = await readConversationUrl(Runtime).catch(() => null);
+    if (latest && isConversationUrl(latest)) {
+      return latest;
+    }
+    await delay(250);
+  }
+  return latest;
 }
 
 interface SessionValidationResult {

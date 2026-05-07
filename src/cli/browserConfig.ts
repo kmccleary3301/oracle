@@ -67,6 +67,8 @@ export interface BrowserFlagOptions {
   browserManualLoginProfileDir?: string | null;
   /** Thinking time intensity: 'light', 'standard', 'extended', 'heavy' */
   browserThinkingTime?: ThinkingTimeLevel;
+  /** Whether missing Thinking controls should continue with current/default mode or fail. */
+  browserThinkingFallback?: "allow" | "fail";
   browserModelLabel?: string;
   browserModelStrategy?: BrowserModelStrategy;
   browserAllowCookieErrors?: boolean;
@@ -207,6 +209,7 @@ export async function buildBrowserConfig(
     allowCookieErrors: options.browserAllowCookieErrors ?? true,
     remoteChrome,
     thinkingTime: options.browserThinkingTime,
+    thinkingFallback: options.browserThinkingFallback,
   };
 }
 

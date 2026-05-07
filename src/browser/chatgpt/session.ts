@@ -62,6 +62,7 @@ export interface ChatgptSendTurnOptions {
   timeoutMs?: number;
   includeSnapshot?: boolean;
   runtimeHintCb?: BrowserRunOptions["runtimeHintCb"];
+  returnAfterSubmit?: boolean;
   log?: BrowserLogger;
 }
 
@@ -72,6 +73,7 @@ export interface ChatgptCreateSessionOptions {
   timeoutMs?: number;
   includeSnapshot?: boolean;
   runtimeHintCb?: BrowserRunOptions["runtimeHintCb"];
+  returnAfterSubmit?: boolean;
   log?: BrowserLogger;
 }
 
@@ -294,8 +296,12 @@ export async function sendChatgptTurn(options: ChatgptSendTurnOptions): Promise<
     attachments: options.attachments ?? [],
     config,
     runtimeHintCb: options.runtimeHintCb,
+    returnAfterSubmit: options.returnAfterSubmit,
     log: options.log,
   });
+  if (options.returnAfterSubmit) {
+    return serializeSubmittedTurnResult(result);
+  }
   const snapshot =
     options.includeSnapshot && result.tabUrl
       ? await readChatgptConversationSnapshot({
@@ -357,8 +363,12 @@ export async function createChatgptSession(
     attachments: options.attachments ?? [],
     config,
     runtimeHintCb: options.runtimeHintCb,
+    returnAfterSubmit: options.returnAfterSubmit,
     log: options.log,
   });
+  if (options.returnAfterSubmit) {
+    return serializeSubmittedTurnResult(result);
+  }
   const snapshot =
     options.includeSnapshot && result.tabUrl
       ? await readChatgptConversationSnapshot({
@@ -386,6 +396,40 @@ export async function createChatgptSession(
     sandboxArtifacts: result.sandboxArtifacts ?? snapshot?.sandboxArtifacts ?? [],
     newSandboxArtifacts: result.newSandboxArtifacts ?? result.sandboxArtifacts ?? [],
     downloadedSandboxArtifacts: result.downloadedSandboxArtifacts ?? [],
+    thinkingTimeSelection: result.thinkingTimeSelection,
+    warnings: result.warnings ?? [],
+  };
+}
+
+function serializeSubmittedTurnResult(result: {
+  answerText: string;
+  answerMarkdown: string;
+  tookMs: number;
+  answerTokens: number;
+  answerChars: number;
+  chromeHost?: string;
+  chromePort?: number;
+  chromeTargetId?: string;
+  tabUrl?: string;
+  thinkingTimeSelection?: ChatgptTurnResult["thinkingTimeSelection"];
+  warnings?: string[];
+}): ChatgptTurnResult {
+  return {
+    status: "submitted",
+    conversationUrl: result.tabUrl,
+    answerText: "",
+    answerMarkdown: "",
+    tookMs: result.tookMs,
+    answerChars: 0,
+    answerTokens: 0,
+    chromeHost: result.chromeHost,
+    chromePort: result.chromePort,
+    chromeTargetId: result.chromeTargetId,
+    generatedImages: [],
+    newGeneratedImages: [],
+    sandboxArtifacts: [],
+    newSandboxArtifacts: [],
+    downloadedSandboxArtifacts: [],
     thinkingTimeSelection: result.thinkingTimeSelection,
     warnings: result.warnings ?? [],
   };

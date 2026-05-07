@@ -86,6 +86,11 @@ export interface BrowserRunOptions {
   verbose?: boolean;
   /** Optional hook to persist runtime info (port/url/target) as soon as Chrome is ready. */
   runtimeHintCb?: (hint: BrowserRuntimeMetadata) => void | Promise<void>;
+  /**
+   * Submit the turn, persist the conversation URL/runtime, and return without waiting for
+   * the assistant response. Useful when ChatGPT will keep long Pro work running server-side.
+   */
+  returnAfterSubmit?: boolean;
 }
 
 export interface BrowserRunResult {
