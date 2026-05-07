@@ -34,6 +34,7 @@ export interface BrowserDefaultsOptions {
   browserKeepBrowser?: boolean;
   browserModelStrategy?: BrowserModelStrategy;
   browserThinkingTime?: ThinkingTimeLevel;
+  browserThinkingFallback?: "allow" | "fail";
   browserResearch?: BrowserResearchMode;
   browserArchive?: BrowserArchiveMode;
   browserManualLogin?: boolean;
@@ -167,6 +168,9 @@ export function applyBrowserDefaultsFromConfig(
   }
   if (isUnset("browserArchive") && browser.archiveConversations !== undefined) {
     options.browserArchive = browser.archiveConversations;
+  }
+  if (isUnset("browserThinkingFallback") && browser.thinkingFallback !== undefined) {
+    options.browserThinkingFallback = browser.thinkingFallback;
   }
   if (
     !attachRunningRequested &&

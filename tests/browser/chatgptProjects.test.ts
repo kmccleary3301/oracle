@@ -49,10 +49,7 @@ function anchor(href: string, text: string): AnchorStub {
   };
 }
 
-function visibleElement(
-  text: string,
-  attributes: Record<string, string | null> = {},
-): ElementStub {
+function visibleElement(text: string, attributes: Record<string, string | null> = {}): ElementStub {
   return new TestHTMLElement(text, attributes);
 }
 

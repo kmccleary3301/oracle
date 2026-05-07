@@ -289,6 +289,7 @@ function summarizeJobInput(input: unknown) {
     browserModelLabel?: string;
     browserThinkingTime?: string;
     projectUrl?: string;
+    returnAfterSubmit?: boolean;
   };
   return {
     ...(typeof record.prompt === "string" ? { promptChars: record.prompt.length } : {}),
@@ -301,6 +302,9 @@ function summarizeJobInput(input: unknown) {
       ? { thinkingTime: record.browserThinkingTime }
       : {}),
     ...(typeof record.projectUrl === "string" ? { projectUrl: record.projectUrl } : {}),
+    ...(typeof record.returnAfterSubmit === "boolean"
+      ? { returnAfterSubmit: record.returnAfterSubmit }
+      : {}),
   };
 }
 

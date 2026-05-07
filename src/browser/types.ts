@@ -161,6 +161,11 @@ export interface BrowserRunOptions {
     hint: BrowserRuntimeMetadata,
     modelSelection?: BrowserModelSelectionEvidence,
   ) => void | Promise<void>;
+  /**
+   * Submit the turn, persist the conversation URL/runtime, and return without waiting for
+   * the assistant response. Useful when ChatGPT will keep long Pro work running server-side.
+   */
+  returnAfterSubmit?: boolean;
 }
 
 export interface BrowserArchiveResult {

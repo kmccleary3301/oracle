@@ -1705,6 +1705,38 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     } finally {
       await releaseProfileLockIfHeld();
     }
+    if (options.returnAfterSubmit) {
+      await updateConversationHint("submitted", 15_000).catch(() => false);
+      await captureRuntimeSnapshot().catch(() => undefined);
+      const submittedUrl = await waitForConversationUrl(Runtime, 15_000).catch(() => null);
+      if (submittedUrl) {
+        lastUrl = submittedUrl;
+      }
+      await emitRuntimeHint();
+      runStatus = "complete";
+      const durationMs = Date.now() - startedAt;
+      return {
+        answerText: "",
+        answerMarkdown: "",
+        modelSelection: modelSelectionEvidence,
+        tookMs: durationMs,
+        answerTokens: 0,
+        answerChars: 0,
+        chromePid: chrome.pid,
+        chromePort: chrome.port,
+        chromeHost,
+        userDataDir,
+        chromeTargetId: lastTargetId,
+        tabUrl: lastUrl,
+        conversationId: lastUrl ? extractConversationIdFromUrl(lastUrl) : undefined,
+        promptSubmitted,
+        controllerPid: process.pid,
+        thinkingTimeSelection,
+        warnings: [
+          "Prompt submitted without waiting for the assistant response; recover the final answer from the conversation URL later.",
+        ],
+      };
+    }
     const imageArtifactMinTurnIndex = baselineTurns;
     if (deepResearch) {
       await raceWithDisconnect(waitForResearchPlanAutoConfirm(Runtime, logger));
@@ -3339,6 +3371,33 @@ async function runRemoteBrowserMode(
         controllerPid: process.pid,
       };
     }
+    if (options.returnAfterSubmit) {
+      const submittedUrl = await waitForConversationUrl(Runtime, 15_000).catch(() => null);
+      if (submittedUrl) {
+        lastUrl = submittedUrl;
+      }
+      await emitRuntimeHint();
+      const durationMs = Date.now() - startedAt;
+      return {
+        answerText: "",
+        answerMarkdown: "",
+        tookMs: durationMs,
+        answerTokens: 0,
+        answerChars: 0,
+        chromePid: undefined,
+        chromePort: port,
+        chromeHost: host,
+        userDataDir: undefined,
+        chromeTargetId: remoteTargetId ?? undefined,
+        tabUrl: lastUrl,
+        controllerPid: process.pid,
+        thinkingTimeSelection,
+        warnings: [
+          "Prompt submitted without waiting for the assistant response; recover the final answer from the conversation URL later.",
+        ],
+      };
+    }
+    stopThinkingMonitor = startThinkingStatusMonitor(Runtime, logger, options.verbose ?? false);
     // Helper to normalize text for echo detection (collapse whitespace, lowercase)
     const normalizeForComparison = (text: string): string =>
       text.toLowerCase().replace(/\s+/g, " ").trim();
@@ -3655,6 +3714,7 @@ async function runRemoteBrowserMode(
           turnAnswerText = bestText;
           turnAnswerMarkdown = bestText;
         }
+        await new Promise((resolve) => setTimeout(resolve, 300));
       }
       return {
         label,
@@ -4056,6 +4116,22 @@ async function readConversationUrl(Runtime: ChromeClient["Runtime"]): Promise<st
   } catch {
     return null;
   }
+}
+
+async function waitForConversationUrl(
+  Runtime: ChromeClient["Runtime"],
+  timeoutMs = 15_000,
+): Promise<string | null> {
+  const deadline = Date.now() + timeoutMs;
+  let latest: string | null = null;
+  while (Date.now() < deadline) {
+    latest = await readConversationUrl(Runtime).catch(() => null);
+    if (latest && isConversationUrl(latest)) {
+      return latest;
+    }
+    await delay(250);
+  }
+  return latest;
 }
 
 interface SessionValidationResult {

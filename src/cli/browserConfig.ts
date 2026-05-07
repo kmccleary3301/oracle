@@ -82,6 +82,8 @@ export interface BrowserFlagOptions {
   remoteHost?: string;
   /** Thinking time intensity: 'light', 'standard', 'extended', 'extra-high', 'heavy' */
   browserThinkingTime?: ThinkingTimeLevel;
+  /** Whether missing Thinking controls should continue with current/default mode or fail. */
+  browserThinkingFallback?: "allow" | "fail";
   browserResearch?: BrowserResearchMode;
   browserArchive?: BrowserArchiveMode;
   browserModelLabel?: string;
@@ -283,6 +285,7 @@ export async function buildBrowserConfig(
     remoteChrome,
     browserTabRef: options.browserTab ?? undefined,
     thinkingTime: normalizeThinkingTimeLevel(options.browserThinkingTime) ?? undefined,
+    thinkingFallback: options.browserThinkingFallback,
     researchMode: options.browserResearch === "deep" ? "deep" : "off",
     archiveConversations: options.browserArchive,
   };

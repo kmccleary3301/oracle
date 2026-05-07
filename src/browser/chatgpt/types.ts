@@ -144,7 +144,7 @@ export interface ChatgptAttachmentProbeResult {
 }
 
 export interface ChatgptTurnResult {
-  status: "completed";
+  status: "completed" | "submitted";
   conversationUrl?: string;
   answerText: string;
   answerMarkdown: string;
