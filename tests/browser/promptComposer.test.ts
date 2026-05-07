@@ -1,5 +1,9 @@
 import { describe, expect, test, vi } from "vitest";
-import { __test__ as promptComposer } from "../../src/browser/actions/promptComposer.js";
+import {
+  __test__ as promptComposer,
+  insertPromptText,
+} from "../../src/browser/actions/promptComposer.js";
+import type { BrowserLogger } from "../../src/browser/types.js";
 
 describe("promptComposer", () => {
   test("does not treat cleared composer + stop button as committed without a new turn", async () => {
@@ -71,5 +75,69 @@ describe("promptComposer", () => {
     await expect(
       promptComposer.verifyPromptCommitted(runtime as never, "hello", 150),
     ).resolves.toBe(1);
+  });
+
+  test("falls back when a pasted body drops leading or trailing newlines", async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = {
+        evaluate: vi
+          .fn()
+          .mockResolvedValueOnce({
+            result: { value: { ready: true, composer: true, fileInput: true } },
+          })
+          .mockResolvedValueOnce({ result: { value: { focused: true } } })
+          .mockResolvedValueOnce({
+            result: {
+              value: {
+                inserted: true,
+                value: "Hello",
+              },
+            },
+          })
+          .mockResolvedValueOnce({
+            result: {
+              value: {
+                editorText: "\nHello\n",
+                fallbackValue: "\nHello\n",
+                activeValue: "\nHello\n",
+              },
+            },
+          })
+          .mockResolvedValueOnce({
+            result: {
+              value: {
+                editorText: "\nHello\n",
+                fallbackValue: "\nHello\n",
+                activeValue: "\nHello\n",
+              },
+            },
+          }),
+      } as unknown as {
+        evaluate: (args: { expression: string; returnByValue?: boolean; awaitPromise?: boolean }) => Promise<unknown>;
+      };
+      const input = {
+        insertText: vi.fn().mockResolvedValue(undefined),
+        dispatchKeyEvent: vi.fn().mockResolvedValue(undefined),
+      } as unknown as {
+        insertText: ReturnType<typeof vi.fn>;
+        dispatchKeyEvent: ReturnType<typeof vi.fn>;
+      };
+      const logger = vi.fn() as unknown as BrowserLogger;
+      const promise = insertPromptText(
+        {
+          runtime: runtime as never,
+          input: input as never,
+          inputTimeoutMs: 1_000,
+        },
+        "\nHello\n",
+        logger,
+      );
+      await vi.advanceTimersByTimeAsync(500);
+      await promise;
+      expect(input.insertText).toHaveBeenCalledWith({ text: "\nHello\n" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

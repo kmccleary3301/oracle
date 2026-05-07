@@ -16,6 +16,7 @@ import type { BrowserAttachment } from "../browser/types.js";
 import type { BrowserSessionConfig } from "../sessionStore.js";
 import { buildTokenEstimateSuffix, formatAttachmentLabel } from "../browser/promptSummary.js";
 import { buildCookiePlan } from "../browser/policies.js";
+import { hasPromptText, normalizePromptText } from "../oracle/promptText.js";
 
 interface DryRunDeps {
   readFilesImpl?: typeof readFiles;
@@ -63,7 +64,9 @@ async function runApiDryRun(
 ): Promise<void> {
   const readFilesImpl = deps.readFilesImpl ?? readFiles;
   const files = await readFilesImpl(runOptions.file ?? [], { cwd });
-  const systemPrompt = runOptions.system?.trim() || DEFAULT_SYSTEM_PROMPT;
+  const systemPrompt = hasPromptText(runOptions.system)
+    ? normalizePromptText(runOptions.system)
+    : DEFAULT_SYSTEM_PROMPT;
   const combinedPrompt = buildPrompt(runOptions.prompt ?? "", files, cwd);
   const modelConfig = isKnownModel(runOptions.model)
     ? MODEL_CONFIGS[runOptions.model]

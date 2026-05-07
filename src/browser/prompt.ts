@@ -11,6 +11,10 @@ import {
 } from "../oracle.js";
 import { isKnownModel } from "../oracle/modelResolver.js";
 import { buildPromptMarkdown } from "../oracle/promptAssembly.js";
+import {
+  hasPromptText,
+  normalizePromptText,
+} from "../oracle/promptText.js";
 import type { BrowserAttachment } from "./types.js";
 import { buildAttachmentPlan } from "./policies.js";
 
@@ -93,9 +97,8 @@ export async function assembleBrowserPrompt(
   );
 
   const files = await readFilesFn(textFilePaths, { cwd });
-  const basePrompt = (runOptions.prompt ?? "").trim();
-  const userPrompt = basePrompt;
-  const systemPrompt = runOptions.system?.trim() || "";
+  const userPrompt = normalizePromptText(runOptions.prompt ?? "");
+  const systemPrompt = hasPromptText(runOptions.system) ? normalizePromptText(runOptions.system) : "";
   const sections = createFileSections(files, cwd);
   const markdown = buildPromptMarkdown(systemPrompt, userPrompt, sections);
 
@@ -108,13 +111,12 @@ export async function assembleBrowserPrompt(
   const uploadPlan = buildAttachmentPlan(sections, { inlineFiles: false, bundleRequested });
 
   const baseComposerSections: string[] = [];
-  if (systemPrompt) baseComposerSections.push(systemPrompt);
-  if (userPrompt) baseComposerSections.push(userPrompt);
+  if (hasPromptText(systemPrompt)) baseComposerSections.push(systemPrompt);
+  if (hasPromptText(userPrompt)) baseComposerSections.push(userPrompt);
 
   const inlineComposerText = [...baseComposerSections, inlinePlan.inlineBlock]
-    .filter(Boolean)
-    .join("\n\n")
-    .trim();
+    .filter((section) => hasPromptText(section))
+    .join("\n\n");
   const selectedPlan =
     attachmentsPolicy === "always"
       ? uploadPlan
@@ -128,10 +130,9 @@ export async function assembleBrowserPrompt(
     selectedPlan.inlineBlock
       ? [...baseComposerSections, selectedPlan.inlineBlock]
       : baseComposerSections
-  )
-    .filter(Boolean)
-    .join("\n\n")
-    .trim();
+    )
+    .filter((section) => hasPromptText(section))
+    .join("\n\n");
 
   const attachments: BrowserAttachment[] = [...selectedPlan.attachments, ...mediaAttachments];
 
@@ -169,9 +170,8 @@ export async function assembleBrowserPrompt(
   const tokenizerUserContent =
     inlineFileCount > 0 && selectedPlan.inlineBlock
       ? [userPrompt, selectedPlan.inlineBlock]
-          .filter((value) => Boolean(value?.trim()))
+          .filter((value) => hasPromptText(value))
           .join("\n\n")
-          .trim()
       : userPrompt;
   const tokenizerMessages = [
     systemPrompt ? { role: "system", content: systemPrompt } : null,
@@ -197,7 +197,7 @@ export async function assembleBrowserPrompt(
 
   let fallback: BrowserPromptArtifacts["fallback"] = null;
   if (attachmentsPolicy === "auto" && selectedPlan.mode === "inline" && sections.length > 0) {
-    const fallbackComposerText = baseComposerSections.join("\n\n").trim();
+    const fallbackComposerText = baseComposerSections.join("\n\n");
     const fallbackAttachments = [...uploadPlan.attachments, ...mediaAttachments];
     let fallbackBundled: { originalCount: number; bundlePath: string } | null = null;
     if (uploadPlan.shouldBundle) {

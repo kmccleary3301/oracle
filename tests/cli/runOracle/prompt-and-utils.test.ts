@@ -33,6 +33,11 @@ describe("buildPrompt", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  test("preserves prompt newlines when no files are attached", () => {
+    const prompt = buildPrompt("\nBase\n", []);
+    expect(prompt).toBe("\nBase\n");
+  });
 });
 
 describe("renderPromptMarkdown", () => {
@@ -338,12 +343,13 @@ describe("oracle utility helpers", () => {
     const base = buildRequestBody({
       modelConfig: MODEL_CONFIGS["gpt-5.2-pro"],
       systemPrompt: "sys",
-      userPrompt: "user",
+      userPrompt: "\nuser\n",
       searchEnabled: false,
       maxOutputTokens: 222,
     });
     expect(base.tools).toBeUndefined();
     expect(base.max_output_tokens).toBe(222);
+    expect(base.input[0].content[0].text).toBe("\nuser\n");
 
     const withSearch = buildRequestBody({
       modelConfig: MODEL_CONFIGS["gpt-5.1"],

@@ -26,6 +26,7 @@ import { resolveNotificationSettings } from "../notifier.js";
 import { loadUserConfig, type UserConfig } from "../../config.js";
 import { resolveConfiguredMaxFileSizeBytes } from "../fileSize.js";
 import { formatTokenCount } from "../../oracle/runUtils.js";
+import { appendPromptSuffix } from "../../oracle/promptText.js";
 
 const isTty = (): boolean => Boolean(process.stdout.isTTY && chalk.level > 0);
 const dim = (text: string): string => (isTty() ? kleur.dim(text) : text);
@@ -451,9 +452,7 @@ async function askOracleFlow(version: string, userConfig: UserConfig): Promise<v
     console.log(chalk.yellow("Cancelled."));
     return;
   }
-  const promptWithSuffix = userConfig.promptSuffix
-    ? `${prompt.trim()}\n${userConfig.promptSuffix}`
-    : prompt;
+  const promptWithSuffix = appendPromptSuffix(prompt, userConfig.promptSuffix);
   await sessionStore.ensureStorage();
   await pruneOldSessions(userConfig.sessionRetentionHours, (message) =>
     console.log(chalk.dim(message)),

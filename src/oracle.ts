@@ -8,6 +8,11 @@ export {
 } from "./oracle/config.js";
 export { readFiles, createFileSections } from "./oracle/files.js";
 export { buildPrompt, buildRequestBody, renderPromptMarkdown } from "./oracle/request.js";
+export {
+  appendPromptSuffix,
+  hasPromptText,
+  normalizePromptText,
+} from "./oracle/promptText.js";
 export { estimateRequestTokens } from "./oracle/tokenEstimate.js";
 export { formatUSD, formatNumber, formatElapsed } from "./oracle/format.js";
 export { formatFileSection } from "./oracle/markdown.js";

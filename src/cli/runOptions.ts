@@ -13,6 +13,7 @@ import { resolveGeminiModelId } from "../oracle/gemini.js";
 import { PromptValidationError } from "../oracle/errors.js";
 import { normalizeChatGptModelForBrowser } from "./browserConfig.js";
 import { resolveConfiguredMaxFileSizeBytes } from "./fileSize.js";
+import { appendPromptSuffix } from "../oracle/promptText.js";
 
 export interface ResolveRunOptionsInput {
   prompt: string;
@@ -88,10 +89,7 @@ export function resolveRunOptionsFromConfig({
       ? "api"
       : resolvedEngine;
 
-  const promptWithSuffix =
-    userConfig?.promptSuffix && userConfig.promptSuffix.trim().length > 0
-      ? `${prompt.trim()}\n${userConfig.promptSuffix}`
-      : prompt;
+  const promptWithSuffix = appendPromptSuffix(prompt, userConfig?.promptSuffix);
 
   const search = userConfig?.search !== "off";
 

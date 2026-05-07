@@ -12,6 +12,7 @@ import { delay } from "../utils.js";
 import { logDomFailure } from "../domDebug.js";
 import { buildClickDispatcher } from "./domEvents.js";
 import { BrowserAutomationError } from "../../oracle/errors.js";
+import { normalizePromptText } from "../../oracle/promptText.js";
 
 const ENTER_KEY_EVENT = {
   key: "Enter",
@@ -20,6 +21,20 @@ const ENTER_KEY_EVENT = {
   nativeVirtualKeyCode: 13,
 } as const;
 const ENTER_KEY_TEXT = "\r";
+
+function escapeHtml(text: string): string {
+  return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function buildClipboardHtml(prompt: string): string {
+  const body = escapeHtml(normalizePromptText(prompt)).replace(/\n/g, "<br>");
+  return `<div>${body}</div>`;
+}
 
 interface InsertPromptDeps {
   runtime: ChromeClient["Runtime"];
@@ -47,9 +62,11 @@ export async function insertPromptText(
   logger: BrowserLogger,
 ): Promise<void> {
   const { runtime, input } = deps;
+  const normalizedPrompt = normalizePromptText(prompt);
+  const encodedPrompt = JSON.stringify(normalizedPrompt);
+  const encodedPromptHtml = JSON.stringify(buildClipboardHtml(normalizedPrompt));
 
   await waitForDomReady(runtime, logger, deps.inputTimeoutMs ?? undefined);
-  const encodedPrompt = JSON.stringify(prompt);
   const focusResult = await runtime.evaluate({
     expression: `(() => {
       ${buildClickDispatcher()}
@@ -107,6 +124,7 @@ export async function insertPromptText(
     expression: `(() => {
       const inputSelectors = ${JSON.stringify(INPUT_SELECTORS)};
       const prompt = ${encodedPrompt};
+      const promptHtml = ${encodedPromptHtml};
       const readValue = (node) => {
         if (!node) return '';
         if (node instanceof HTMLTextAreaElement) return node.value ?? '';
@@ -127,6 +145,7 @@ export async function insertPromptText(
       try {
         const dt = new DataTransfer();
         dt.setData('text/plain', prompt);
+        dt.setData('text/html', promptHtml);
         const event = new ClipboardEvent('paste', {
           bubbles: true,
           cancelable: true,
@@ -137,21 +156,18 @@ export async function insertPromptText(
         // Older/locked-down browser contexts may not allow synthetic clipboard events.
       }
       const value = readValue(node);
-      return { inserted: value.includes(prompt.trim().slice(0, 120)), value };
+      return { inserted: value.includes(prompt), value };
     })()`,
     returnByValue: true,
     awaitPromise: true,
   });
 
   const pasteValue = String(pasteResult.result?.value?.value ?? "");
-  const promptNewlineCount = (prompt.match(/\n/g) ?? []).length;
-  const pasteNewlineCount = (pasteValue.match(/\n/g) ?? []).length;
-  const pastePreservedNewlines =
-    promptNewlineCount < 4 ||
-    pasteNewlineCount >= Math.max(2, Math.floor(promptNewlineCount * 0.5));
-  const pasteInserted = Boolean(pasteResult.result?.value?.inserted) && pastePreservedNewlines;
+  const pasteInserted =
+    Boolean(pasteResult.result?.value?.inserted) &&
+    normalizePromptText(pasteValue).includes(normalizedPrompt);
   if (!pasteInserted) {
-    await input.insertText({ text: prompt });
+    await input.insertText({ text: normalizedPrompt });
   } else {
     logger("Inserted prompt via paste event with newline preservation");
   }
@@ -196,10 +212,10 @@ export async function insertPromptText(
   const editorTextTrimmed = editorTextRaw?.trim?.() ?? "";
   const fallbackValueTrimmed = fallbackValueRaw?.trim?.() ?? "";
   const activeValueTrimmed = activeValueRaw?.trim?.() ?? "";
-  const promptSnippet = prompt.trim().slice(0, Math.min(200, prompt.trim().length));
+  const promptSnippet = normalizedPrompt;
   const containsPromptSnippet = (...values: string[]): boolean => {
     if (!promptSnippet) return true;
-    return values.some((value) => String(value || "").includes(promptSnippet));
+    return values.some((value) => normalizePromptText(String(value || "")).includes(promptSnippet));
   };
   if (
     (!editorTextTrimmed && !fallbackValueTrimmed && !activeValueTrimmed) ||
@@ -224,7 +240,7 @@ export async function insertPromptText(
     });
   }
 
-  const promptLength = prompt.length;
+  const promptLength = normalizedPrompt.length;
   const postVerification = await runtime.evaluate({
     expression: `(() => {
       const editor = document.querySelector(${primarySelectorLiteral});
@@ -484,7 +500,8 @@ async function verifyPromptCommitted(
   baselineTurns?: number,
 ): Promise<number | null> {
   const deadline = Date.now() + timeoutMs;
-  const encodedPrompt = JSON.stringify(prompt.trim());
+  const normalizedPrompt = normalizePromptText(prompt);
+  const encodedPrompt = JSON.stringify(normalizedPrompt);
   const primarySelectorLiteral = JSON.stringify(PROMPT_PRIMARY_SELECTOR);
   const fallbackSelectorLiteral = JSON.stringify(PROMPT_FALLBACK_SELECTOR);
   const inputSelectorsLiteral = JSON.stringify(INPUT_SELECTORS);
@@ -627,13 +644,13 @@ async function verifyPromptCommitted(
     );
     await logDomFailure(Runtime, logger, "prompt-commit");
   }
-  if (prompt.trim().length >= 50_000) {
+  if (normalizedPrompt.length >= 50_000) {
     throw new BrowserAutomationError(
       "Prompt did not appear in conversation before timeout (likely too large).",
       {
         stage: "submit-prompt",
         code: "prompt-too-large",
-        promptLength: prompt.trim().length,
+        promptLength: normalizedPrompt.length,
         timeoutMs,
       },
     );

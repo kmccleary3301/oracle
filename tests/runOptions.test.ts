@@ -48,6 +48,14 @@ describe("resolveRunOptionsFromConfig", () => {
     expect(runOptions.prompt).toBe("Hi there, this exceeds twenty characters.\n// signed");
   });
 
+  it("preserves leading and trailing newlines when appending prompt suffix", () => {
+    const { runOptions } = resolveRunOptionsFromConfig({
+      prompt: "\nHi there\n",
+      userConfig: { promptSuffix: "// signed" },
+    });
+    expect(runOptions.prompt).toBe("\nHi there\n// signed");
+  });
+
   it("honors search off", () => {
     const { runOptions } = resolveRunOptionsFromConfig({
       prompt: basePrompt,

@@ -20,6 +20,7 @@ import { estimateRequestTokens } from "./tokenEstimate.js";
 import { formatElapsed } from "./format.js";
 import { formatFinishLine } from "./finishLine.js";
 import { getFileTokenStats, printFileTokenStats } from "./tokenStats.js";
+import { hasPromptText, normalizePromptText } from "./promptText.js";
 import {
   OracleResponseError,
   OracleTransportError,
@@ -247,7 +248,9 @@ export async function runOracle(
   const totalFileTokens = fileTokenInfo.totalTokens;
   logVerbose(`Attached files use ${totalFileTokens.toLocaleString()} tokens`);
 
-  const systemPrompt = options.system?.trim() || DEFAULT_SYSTEM_PROMPT;
+  const systemPrompt = hasPromptText(options.system)
+    ? normalizePromptText(options.system)
+    : DEFAULT_SYSTEM_PROMPT;
   const promptWithFiles = buildPrompt(options.prompt, files, cwd);
   const fileCount = files.length;
   const richTty = allowStdout && process.stdout.isTTY && chalk.level > 0;

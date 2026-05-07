@@ -45,6 +45,19 @@ describe("assembleBrowserPrompt", () => {
     expect(result.tokenEstimateIncludesInlineFiles).toBe(true);
   });
 
+  test("preserves raw prompt newlines in composer text", async () => {
+    const options = buildOptions({
+      prompt: "\nExplain the bug\n",
+      file: [],
+    });
+    const result = await assembleBrowserPrompt(options, {
+      cwd: "/repo",
+      readFilesImpl: async () => [],
+    });
+    expect(result.composerText).toBe("\nExplain the bug\n");
+    expect(result.markdown).toContain("Explain the bug");
+  });
+
   test("auto mode uploads when inline composer exceeds ~60k chars", async () => {
     const options = buildOptions({
       prompt: "Explain the bug",
