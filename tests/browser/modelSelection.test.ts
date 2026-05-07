@@ -18,6 +18,15 @@ describe("browser model selection matchers", () => {
     );
   });
 
+  it("includes pro + 5.5 tokens for gpt-5.5-pro", () => {
+    const { labelTokens, testIdTokens } = buildModelMatchersLiteralForTest("gpt-5.5-pro");
+    expect(labelTokens.some((t) => t.includes("pro"))).toBe(true);
+    expect(labelTokens.some((t) => t.includes("5.5") || t.includes("5-5"))).toBe(true);
+    expect(testIdTokens.some((t) => t.includes("gpt-5.5-pro") || t.includes("gpt-5-5-pro"))).toBe(
+      true,
+    );
+  });
+
   it("includes rich tokens for gpt-5.1", () => {
     const { labelTokens, testIdTokens } = buildModelMatchersLiteralForTest("gpt-5.1");
     expectContains(labelTokens, "gpt-5.1");
@@ -64,10 +73,18 @@ describe("browser model selection matchers", () => {
     expect(testIdTokens).toContain("gpt-5.2-instant");
   });
 
+  it("includes tokens for gpt-5.5-thinking", () => {
+    const { labelTokens, testIdTokens } = buildModelMatchersLiteralForTest("gpt-5.5-thinking");
+    expect(labelTokens.some((t) => t.includes("thinking"))).toBe(true);
+    expect(labelTokens.some((t) => t.includes("5.5") || t.includes("5-5"))).toBe(true);
+    expect(testIdTokens).toContain("model-switcher-gpt-5-5-thinking");
+    expect(testIdTokens).toContain("gpt-5.5-thinking");
+  });
+
   it("closes the menu after a successful selection path", () => {
     const expression = buildModelSelectionExpressionForTest("gpt-5.4");
-    expect(expression).toContain("const closeMenu = () =>");
+    expect(expression).toContain("const closeMenu = async () =>");
     expect(expression).toContain("key: 'Escape'");
-    expect(expression).toContain("closeMenu();");
+    expect(expression).toContain("await closeMenu();");
   });
 });

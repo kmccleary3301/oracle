@@ -100,9 +100,11 @@ function buildModelSelectionExpression(
       .map((token) => normalizeText(token))
       .filter(Boolean);
     const targetWords = normalizedTarget.split(' ').filter(Boolean);
-    const desiredVersion = normalizedTarget.includes('5 4')
-      ? '5-4'
-      : normalizedTarget.includes('5 2')
+    const desiredVersion = normalizedTarget.includes('5 5')
+      ? '5-5'
+      : normalizedTarget.includes('5 4')
+        ? '5-4'
+        : normalizedTarget.includes('5 2')
         ? '5-2'
         : normalizedTarget.includes('5 1')
           ? '5-1'
@@ -112,60 +114,49 @@ function buildModelSelectionExpression(
     const wantsPro = normalizedTarget.includes(' pro') || normalizedTarget.endsWith(' pro') || normalizedTokens.includes('pro');
     const wantsInstant = normalizedTarget.includes('instant');
     const wantsThinking = normalizedTarget.includes('thinking');
+    const latestVersion = '5-5';
 
     const button = document.querySelector(BUTTON_SELECTOR);
     if (!button) {
       return { status: 'button-missing' };
     }
 
-    const closeMenu = () => {
+    const closeMenu = async () => {
       try {
         if (dispatchClickSequence(button)) {
           lastPointerClick = performance.now();
-          return;
         }
       } catch {}
+      await new Promise((resolve) => setTimeout(resolve, 60));
       try {
-        document.dispatchEvent(
-          new KeyboardEvent('keydown', {
-            key: 'Escape',
-            code: 'Escape',
-            keyCode: 27,
-            which: 27,
-            bubbles: true,
-          }),
-        );
+        for (const target of [document, window]) {
+          target.dispatchEvent(
+            new KeyboardEvent('keydown', {
+              key: 'Escape',
+              code: 'Escape',
+              keyCode: 27,
+              which: 27,
+              bubbles: true,
+            }),
+          );
+          target.dispatchEvent(
+            new KeyboardEvent('keyup', {
+              key: 'Escape',
+              code: 'Escape',
+              keyCode: 27,
+              which: 27,
+              bubbles: true,
+            }),
+          );
+        }
       } catch {}
+      await new Promise((resolve) => setTimeout(resolve, 60));
     };
 
     const getButtonLabel = () => (button.textContent ?? '').trim();
-    if (MODEL_STRATEGY === 'current') {
-      return { status: 'already-selected', label: getButtonLabel() };
-    }
-    const buttonMatchesTarget = () => {
-      const normalizedLabel = normalizeText(getButtonLabel());
-      if (!normalizedLabel) return false;
-      if (desiredVersion) {
-        if (desiredVersion === '5-4' && !normalizedLabel.includes('5 4')) return false;
-        if (desiredVersion === '5-2' && !normalizedLabel.includes('5 2')) return false;
-        if (desiredVersion === '5-1' && !normalizedLabel.includes('5 1')) return false;
-        if (desiredVersion === '5-0' && !normalizedLabel.includes('5 0')) return false;
-      }
-      if (wantsPro && !normalizedLabel.includes(' pro')) return false;
-      if (wantsInstant && !normalizedLabel.includes('instant')) return false;
-      if (wantsThinking && !normalizedLabel.includes('thinking')) return false;
-      // Also reject if button has variants we DON'T want
-      if (!wantsPro && normalizedLabel.includes(' pro')) return false;
-      if (!wantsInstant && normalizedLabel.includes('instant')) return false;
-      if (!wantsThinking && normalizedLabel.includes('thinking')) return false;
-      return true;
-    };
-
-    if (buttonMatchesTarget()) {
-      return { status: 'already-selected', label: getButtonLabel() };
-    }
 
     let lastPointerClick = 0;
+    let selectionAttempted = false;
     const pointerClick = () => {
       if (dispatchClickSequence(button)) {
         lastPointerClick = performance.now();
@@ -211,6 +202,12 @@ function buildModelSelectionExpression(
             normalizedTestId.includes('gpt-5-2') ||
             normalizedTestId.includes('gpt-5.2') ||
             normalizedTestId.includes('gpt52');
+          const has55 =
+            normalizedTestId.includes('5-5') ||
+            normalizedTestId.includes('5.5') ||
+            normalizedTestId.includes('gpt-5-5') ||
+            normalizedTestId.includes('gpt-5.5') ||
+            normalizedTestId.includes('gpt55');
           const has54 =
             normalizedTestId.includes('5-4') ||
             normalizedTestId.includes('5.4') ||
@@ -229,9 +226,23 @@ function buildModelSelectionExpression(
             normalizedTestId.includes('gpt-5-0') ||
             normalizedTestId.includes('gpt-5.0') ||
             normalizedTestId.includes('gpt50');
-          const candidateVersion = has54 ? '5-4' : has52 ? '5-2' : has51 ? '5-1' : has50 ? '5-0' : null;
+          const candidateVersion = has55
+            ? '5-5'
+            : has54
+              ? '5-4'
+              : has52
+                ? '5-2'
+                : has51
+                  ? '5-1'
+                  : has50
+                    ? '5-0'
+                    : null;
           // If a candidate advertises a different version, ignore it entirely.
-          if (candidateVersion && candidateVersion !== desiredVersion) {
+          if (
+            candidateVersion &&
+            candidateVersion !== desiredVersion &&
+            candidateVersion !== latestVersion
+          ) {
             return 0;
           }
           // When targeting an explicit version, avoid selecting submenu wrappers that can contain legacy models.
@@ -308,13 +319,16 @@ function buildModelSelectionExpression(
       return Math.max(score, 0);
     };
 
-    const findBestOption = () => {
+    const findBestOption = (selectedOnly = false) => {
       // Walk through every menu item and keep whichever earns the highest score.
       let bestMatch = null;
       const menus = Array.from(document.querySelectorAll(${menuContainerLiteral}));
       for (const menu of menus) {
         const buttons = Array.from(menu.querySelectorAll(${menuItemLiteral}));
         for (const option of buttons) {
+          if (selectedOnly && !optionIsSelected(option)) {
+            continue;
+          }
           const text = option.textContent ?? '';
           const normalizedText = normalizeText(text);
           const testid = option.getAttribute('data-testid') ?? '';
@@ -330,6 +344,11 @@ function buildModelSelectionExpression(
       }
       return bestMatch;
     };
+
+    if (MODEL_STRATEGY === 'current') {
+      const selected = findBestOption(true);
+      return { status: 'already-selected', label: selected?.label ?? getButtonLabel() };
+    }
 
     return new Promise((resolve) => {
       const start = performance.now();
@@ -372,14 +391,27 @@ function buildModelSelectionExpression(
           await openDelay();
         }
         ensureMenuOpen();
-        const match = findBestOption();
+        const selectedMatch = findBestOption(true);
+        const match = findBestOption(false);
+        if (selectedMatch && selectedMatch.score > 0 && (!match || selectedMatch.score >= match.score)) {
+          await closeMenu();
+          resolve({
+            status: selectionAttempted ? 'switched' : 'already-selected',
+            label: getOptionLabel(selectedMatch.node) || selectedMatch.label,
+          });
+          return;
+        }
         if (match) {
           if (optionIsSelected(match.node)) {
-            closeMenu();
-            resolve({ status: 'already-selected', label: getButtonLabel() || match.label });
+            await closeMenu();
+            resolve({
+              status: selectionAttempted ? 'switched' : 'already-selected',
+              label: getOptionLabel(match.node) || match.label,
+            });
             return;
           }
           dispatchClickSequence(match.node);
+          selectionAttempted = true;
           // Submenus (e.g. "Legacy models") need a second pass to pick the actual model option.
           // Keep scanning once the submenu opens instead of treating the submenu click as a final switch.
           const isSubmenu = (match.testid ?? '').toLowerCase().includes('submenu');
@@ -387,13 +419,8 @@ function buildModelSelectionExpression(
             setTimeout(attempt, REOPEN_INTERVAL_MS / 2);
             return;
           }
-          // Wait for the top bar label to reflect the requested model; otherwise keep scanning.
+          // Wait for the menu's selected state to reflect the requested model; otherwise keep scanning.
           setTimeout(() => {
-            if (buttonMatchesTarget()) {
-              closeMenu();
-              resolve({ status: 'switched', label: getButtonLabel() || match.label });
-              return;
-            }
             attempt();
           }, Math.max(120, INITIAL_WAIT_MS));
           return;
@@ -456,6 +483,34 @@ function buildModelMatchersLiteral(targetModel: string): {
     testIdTokens.add("gpt-5-4");
     testIdTokens.add("gpt5-4");
     testIdTokens.add("gpt54");
+  }
+  // Numeric variations (5.5 ↔ 55 ↔ gpt-5-5)
+  if (base.includes("5.5") || base.includes("5-5") || base.includes("55")) {
+    push("5.5", labelTokens);
+    push("gpt-5.5", labelTokens);
+    push("gpt5.5", labelTokens);
+    push("gpt-5-5", labelTokens);
+    push("gpt5-5", labelTokens);
+    push("gpt55", labelTokens);
+    push("chatgpt 5.5", labelTokens);
+    if (base.includes("thinking")) {
+      push("thinking", labelTokens);
+      testIdTokens.add("model-switcher-gpt-5-5-thinking");
+      testIdTokens.add("gpt-5-5-thinking");
+      testIdTokens.add("gpt-5.5-thinking");
+    }
+    if (base.includes("instant")) {
+      push("instant", labelTokens);
+      testIdTokens.add("model-switcher-gpt-5-5-instant");
+      testIdTokens.add("gpt-5-5-instant");
+      testIdTokens.add("gpt-5.5-instant");
+    }
+    if (!base.includes("thinking") && !base.includes("instant") && !base.includes("pro")) {
+      testIdTokens.add("model-switcher-gpt-5-5");
+    }
+    testIdTokens.add("gpt-5-5");
+    testIdTokens.add("gpt5-5");
+    testIdTokens.add("gpt55");
   }
   // Numeric variations (5.1 ↔ 51 ↔ gpt-5-1)
   if (base.includes("5.1") || base.includes("5-1") || base.includes("51")) {
@@ -523,6 +578,11 @@ function buildModelMatchersLiteral(targetModel: string): {
       testIdTokens.add("gpt-5.4-pro");
       testIdTokens.add("gpt-5-4-pro");
       testIdTokens.add("gpt54pro");
+    }
+    if (base.includes("5.5") || base.includes("5-5") || base.includes("55")) {
+      testIdTokens.add("gpt-5.5-pro");
+      testIdTokens.add("gpt-5-5-pro");
+      testIdTokens.add("gpt55pro");
     }
     if (base.includes("5.1") || base.includes("5-1") || base.includes("51")) {
       testIdTokens.add("gpt-5.1-pro");
