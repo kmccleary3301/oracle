@@ -15,10 +15,10 @@ import type { BrowserModelStrategy } from "../browser/types.js";
 import type { CookieParam } from "../browser/types.js";
 import { getOracleHomeDir } from "../oracleHome.js";
 
-const DEFAULT_BROWSER_TIMEOUT_MS = 1_200_000;
+const DEFAULT_BROWSER_TIMEOUT_MS = 90 * 60_000;
 const DEFAULT_BROWSER_INPUT_TIMEOUT_MS = 60_000;
-const DEFAULT_BROWSER_RECHECK_TIMEOUT_MS = 120_000;
-const DEFAULT_BROWSER_AUTO_REATTACH_TIMEOUT_MS = 120_000;
+const DEFAULT_BROWSER_RECHECK_TIMEOUT_MS = 180_000;
+const DEFAULT_BROWSER_AUTO_REATTACH_TIMEOUT_MS = 180_000;
 const DEFAULT_CHROME_PROFILE = "Default";
 
 // Ordered array: most specific models first to ensure correct selection.

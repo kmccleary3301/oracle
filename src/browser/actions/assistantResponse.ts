@@ -53,6 +53,15 @@ function isGeneratedImageTerminalPlaceholderText(normalized: string): boolean {
   );
 }
 
+function isTransientAssistantPlaceholderText(normalized: string): boolean {
+  const text = normalized.trim();
+  return (
+    text === "stopped thinking" ||
+    text === "chatgpt said:stopped thinking" ||
+    text.endsWith("\nstopped thinking")
+  );
+}
+
 export async function waitForAssistantResponse(
   Runtime: ChromeClient["Runtime"],
   timeoutMs: number,
@@ -240,6 +249,34 @@ export async function captureAssistantMarkdown(
   return null;
 }
 
+export async function captureConversationTurnMarkdowns(
+  Runtime: ChromeClient["Runtime"],
+  logger?: BrowserLogger,
+): Promise<Map<number, string>> {
+  const { result } = await Runtime.evaluate({
+    expression: buildConversationCopyExpression(),
+    returnByValue: true,
+    awaitPromise: true,
+  });
+  const value = result?.value;
+  if (!Array.isArray(value)) {
+    return new Map();
+  }
+  const entries = value.flatMap((entry): Array<[number, string]> => {
+    if (!entry || typeof entry !== "object") return [];
+    const index = Number((entry as { index?: unknown }).index);
+    const markdown = (entry as { markdown?: unknown }).markdown;
+    if (!Number.isFinite(index) || typeof markdown !== "string" || !markdown.trim()) {
+      return [];
+    }
+    return [[Math.floor(index), markdown]];
+  });
+  if (logger?.verbose && entries.length > 0) {
+    logger(`Captured ${entries.length} conversation turn transcript(s) via copy buttons`);
+  }
+  return new Map(entries);
+}
+
 export function buildAssistantExtractorForTest(name: string): string {
   return buildAssistantExtractor(name);
 }
@@ -256,6 +293,10 @@ export function buildCopyExpressionForTest(
   meta: { messageId?: string | null; turnId?: string | null } = {},
 ): string {
   return buildCopyExpression(meta);
+}
+
+export function buildConversationCopyExpressionForTest(): string {
+  return buildConversationCopyExpression();
 }
 
 async function recoverAssistantResponse(
@@ -325,7 +366,7 @@ async function parseAssistantEvaluationResult(
         ) ?? [])
       : [];
     const normalized = text.toLowerCase();
-    if (isAnswerNowPlaceholderText(normalized)) {
+    if (isAnswerNowPlaceholderText(normalized) || isTransientAssistantPlaceholderText(normalized)) {
       if (generatedImageFileIds.length > 0) {
         return { text: "Generated image", html, meta: { turnId, messageId } };
       }
@@ -344,7 +385,10 @@ async function parseAssistantEvaluationResult(
   if (!fallbackText) {
     return null;
   }
-  if (isAnswerNowPlaceholderText(fallbackText.toLowerCase())) {
+  if (
+    isAnswerNowPlaceholderText(fallbackText.toLowerCase()) ||
+    isTransientAssistantPlaceholderText(fallbackText.toLowerCase())
+  ) {
     return null;
   }
   return { text: fallbackText, html: undefined, meta: {} };
@@ -568,7 +612,7 @@ function normalizeAssistantSnapshot(snapshot: AssistantSnapshot | null): {
   const normalized = text.toLowerCase();
   // "Pro thinking" often renders a placeholder turn containing an "Answer now" gate.
   // Treat it as incomplete so browser mode keeps waiting for the real assistant text.
-  if (isAnswerNowPlaceholderText(normalized)) {
+  if (isAnswerNowPlaceholderText(normalized) || isTransientAssistantPlaceholderText(normalized)) {
     if (hasGeneratedImages(snapshot)) {
       return {
         text: "Generated image",
@@ -633,6 +677,7 @@ function buildAssistantSnapshotExpression(minTurnIndex?: number): string {
       const hasGeneratedImages = Array.isArray(snapshot?.generatedImageFileIds) && snapshot.generatedImageFileIds.length > 0;
       if (hasGeneratedImages) return false;
       if (normalized === 'chatgpt said:' || normalized === 'chatgpt said') return true;
+      if (normalized === 'stopped thinking' || normalized === 'chatgpt said:stopped thinking' || normalized.endsWith('\\nstopped thinking')) return true;
       if (normalized.includes('file upload request') && (normalized.includes('pro thinking') || normalized.includes('chatgpt said'))) {
         return true;
       }
@@ -669,6 +714,7 @@ function buildResponseObserverExpression(timeoutMs: number, minTurnIndex?: numbe
       const hasGeneratedImages = Array.isArray(snapshot?.generatedImageFileIds) && snapshot.generatedImageFileIds.length > 0;
       if (hasGeneratedImages) return false;
       if (normalized === 'chatgpt said:' || normalized === 'chatgpt said') return true;
+      if (normalized === 'stopped thinking' || normalized === 'chatgpt said:stopped thinking' || normalized.endsWith('\\nstopped thinking')) return true;
       if (normalized.includes('file upload request') && (normalized.includes('pro thinking') || normalized.includes('chatgpt said'))) {
         return true;
       }
@@ -1154,15 +1200,26 @@ function buildCopyExpression(meta: { messageId?: string | null; turnId?: string 
 
     const interceptClipboard = () => {
       const clipboard = navigator.clipboard;
-      const state = { text: '', updatedAt: 0 };
+      const state = { text: '', type: '', updatedAt: 0 };
       if (!clipboard) {
         return { state, restore: () => {} };
       }
       const originalWriteText = clipboard.writeText;
       const originalWrite = clipboard.write;
+      const acceptText = (text, type = 'text/plain') => {
+        if (typeof text !== 'string') return;
+        const priority = { 'text/html': 1, 'text/plain': 2, 'text/markdown': 3 };
+        const currentPriority = priority[state.type] || 0;
+        const nextPriority = priority[type] || 0;
+        const preferred = nextPriority > currentPriority || (nextPriority === currentPriority && text.length > (state.text || '').length);
+        if (preferred) {
+          state.text = text;
+          state.type = type;
+          state.updatedAt = Date.now();
+        }
+      };
       clipboard.writeText = (value) => {
-        state.text = typeof value === 'string' ? value : '';
-        state.updatedAt = Date.now();
+        acceptText(typeof value === 'string' ? value : '', 'text/plain');
         return Promise.resolve();
       };
       clipboard.write = async (items) => {
@@ -1170,13 +1227,12 @@ function buildCopyExpression(meta: { messageId?: string | null; turnId?: string 
           const list = Array.isArray(items) ? items : items ? [items] : [];
           for (const item of list) {
             if (!item) continue;
-            const types = Array.isArray(item.types) ? item.types : [];
-            if (types.includes('text/plain') && typeof item.getType === 'function') {
-              const blob = await item.getType('text/plain');
+            const types = Array.from(item.types || []);
+            for (const type of ['text/markdown', 'text/plain', 'text/html']) {
+              if (!types.includes(type) || typeof item.getType !== 'function') continue;
+              const blob = await item.getType(type);
               const text = await blob.text();
-              state.text = text ?? '';
-              state.updatedAt = Date.now();
-              break;
+              acceptText(text ?? '', type);
             }
           }
         } catch {
@@ -1267,6 +1323,141 @@ function buildCopyExpression(meta: { messageId?: string | null; turnId?: string 
 
       waitForButton();
     });
+  })()`;
+}
+
+function buildConversationCopyExpression(): string {
+  return `(() => {
+    ${buildClickDispatcher()}
+    const TURN_SELECTOR = ${JSON.stringify(CONVERSATION_TURN_SELECTOR)};
+    const BUTTON_SELECTOR = '${COPY_BUTTON_SELECTOR}';
+    const TIMEOUT_MS = 3500;
+
+    const roleFor = (turn) => {
+      if (!(turn instanceof HTMLElement)) return 'unknown';
+      const attr = [
+        turn.getAttribute('data-message-author-role'),
+        turn.getAttribute('data-turn'),
+        turn.querySelector('[data-message-author-role]')?.getAttribute('data-message-author-role'),
+        turn.querySelector('[data-turn]')?.getAttribute('data-turn'),
+      ].filter(Boolean).join(' ').toLowerCase();
+      if (attr.includes('user')) return 'user';
+      if (attr.includes('assistant')) return 'assistant';
+      const copyLabels = Array.from(turn.querySelectorAll(BUTTON_SELECTOR))
+        .map((button) => button.getAttribute('aria-label') || '')
+        .join(' ')
+        .toLowerCase();
+      if (copyLabels.includes('copy response')) return 'assistant';
+      if (copyLabels.includes('copy message')) return 'user';
+      return 'unknown';
+    };
+
+    const interceptClipboard = () => {
+      const clipboard = navigator.clipboard;
+      const state = { text: '', type: '', updatedAt: 0 };
+      if (!clipboard) return { state, restore: () => {} };
+      const originalWriteText = clipboard.writeText;
+      const originalWrite = clipboard.write;
+      const acceptText = (text, type = 'text/plain') => {
+        if (typeof text !== 'string') return;
+        const priority = { 'text/html': 1, 'text/plain': 2, 'text/markdown': 3 };
+        const currentPriority = priority[state.type] || 0;
+        const nextPriority = priority[type] || 0;
+        if (nextPriority > currentPriority || (nextPriority === currentPriority && text.length > (state.text || '').length)) {
+          state.text = text;
+          state.type = type;
+          state.updatedAt = Date.now();
+        }
+      };
+      clipboard.writeText = (value) => {
+        acceptText(typeof value === 'string' ? value : '', 'text/plain');
+        return Promise.resolve();
+      };
+      clipboard.write = async (items) => {
+        const list = Array.isArray(items) ? items : items ? [items] : [];
+        for (const item of list) {
+          if (!item) continue;
+          const types = Array.from(item.types || []);
+          for (const type of ['text/markdown', 'text/plain', 'text/html']) {
+            if (!types.includes(type) || typeof item.getType !== 'function') continue;
+            const blob = await item.getType(type);
+            acceptText(await blob.text(), type);
+          }
+        }
+        return Promise.resolve();
+      };
+      return {
+        state,
+        restore: () => {
+          clipboard.writeText = originalWriteText;
+          clipboard.write = originalWrite;
+        },
+      };
+    };
+
+    const clickAndRead = (turn, button) => new Promise((resolve) => {
+      const interception = interceptClipboard();
+      let settled = false;
+      let pollId = null;
+      let timeoutId = null;
+      let lastText = '';
+      let stableTicks = 0;
+      const finish = (payload) => {
+        if (settled) return;
+        settled = true;
+        if (pollId) clearInterval(pollId);
+        if (timeoutId) clearTimeout(timeoutId);
+        interception.restore?.();
+        resolve(payload);
+      };
+      const maybeFinish = () => {
+        const text = interception.state.text ?? '';
+        if (!text.trim()) return;
+        if (text !== lastText) {
+          lastText = text;
+          stableTicks = 0;
+          return;
+        }
+        stableTicks += 1;
+        if (stableTicks >= 2 && Date.now() - interception.state.updatedAt >= 180) {
+          finish({ success: true, markdown: text, type: interception.state.type || 'text/plain' });
+        }
+      };
+      turn.scrollIntoView({ block: 'center', behavior: 'instant' });
+      for (const type of ['pointerover', 'mouseover', 'mouseenter', 'pointermove', 'mousemove']) {
+        turn.dispatchEvent(new MouseEvent(type, { bubbles: true, clientX: 100, clientY: 100 }));
+        button.dispatchEvent(new MouseEvent(type, { bubbles: true, clientX: 100, clientY: 100 }));
+      }
+      dispatchClickSequence(button);
+      pollId = setInterval(maybeFinish, 100);
+      timeoutId = setTimeout(() => finish({ success: false, status: 'timeout' }), TIMEOUT_MS);
+    });
+
+    return (async () => {
+      const turns = Array.from(document.querySelectorAll(TURN_SELECTOR));
+      const results = [];
+      for (let index = 0; index < turns.length; index += 1) {
+        const turn = turns[index];
+        if (!(turn instanceof HTMLElement)) continue;
+        const role = roleFor(turn);
+        const buttons = Array.from(turn.querySelectorAll(BUTTON_SELECTOR));
+        const button =
+          buttons.find((candidate) => /copy (message|response)/i.test(candidate.getAttribute('aria-label') || '')) ??
+          buttons[0] ??
+          null;
+        if (!button) continue;
+        const payload = await clickAndRead(turn, button);
+        if (payload?.success && typeof payload.markdown === 'string') {
+          results.push({
+            index,
+            role,
+            markdown: payload.markdown,
+            markdownType: payload.type ?? 'text/plain',
+          });
+        }
+      }
+      return results;
+    })();
   })()`;
 }
 

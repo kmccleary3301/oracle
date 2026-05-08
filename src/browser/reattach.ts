@@ -17,6 +17,7 @@ import { resolveBrowserConfig } from "./config.js";
 import { syncCookies } from "./cookies.js";
 import { CHATGPT_URL } from "./constants.js";
 import { cleanupStaleProfileState } from "./profileState.js";
+import { delay } from "./utils.js";
 import {
   pickTarget,
   extractConversationIdFromUrl,
@@ -81,9 +82,12 @@ export async function resumeBrowserSession(
       port: runtime.chromePort,
       target: target?.targetId,
     })) as unknown as ChromeClient;
-    const { Runtime, DOM } = client;
+    const { Runtime, DOM, Page } = client;
     if (Runtime?.enable) {
       await Runtime.enable();
+    }
+    if (Page?.enable) {
+      await Page.enable();
     }
     if (DOM && typeof DOM.enable === "function") {
       await DOM.enable();
@@ -119,7 +123,7 @@ export async function resumeBrowserSession(
 
     const waitForResponse = deps.waitForAssistantResponse ?? waitForAssistantResponse;
     const captureMarkdown = deps.captureAssistantMarkdown ?? captureAssistantMarkdown;
-    const timeoutMs = config?.timeoutMs ?? 120_000;
+    const timeoutMs = config?.timeoutMs ?? 90 * 60_000;
     const pingTimeoutMs = Math.min(5_000, Math.max(1_500, Math.floor(timeoutMs * 0.05)));
     await withTimeout(
       Runtime.evaluate({ expression: "1+1", returnByValue: true }),
@@ -129,10 +133,13 @@ export async function resumeBrowserSession(
     await ensureConversationOpen();
     const minTurnIndex = await readConversationTurnIndex(Runtime, logger);
     const promptEcho = buildPromptEchoMatcher(deps.promptPreview);
-    const answer = await withTimeout(
-      waitForResponse(Runtime, timeoutMs, logger, minTurnIndex ?? undefined),
-      timeoutMs + 5_000,
-      "Reattach response timed out",
+    const answer = await waitForResponseWithRefresh(
+      Runtime,
+      Page,
+      waitForResponse,
+      timeoutMs,
+      logger,
+      minTurnIndex ?? undefined,
     );
     const recovered = await recoverPromptEcho(
       Runtime,
@@ -246,10 +253,17 @@ async function resumeBrowserSessionViaNewChrome(
 
   const waitForResponse = deps.waitForAssistantResponse ?? waitForAssistantResponse;
   const captureMarkdown = deps.captureAssistantMarkdown ?? captureAssistantMarkdown;
-  const timeoutMs = resolved.timeoutMs ?? 120_000;
+  const timeoutMs = resolved.timeoutMs ?? 90 * 60_000;
   const minTurnIndex = await readConversationTurnIndex(Runtime, logger);
   const promptEcho = buildPromptEchoMatcher(deps.promptPreview);
-  const answer = await waitForResponse(Runtime, timeoutMs, logger, minTurnIndex ?? undefined);
+  const answer = await waitForResponseWithRefresh(
+    Runtime,
+    Page,
+    waitForResponse,
+    timeoutMs,
+    logger,
+    minTurnIndex ?? undefined,
+  );
   const recovered = await recoverPromptEcho(
     Runtime,
     answer,
@@ -293,3 +307,57 @@ export const __test__ = {
   buildConversationUrl,
   openConversationFromSidebar,
 };
+
+async function waitForResponseWithRefresh(
+  Runtime: ChromeClient["Runtime"],
+  Page: ChromeClient["Page"],
+  waitForResponse: typeof waitForAssistantResponse,
+  timeoutMs: number,
+  logger: BrowserLogger,
+  minTurnIndex?: number,
+): Promise<Awaited<ReturnType<typeof waitForAssistantResponse>>> {
+  const deadline = Date.now() + Math.max(1, timeoutMs);
+  let lastError: unknown;
+  let attempts = 0;
+  while (Date.now() < deadline) {
+    const remainingMs = Math.max(1_000, deadline - Date.now());
+    const sliceMs = Math.min(
+      remainingMs,
+      attempts === 0 ? Math.max(180_000, Math.min(240_000, timeoutMs)) : remainingMs,
+    );
+    try {
+      return await withTimeout(
+        waitForResponse(Runtime, sliceMs, logger, minTurnIndex),
+        sliceMs + 5_000,
+        "Reattach response timed out",
+      );
+    } catch (error) {
+      lastError = error;
+      if (!shouldRefreshAfterReattachError(error) || Date.now() >= deadline) {
+        throw error;
+      }
+      const href = await Runtime.evaluate({ expression: "location.href", returnByValue: true })
+        .then((res) => (typeof res.result?.value === "string" ? res.result.value : ""))
+        .catch(() => "");
+      if (!href.includes("/c/")) {
+        throw error;
+      }
+      logger("Reattach response stalled; refreshing conversation view");
+      await Page.navigate({ url: href });
+      await delay(1_500);
+      attempts += 1;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Reattach response timed out");
+}
+
+function shouldRefreshAfterReattachError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("assistant response") ||
+    message.includes("response timed out") ||
+    message.includes("watchdog") ||
+    message.includes("capture assistant response")
+  );
+}

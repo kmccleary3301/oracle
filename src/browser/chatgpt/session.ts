@@ -23,6 +23,7 @@ import type {
 } from "./types.js";
 import {
   clearComposerAttachments,
+  captureConversationTurnMarkdowns,
   ensureLoggedIn,
   ensurePromptReady,
   uploadAttachmentFile,
@@ -45,6 +46,8 @@ export interface ChatgptConversationSnapshotOptions {
   keepTab?: boolean;
   log?: BrowserLogger;
 }
+
+export interface ChatgptConversationRefreshOptions extends ChatgptConversationSnapshotOptions {}
 
 export interface ChatgptAttachmentProbeOptions {
   attachments: BrowserAttachment[];
@@ -256,6 +259,48 @@ export async function readChatgptConversationSnapshot(
     const { Page, Runtime } = client;
     await Promise.all([Page.enable(), Runtime.enable()]);
     await navigateToChatGPT(Page, Runtime, options.conversationUrl, logger);
+    await waitForDocumentReady(Runtime, options.timeoutMs ?? 30_000);
+    return await waitForConversationSnapshot(Runtime, options.timeoutMs ?? 30_000);
+  } finally {
+    try {
+      await client.close();
+    } finally {
+      if (!options.keepTab) {
+        await closeRemoteChromeTarget(
+          remoteChrome.host,
+          remoteChrome.port,
+          connection.targetId,
+          logger,
+        );
+      }
+    }
+  }
+}
+
+export async function refreshChatgptConversation(
+  options: ChatgptConversationRefreshOptions,
+): Promise<ChatgptConversationSnapshot> {
+  const logger = options.log ?? ((_message: string) => {});
+  const config = resolveBrowserConfig(options.config);
+  const remoteChrome = config.remoteChrome;
+  if (!remoteChrome) {
+    throw new Error("ChatGPT conversation refresh requires browser.remoteChrome or --remote-chrome.");
+  }
+  const connection = await connectToRemoteChrome(
+    remoteChrome.host,
+    remoteChrome.port,
+    logger,
+    options.conversationUrl,
+    { maxTabs: config.remoteChromeMaxTabs },
+  );
+  const client = connection.client;
+  try {
+    const { Page, Runtime } = client;
+    await Promise.all([Page.enable(), Runtime.enable()]);
+    await navigateToChatGPT(Page, Runtime, options.conversationUrl, logger);
+    await waitForDocumentReady(Runtime, options.timeoutMs ?? 30_000);
+    logger("Refreshing ChatGPT conversation");
+    await Page.navigate({ url: options.conversationUrl });
     await waitForDocumentReady(Runtime, options.timeoutMs ?? 30_000);
     return await waitForConversationSnapshot(Runtime, options.timeoutMs ?? 30_000);
   } finally {
@@ -500,6 +545,26 @@ function findLastTurnByRole(
   turns: ChatgptConversationTurnSnapshot[],
   role: ChatgptConversationTurnSnapshot["role"],
 ): ChatgptConversationTurnSnapshot | undefined {
+  if (role === "assistant") {
+    let best: ChatgptConversationTurnSnapshot | undefined;
+    let bestScore = -1;
+    for (const turn of turns) {
+      if (turn?.role !== role) continue;
+      const text = turn.text ?? "";
+      const markdownSignals =
+        (/\[\^\d+\]:/.test(text) ? 20_000 : 0) +
+        (/(^|\n)#{1,6}\s+\S/.test(text) ? 2_000 : 0) +
+        (/\[[^\]]+\]:\s*https?:\/\//.test(text) ? 5_000 : 0);
+      const score = markdownSignals + text.length + turn.index;
+      if (score >= bestScore) {
+        best = turn;
+        bestScore = score;
+      }
+    }
+    if (best) {
+      return best;
+    }
+  }
   for (let index = turns.length - 1; index >= 0; index -= 1) {
     const turn = turns[index];
     if (turn?.role === role) {
@@ -556,6 +621,7 @@ async function readTurnsFromRuntime(
   if (!Array.isArray(value)) {
     return [];
   }
+  const copiedMarkdowns = await captureConversationTurnMarkdowns(Runtime).catch(() => new Map());
   return value.flatMap((entry): ChatgptConversationTurnSnapshot[] => {
     if (!entry || typeof entry !== "object") return [];
     const item = entry as Partial<ChatgptConversationTurnSnapshot>;
@@ -563,10 +629,12 @@ async function readTurnsFromRuntime(
       item.role === "user" || item.role === "assistant" || item.role === "unknown"
         ? item.role
         : "unknown";
-    const text = typeof item.text === "string" ? item.text : "";
+    const index = typeof item.index === "number" ? item.index : 0;
+    const copiedText = copiedMarkdowns.get(index);
+    const text = typeof copiedText === "string" ? copiedText : typeof item.text === "string" ? item.text : "";
     return [
       {
-        index: typeof item.index === "number" ? item.index : 0,
+        index,
         role,
         turnId: typeof item.turnId === "string" ? item.turnId : null,
         messageId: typeof item.messageId === "string" ? item.messageId : null,

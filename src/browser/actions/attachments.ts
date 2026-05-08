@@ -1270,9 +1270,12 @@ export async function clearComposerAttachments(
   Runtime: ChromeClient["Runtime"],
   timeoutMs: number,
   logger?: BrowserLogger,
+  options?: { preservePastedTextAttachments?: boolean },
 ): Promise<void> {
   const deadline = Date.now() + Math.max(0, timeoutMs);
+  const preservePastedTextAttachments = options?.preservePastedTextAttachments ?? false;
   const expression = `(() => {
+    const preservePastedTextAttachments = ${JSON.stringify(preservePastedTextAttachments)};
     const promptSelectors = ${JSON.stringify(INPUT_SELECTORS)};
     const sendSelectors = ${JSON.stringify(SEND_BUTTON_SELECTORS)};
     const findPromptNode = () => {
@@ -1342,8 +1345,24 @@ export async function clearComposerAttachments(
       const rect = el.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0;
     };
+    const isPastedTextAttachmentRemoveButton = (button) => {
+      if (!preservePastedTextAttachments) return false;
+      const tile =
+        button.closest('[aria-label], [data-testid*="attachment"], [data-testid*="file"], .group\\\\/file-tile') ??
+        button.parentElement;
+      const scopeText = [
+        button.getAttribute?.('aria-label') ?? '',
+        button.textContent ?? '',
+        tile?.getAttribute?.('aria-label') ?? '',
+        tile?.textContent ?? '',
+        tile?.querySelector?.('button[aria-label*="pasted text" i],button[aria-label*="Too long to show in text field" i]')?.getAttribute?.('aria-label') ?? '',
+      ].join(' ');
+      return /pasted text|too long to show in text field/i.test(scopeText);
+    };
     const removeButtons = scope
-      ? Array.from(scope.querySelectorAll(removeSelectors.join(','))).filter(visible)
+      ? Array.from(scope.querySelectorAll(removeSelectors.join(',')))
+          .filter(visible)
+          .filter((button) => !isPastedTextAttachmentRemoveButton(button))
       : [];
     for (const button of removeButtons.slice(0, 20)) {
       try {

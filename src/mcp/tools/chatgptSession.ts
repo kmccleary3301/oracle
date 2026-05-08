@@ -8,6 +8,7 @@ import {
   createChatgptSession,
   readChatgptBrowserStatus,
   readChatgptConversationSnapshot,
+  refreshChatgptConversation,
   sendChatgptTurn,
 } from "../../browser/chatgpt/session.js";
 import { extractChatgptSandboxArtifactsFromConfiguredBrowser } from "../../browser/chatgpt/sandboxArtifacts.js";
@@ -320,6 +321,42 @@ export function registerChatgptSessionTools(server: McpServer): void {
           {
             type: "text" as const,
             text: `Read ${result.turns.length} turn(s) from ${result.page.href}.`,
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    "chatgpt_refresh_conversation",
+    {
+      title: "Refresh ChatGPT conversation",
+      description:
+        "Reload a ChatGPT conversation in the logged-in browser, then return a fresh copy-button-enhanced snapshot.",
+      inputSchema: conversationSnapshotInputShape,
+      outputSchema: conversationSnapshotOutputShape,
+    },
+    async (input: unknown) => {
+      const parsed = z.object(conversationSnapshotInputShape).parse(input);
+      const config = await resolveMcpBrowserConfig(parsed.remoteChrome);
+      const result = await refreshChatgptConversation({
+        conversationUrl: parsed.conversationUrl,
+        timeoutMs: parsed.timeoutMs,
+        keepTab: parsed.keepTab,
+        config,
+      });
+      const structuredContent = {
+        ...result,
+        generatedImages: result.generatedImages.map(
+          ({ domRecords: _domRecords, ...image }) => image,
+        ),
+      };
+      return {
+        structuredContent,
+        content: [
+          {
+            type: "text" as const,
+            text: `Refreshed ${result.turns.length} turn(s) from ${result.page.href}.`,
           },
         ],
       };

@@ -22,23 +22,49 @@ const ENTER_KEY_EVENT = {
 } as const;
 const ENTER_KEY_TEXT = "\r";
 
-function escapeHtml(text: string): string {
-  return text
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-function buildClipboardHtml(prompt: string): string {
-  const body = escapeHtml(normalizePromptText(prompt)).replace(/\n/g, "<br>");
-  return `<div>${body}</div>`;
+function buildComposerReadValueFunction(): string {
+  return `const readValue = (node) => {
+        if (!node) return '';
+        if (node instanceof HTMLTextAreaElement) return node.value ?? '';
+        const normalizeText = (value) => String(value ?? '').replace(/\\u00a0/g, ' ');
+        const readNode = (current) => {
+          if (!current) return '';
+          if (current.nodeType === Node.TEXT_NODE) return normalizeText(current.textContent ?? '');
+          if (current.nodeType !== Node.ELEMENT_NODE) return '';
+          if (current.nodeName === 'BR') return '\\n';
+          return Array.from(current.childNodes ?? []).map(readNode).join('');
+        };
+        const blockTags = new Set([
+          'ADDRESS',
+          'ARTICLE',
+          'ASIDE',
+          'BLOCKQUOTE',
+          'DIV',
+          'H1',
+          'H2',
+          'H3',
+          'H4',
+          'H5',
+          'H6',
+          'LI',
+          'P',
+          'PRE',
+        ]);
+        const children = Array.from(node.childNodes ?? []);
+        if (
+          children.length > 0 &&
+          children.every((child) => child.nodeType === Node.ELEMENT_NODE && blockTags.has(child.nodeName))
+        ) {
+          return children.map((child) => readNode(child)).join('\\n');
+        }
+        return normalizeText(node.innerText ?? node.textContent ?? '');
+      };`;
 }
 
 interface InsertPromptDeps {
   runtime: ChromeClient["Runtime"];
   input: ChromeClient["Input"];
+  browser?: ChromeClient["Browser"];
   inputTimeoutMs?: number | null;
 }
 
@@ -63,8 +89,7 @@ export async function insertPromptText(
 ): Promise<void> {
   const { runtime, input } = deps;
   const normalizedPrompt = normalizePromptText(prompt);
-  const encodedPrompt = JSON.stringify(normalizedPrompt);
-  const encodedPromptHtml = JSON.stringify(buildClipboardHtml(normalizedPrompt));
+  const readValueFunction = buildComposerReadValueFunction();
 
   await waitForDomReady(runtime, logger, deps.inputTimeoutMs ?? undefined);
   const focusResult = await runtime.evaluate({
@@ -87,12 +112,15 @@ export async function insertPromptText(
         if (typeof node.focus === 'function') {
           node.focus();
         }
+        if (node instanceof HTMLTextAreaElement && typeof node.setSelectionRange === 'function') {
+          node.setSelectionRange(0, node.value.length);
+          return true;
+        }
         const doc = node.ownerDocument;
         const selection = doc?.getSelection?.();
         if (selection) {
           const range = doc.createRange();
           range.selectNodeContents(node);
-          range.collapse(false);
           selection.removeAllRanges();
           selection.addRange(range);
         }
@@ -120,56 +148,73 @@ export async function insertPromptText(
     throw new Error("Failed to focus prompt textarea");
   }
 
-  const pasteResult = await runtime.evaluate({
-    expression: `(() => {
-      const inputSelectors = ${JSON.stringify(INPUT_SELECTORS)};
-      const prompt = ${encodedPrompt};
-      const promptHtml = ${encodedPromptHtml};
-      const readValue = (node) => {
-        if (!node) return '';
-        if (node instanceof HTMLTextAreaElement) return node.value ?? '';
-        return node.innerText ?? node.textContent ?? '';
-      };
-      const isVisible = (node) => {
-        if (!node || typeof node.getBoundingClientRect !== 'function') return false;
-        const rect = node.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0;
-      };
-      const nodes = inputSelectors
-        .map((selector) => document.querySelector(selector))
-        .filter((node) => Boolean(node));
-      const node = nodes.find((candidate) => isVisible(candidate)) || nodes[0] || null;
-      if (!node) return { inserted: false, reason: 'missing-editor', value: '' };
-      dispatchClickSequence(node);
-      node.focus?.();
-      try {
-        const dt = new DataTransfer();
-        dt.setData('text/plain', prompt);
-        dt.setData('text/html', promptHtml);
-        const event = new ClipboardEvent('paste', {
-          bubbles: true,
-          cancelable: true,
-          clipboardData: dt,
-        });
-        node.dispatchEvent(event);
-      } catch {
-        // Older/locked-down browser contexts may not allow synthetic clipboard events.
-      }
-      const value = readValue(node);
-      return { inserted: value.includes(prompt), value };
-    })()`,
-    returnByValue: true,
-    awaitPromise: true,
-  });
+  await clearFocusedPromptWithKeyboard(input);
 
-  const pasteValue = String(pasteResult.result?.value?.value ?? "");
-  const pasteInserted =
-    Boolean(pasteResult.result?.value?.inserted) &&
-    normalizePromptText(pasteValue).includes(normalizedPrompt);
-  if (!pasteInserted) {
-    await input.insertText({ text: normalizedPrompt });
-  } else {
-    logger("Inserted prompt via paste event with newline preservation");
+  const nativePasteResult = await tryNativeClipboardPaste(deps, normalizedPrompt, readValueFunction);
+  if (nativePasteResult.inserted) {
+    logger(
+      nativePasteResult.asAttachment
+        ? "Inserted prompt via ChatGPT pasted-text attachment"
+        : "Inserted prompt via native clipboard paste",
+    );
+  }
+
+  let hardBreakNonExact = false;
+  let hardBreakInserted = false;
+  if (!nativePasteResult.inserted) {
+    const hardBreakResult = await runtime.evaluate({
+      expression: `(() => {
+        const inputSelectors = ${JSON.stringify(INPUT_SELECTORS)};
+        const prompt = ${JSON.stringify(normalizedPrompt)};
+        ${readValueFunction}
+        const isVisible = (node) => {
+          if (!node || typeof node.getBoundingClientRect !== 'function') return false;
+          const rect = node.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        };
+        const nodes = inputSelectors
+          .map((selector) => document.querySelector(selector))
+          .filter((node) => Boolean(node));
+        const node = nodes.find((candidate) => isVisible(candidate)) || nodes[0] || null;
+        if (!node || node instanceof HTMLTextAreaElement) {
+          return { inserted: false, reason: node ? 'textarea' : 'missing-editor', value: '' };
+        }
+        node.focus?.();
+        const selection = document.getSelection?.();
+        if (selection) {
+          const range = document.createRange();
+          range.selectNodeContents(node);
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
+        const lines = prompt.split('\\n');
+        for (let index = 0; index < lines.length; index += 1) {
+          const line = lines[index];
+          if (line) {
+            document.execCommand('insertText', false, line);
+          }
+          if (index < lines.length - 1) {
+            document.execCommand('insertLineBreak');
+          }
+        }
+        node.dispatchEvent(new InputEvent('input', { bubbles: true, data: prompt, inputType: 'insertFromPaste' }));
+        const value = readValue(node);
+        return { inserted: value === prompt, value };
+      })()`,
+      returnByValue: true,
+      awaitPromise: true,
+    });
+    const hardBreakValue = String(hardBreakResult.result?.value?.value ?? "");
+    hardBreakInserted =
+      Boolean(hardBreakResult.result?.value?.inserted) && hardBreakValue === normalizedPrompt;
+    hardBreakNonExact = !hardBreakInserted && hardBreakValue.trim().length > 0;
+    if (hardBreakInserted) {
+      logger("Inserted prompt via contenteditable hard line breaks");
+    } else if (hardBreakNonExact) {
+      logger("Inserted prompt via contenteditable hard line breaks with non-exact readback");
+    } else {
+      await input.insertText({ text: normalizedPrompt });
+    }
   }
 
   // Some pages (notably ChatGPT when subscriptions/widgets load) need a brief settle
@@ -183,11 +228,7 @@ export async function insertPromptText(
       const editor = document.querySelector(${primarySelectorLiteral});
       const fallback = document.querySelector(${fallbackSelectorLiteral});
       const inputSelectors = ${JSON.stringify(INPUT_SELECTORS)};
-      const readValue = (node) => {
-        if (!node) return '';
-        if (node instanceof HTMLTextAreaElement) return node.value ?? '';
-        return node.innerText ?? '';
-      };
+      ${readValueFunction}
       const isVisible = (node) => {
         if (!node || typeof node.getBoundingClientRect !== 'function') return false;
         const rect = node.getBoundingClientRect();
@@ -217,27 +258,51 @@ export async function insertPromptText(
     if (!promptSnippet) return true;
     return values.some((value) => normalizePromptText(String(value || "")).includes(promptSnippet));
   };
-  if (
-    (!editorTextTrimmed && !fallbackValueTrimmed && !activeValueTrimmed) ||
-    !containsPromptSnippet(editorTextRaw, fallbackValueRaw, activeValueRaw)
-  ) {
-    // Learned: occasionally Input.insertText doesn't land in the editor; force textContent/value + input events.
+  const composerEmpty = !editorTextTrimmed && !fallbackValueTrimmed && !activeValueTrimmed;
+  const composerContainsPrompt = containsPromptSnippet(
+    editorTextRaw,
+    fallbackValueRaw,
+    activeValueRaw,
+  );
+  if (composerEmpty && !nativePasteResult.asAttachment) {
+    logger("Prompt composer was empty after first insert attempt; retrying after refocus.");
     await runtime.evaluate({
       expression: `(() => {
-        const fallback = document.querySelector(${fallbackSelectorLiteral});
-        if (fallback) {
-          fallback.value = ${encodedPrompt};
-          fallback.dispatchEvent(new InputEvent('input', { bubbles: true, data: ${encodedPrompt}, inputType: 'insertFromPaste' }));
-          fallback.dispatchEvent(new Event('change', { bubbles: true }));
+        ${buildClickDispatcher()}
+        const inputSelectors = ${JSON.stringify(INPUT_SELECTORS)};
+        const isVisible = (node) => {
+          if (!node || typeof node.getBoundingClientRect !== 'function') return false;
+          const rect = node.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        };
+        const nodes = inputSelectors
+          .map((selector) => document.querySelector(selector))
+          .filter((node) => Boolean(node));
+        const node = nodes.find((candidate) => isVisible(candidate)) || nodes[0] || null;
+        if (!node) return { focused: false };
+        dispatchClickSequence(node);
+        node.focus?.();
+        if (node instanceof HTMLTextAreaElement && typeof node.setSelectionRange === 'function') {
+          node.setSelectionRange(0, node.value.length);
+          return { focused: true };
         }
-        const editor = document.querySelector(${primarySelectorLiteral});
-        if (editor) {
-          editor.textContent = ${encodedPrompt};
-          // Nudge ProseMirror to register the textContent write so its state/send-button updates
-          editor.dispatchEvent(new InputEvent('input', { bubbles: true, data: ${encodedPrompt}, inputType: 'insertFromPaste' }));
+        const selection = document.getSelection?.();
+        if (selection && !(node instanceof HTMLTextAreaElement)) {
+          const range = document.createRange();
+          range.selectNodeContents(node);
+          selection.removeAllRanges();
+          selection.addRange(range);
         }
+        return { focused: true };
       })()`,
+      returnByValue: true,
+      awaitPromise: true,
     });
+    await input.insertText({ text: normalizedPrompt });
+    await delay(500);
+  }
+  if (!composerContainsPrompt && !nativePasteResult.asAttachment) {
+    logger("Prompt composer readback differed after insertion; preserving non-empty editor state.");
   }
 
   const promptLength = normalizedPrompt.length;
@@ -246,11 +311,7 @@ export async function insertPromptText(
       const editor = document.querySelector(${primarySelectorLiteral});
       const fallback = document.querySelector(${fallbackSelectorLiteral});
       const inputSelectors = ${JSON.stringify(INPUT_SELECTORS)};
-      const readValue = (node) => {
-        if (!node) return '';
-        if (node instanceof HTMLTextAreaElement) return node.value ?? '';
-        return node.innerText ?? '';
-      };
+      ${readValueFunction}
       const isVisible = (node) => {
         if (!node || typeof node.getBoundingClientRect !== 'function') return false;
         const rect = node.getBoundingClientRect();
@@ -271,7 +332,12 @@ export async function insertPromptText(
   const observedEditor = postVerification.result?.value?.editorText ?? "";
   const observedFallback = postVerification.result?.value?.fallbackValue ?? "";
   const observedActive = postVerification.result?.value?.activeValue ?? "";
-  if (!containsPromptSnippet(observedEditor, observedFallback, observedActive)) {
+  if (
+    !containsPromptSnippet(observedEditor, observedFallback, observedActive) &&
+    !hardBreakInserted &&
+    !hardBreakNonExact &&
+    !nativePasteResult.asAttachment
+  ) {
     await logDomFailure(runtime, logger, "prompt-insert-mismatch");
     throw new Error("Failed to insert the requested prompt text into the composer.");
   }
@@ -280,7 +346,12 @@ export async function insertPromptText(
     observedFallback.length,
     observedActive.length,
   );
-  if (promptLength >= 50_000 && observedLength > 0 && observedLength < promptLength - 2_000) {
+  if (
+    promptLength >= 50_000 &&
+    observedLength > 0 &&
+    observedLength < promptLength - 2_000 &&
+    !nativePasteResult.asAttachment
+  ) {
     // Learned: very large prompts can truncate silently; fail fast so we can fall back to file uploads.
     await logDomFailure(runtime, logger, "prompt-too-large");
     throw new BrowserAutomationError(
@@ -293,6 +364,152 @@ export async function insertPromptText(
       },
     );
   }
+}
+
+async function tryNativeClipboardPaste(
+  deps: InsertPromptDeps,
+  prompt: string,
+  readValueFunction: string,
+): Promise<{ inserted: boolean; asAttachment: boolean }> {
+  const { runtime, input, browser } = deps;
+  if (!browser || !shouldUseNativePaste(prompt)) {
+    return { inserted: false, asAttachment: false };
+  }
+  await browser
+    .grantPermissions({
+      origin: "https://chatgpt.com",
+      permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"],
+    })
+    .catch(() => undefined);
+  const clipboardSet = await runtime.evaluate({
+    expression: `(async () => {
+      try {
+        const previousText = await navigator.clipboard.readText().catch(() => null);
+        await navigator.clipboard.writeText(${JSON.stringify(prompt)});
+        return { ok: true, previousText };
+      } catch {
+        return { ok: false, previousText: null };
+      }
+    })()`,
+    returnByValue: true,
+    awaitPromise: true,
+  });
+  const clipboardState = clipboardSet.result?.value as
+    | { ok?: boolean; previousText?: string | null }
+    | undefined;
+  if (!clipboardState?.ok) {
+    return { inserted: false, asAttachment: false };
+  }
+  await input.dispatchKeyEvent({
+    type: "keyDown",
+    key: "v",
+    code: "KeyV",
+    windowsVirtualKeyCode: 86,
+    nativeVirtualKeyCode: 86,
+    modifiers: 2,
+    commands: ["paste"],
+  });
+  await input.dispatchKeyEvent({
+    type: "keyUp",
+    key: "v",
+    code: "KeyV",
+    windowsVirtualKeyCode: 86,
+    nativeVirtualKeyCode: 86,
+    modifiers: 2,
+  });
+  await delay(1_000);
+  const result = await runtime.evaluate({
+    expression: `(() => {
+      const inputSelectors = ${JSON.stringify(INPUT_SELECTORS)};
+      const prompt = ${JSON.stringify(prompt)};
+      ${readValueFunction}
+      const isVisible = (node) => {
+        if (!node || typeof node.getBoundingClientRect !== 'function') return false;
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const node = inputSelectors
+        .map((selector) => document.querySelector(selector))
+        .filter(Boolean)
+        .find((candidate) => isVisible(candidate)) || null;
+      const value = node ? readValue(node) : '';
+      const pastedAttachment = Array.from(document.querySelectorAll('button,[aria-label]')).some((candidate) => {
+        const aria = candidate.getAttribute?.('aria-label') || '';
+        const text = candidate.textContent || '';
+        return /pasted text attachment|too long to show in text field/i.test(aria + ' ' + text);
+      });
+      return { value, pastedAttachment, exact: value === prompt };
+    })()`,
+    returnByValue: true,
+    awaitPromise: true,
+  });
+  const value = result.result?.value as
+    | { exact?: boolean; pastedAttachment?: boolean }
+    | undefined;
+  await restoreClipboardText(runtime, clipboardState.previousText);
+  if (value?.pastedAttachment) {
+    return { inserted: true, asAttachment: true };
+  }
+  return { inserted: Boolean(value?.exact), asAttachment: false };
+}
+
+async function restoreClipboardText(
+  runtime: ChromeClient["Runtime"],
+  previousText: string | null | undefined,
+): Promise<void> {
+  if (typeof previousText !== "string") return;
+  await runtime
+    .evaluate({
+      expression: `(async () => {
+        try {
+          await navigator.clipboard.writeText(${JSON.stringify(previousText)});
+          return true;
+        } catch {
+          return false;
+        }
+      })()`,
+      returnByValue: true,
+      awaitPromise: true,
+    })
+    .catch(() => undefined);
+}
+
+function shouldUseNativePaste(prompt: string): boolean {
+  return prompt.length > 0;
+}
+
+async function clearFocusedPromptWithKeyboard(input: ChromeClient["Input"]): Promise<void> {
+  await input.dispatchKeyEvent({
+    type: "keyDown",
+    key: "a",
+    code: "KeyA",
+    windowsVirtualKeyCode: 65,
+    nativeVirtualKeyCode: 65,
+    modifiers: 2,
+    commands: ["selectAll"],
+  });
+  await input.dispatchKeyEvent({
+    type: "keyUp",
+    key: "a",
+    code: "KeyA",
+    windowsVirtualKeyCode: 65,
+    nativeVirtualKeyCode: 65,
+    modifiers: 2,
+  });
+  await input.dispatchKeyEvent({
+    type: "keyDown",
+    key: "Backspace",
+    code: "Backspace",
+    windowsVirtualKeyCode: 8,
+    nativeVirtualKeyCode: 8,
+  });
+  await input.dispatchKeyEvent({
+    type: "keyUp",
+    key: "Backspace",
+    code: "Backspace",
+    windowsVirtualKeyCode: 8,
+    nativeVirtualKeyCode: 8,
+  });
 }
 
 export async function submitPreparedPrompt(
@@ -585,6 +802,11 @@ async function verifyPromptCommitted(
       const composerCleared = activeEmpty ?? !(String(editorValue).trim() || String(fallbackValue).trim());
       const href = typeof location === 'object' && location.href ? location.href : '';
       const inConversation = /\\/c\\//.test(href);
+      const hasPastedTextAttachment = Array.from(document.querySelectorAll('button,[aria-label]')).some((node) => {
+        const aria = node.getAttribute?.('aria-label') || '';
+        const text = node.textContent || '';
+        return /pasted text attachment|too long to show in text field/i.test(aria + ' ' + text);
+      });
 		    return {
         baseline,
 	      userMatched,
@@ -595,6 +817,7 @@ async function verifyPromptCommitted(
       assistantVisible,
       composerCleared,
       inConversation,
+      hasPastedTextAttachment,
       href,
       fallbackValue,
       editorValue,
@@ -615,6 +838,7 @@ async function verifyPromptCommitted(
       assistantVisible?: boolean;
       composerCleared?: boolean;
       inConversation?: boolean;
+      hasPastedTextAttachment?: boolean;
       turnsCount?: number;
     };
     const turnsCount = (result.value as { turnsCount?: number } | undefined)?.turnsCount;
@@ -629,6 +853,16 @@ async function verifyPromptCommitted(
       Boolean(info?.hasNewTurn) &&
       ((info?.stopVisible ?? false) || info?.assistantVisible || info?.inConversation);
     if (fallbackCommit) {
+      return typeof turnsCount === "number" && Number.isFinite(turnsCount) ? turnsCount : null;
+    }
+    const durableSubmission =
+      info?.composerCleared &&
+      Boolean(info?.inConversation) &&
+      (Boolean(info?.hasNewTurn) ||
+        Boolean(info?.stopVisible) ||
+        Boolean(info?.assistantVisible) ||
+        Boolean(info?.hasPastedTextAttachment));
+    if (durableSubmission) {
       return typeof turnsCount === "number" && Number.isFinite(turnsCount) ? turnsCount : null;
     }
     await delay(100);
@@ -660,5 +894,6 @@ async function verifyPromptCommitted(
 
 // biome-ignore lint/style/useNamingConvention: test-only export used in vitest suite
 export const __test__ = {
+  buildComposerReadValueFunction,
   verifyPromptCommitted,
 };

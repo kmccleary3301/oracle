@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   buildAssistantExtractorForTest,
   buildConversationDebugExpressionForTest,
+  buildConversationCopyExpressionForTest,
   buildMarkdownFallbackExtractorForTest,
   buildCopyExpressionForTest,
 } from "../../src/browser/pageActions.ts";
@@ -46,5 +47,16 @@ describe("browser automation expressions", () => {
     expect(expression).toContain(ASSISTANT_ROLE_SELECTOR);
     expect(expression).toContain("isAssistantTurn");
     expect(expression).toContain("copy-turn-action-button");
+    expect(expression).toContain("Array.from(item.types || [])");
+    expect(expression).toContain("text/markdown");
+  });
+
+  test("conversation copy expression captures user and assistant turn buttons", () => {
+    const expression = buildConversationCopyExpressionForTest();
+    expect(expression).toContain(JSON.stringify(CONVERSATION_TURN_SELECTOR));
+    expect(expression).toContain("copy message");
+    expect(expression).toContain("copy response");
+    expect(expression).toContain("Array.from(item.types || [])");
+    expect(expression).toContain("text/markdown");
   });
 });
