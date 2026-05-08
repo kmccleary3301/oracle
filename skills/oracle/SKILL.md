@@ -15,7 +15,8 @@ responses as advisory and verify them against the codebase and tests.
 Use browser mode with GPT-5.6 when the ChatGPT account exposes it. GPT-5.6 Sol
 and GPT-5.6 Sol Pro are distinct targets: base Sol uses the Extra High effort
 setting, while Pro is a separate picker target for difficult or long-running
-work.
+work. Browser Pro runs can take minutes to an hour; use the stored session to
+reattach instead of starting the same request again.
 
 Recommended defaults:
 
@@ -31,6 +32,11 @@ Recommended defaults:
 GPT-5.6 availability is account-dependent. Confirm the base Sol picker and
 retain model-selection evidence. A bare `Pro` picker label proves picker
 selection but does not, by itself, prove the server-side Pro generation.
+
+1. Pick the smallest file set that still contains the truth.
+2. Preview it with `--dry-run` and `--files-report` when needed.
+3. Use browser mode for ChatGPT Pro; use API only when explicitly intended.
+4. If a run detaches or times out, reattach to the stored session instead of rerunning.
 
 ## GPT-5.6 model selection
 
@@ -108,7 +114,7 @@ and a live browser run records strict GPT-5.6 selection evidence.
 - Inspect token usage:
   - `npx -y @steipete/oracle --dry-run summary --files-report -p "<task>" --file "src/**"`
 
-- Browser run:
+- Browser run (long-running is normal):
   - `oracle --engine browser --model gpt-5.6-sol --browser-thinking-time extra-high -p "<task>" --file "src/**"`
 
 - Manual paste fallback:
@@ -173,6 +179,39 @@ can be recovered.
 
 Set an explicit deadline for automation, for example `--timeout 10m`; Oracle
 derives the HTTP timeout unless `--http-timeout` is supplied.
+
+## Sessions and reattach
+
+- Stored under `~/.oracle/sessions` (override with `ORACLE_HOME_DIR`).
+- Browser Pro runs may detach or take a long time. If the CLI times out, reattach instead of rerunning.
+  - List: `oracle status --hours 72`
+  - Attach: `oracle session <id> --render`
+- Use `--slug "<3-5 words>"` to keep session IDs readable.
+- Duplicate prompt guard exists; use `--force` only when a fresh run is intentional.
+
+## Durable ChatGPT Jobs
+
+When the Oracle daemon is configured, async ChatGPT and image jobs persist in
+`~/.oracle/jobs` instead of living only inside one MCP server process.
+
+Useful CLI checks:
+
+- Daemon: `oracle daemon status --json`
+- Jobs: `oracle job list --json`
+- Start durable ChatGPT session: `oracle job start chatgpt_create_session --prompt "<task>" --file "src/**" --browser-model-label "5.5" --browser-thinking-time heavy --return-after-submit --json`
+- Poll: `oracle job status <jobId> --json`
+- Events: `oracle job tail <jobId>`
+- Result: `oracle job result <jobId> --json`
+- Recover stale artifacts before cancelling: `oracle job recover <jobId> --artifact-types images,sandbox --output-dir ./oracle-recovered --json`
+- When the conversation URL is needed immediately after submit, add `--return-after-submit`.
+- Use `--browser-model-label` when the ChatGPT UI exposes a Pro label that must be pinned exactly.
+- Do not pass `--thinking-fallback` or `--return-after-submit` to `oracle chat turn`; those flags belong to durable `oracle job start ...` paths.
+
+Prefer durable jobs when a browser request may outlive a single agent turn, when
+attachments are large, or when the conversation URL must be preserved immediately
+after submission.
+
+## Prompt template (high signal)
 
 ## Sessions and recovery
 
