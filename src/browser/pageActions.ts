@@ -21,9 +21,11 @@ export {
   waitForAssistantResponse,
   readAssistantSnapshot,
   captureAssistantMarkdown,
+  captureConversationTurnMarkdowns,
   buildAssistantExtractorForTest,
   buildAssistantSnapshotExpressionForTest,
   buildConversationDebugExpressionForTest,
   buildMarkdownFallbackExtractorForTest,
   buildCopyExpressionForTest,
+  buildConversationCopyExpressionForTest,
 } from "./actions/assistantResponse.js";

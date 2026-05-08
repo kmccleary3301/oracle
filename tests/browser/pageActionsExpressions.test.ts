@@ -3,6 +3,7 @@ import {
   buildAssistantExtractorForTest,
   buildAssistantSnapshotExpressionForTest,
   buildConversationDebugExpressionForTest,
+  buildConversationCopyExpressionForTest,
   buildMarkdownFallbackExtractorForTest,
   buildCopyExpressionForTest,
   buildUserTurnAttachmentExpressionForTest,
@@ -137,6 +138,17 @@ describe("browser automation expressions", () => {
     expect(expression).toContain(ASSISTANT_ROLE_SELECTOR);
     expect(expression).toContain("isAssistantTurn");
     expect(expression).toContain("copy-turn-action-button");
+    expect(expression).toContain("Array.from(item.types || [])");
+    expect(expression).toContain("text/markdown");
+  });
+
+  test("conversation copy expression captures user and assistant turn buttons", () => {
+    const expression = buildConversationCopyExpressionForTest();
+    expect(expression).toContain(JSON.stringify(CONVERSATION_TURN_SELECTOR));
+    expect(expression).toContain("copy message");
+    expect(expression).toContain("copy response");
+    expect(expression).toContain("Array.from(item.types || [])");
+    expect(expression).toContain("text/markdown");
   });
 
   test("user-turn attachment expression requires non-empty prompt text for prefix fallback", () => {

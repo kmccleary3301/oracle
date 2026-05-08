@@ -128,6 +128,7 @@ import {
   resolveSandboxArtifactOutputDir,
   waitForNewSandboxArtifactRefsFromRuntime,
 } from "./chatgpt/sandboxArtifacts.js";
+import type { ChatgptSandboxArtifactRef } from "./chatgpt/types.js";
 
 export type { BrowserAutomationConfig, BrowserRunOptions, BrowserRunResult } from "./types.js";
 export { CHATGPT_URL, DEFAULT_MODEL_STRATEGY, DEFAULT_MODEL_TARGET } from "./constants.js";
@@ -205,6 +206,75 @@ export function classifyPreservedBrowserErrorForTest(
   headless: boolean,
 ): PreservedBrowserErrorKind | null {
   return classifyPreservedBrowserError(error, headless);
+}
+const MARKDOWN_CAPTURE_TIMEOUT_MS = 10_000;
+
+async function uploadBrowserAttachmentsWithRetry(
+  deps: {
+    runtime: ChromeClient["Runtime"];
+    dom: ChromeClient["DOM"];
+    input?: ChromeClient["Input"];
+    preservePastedTextAttachments?: boolean;
+  },
+  attachments: BrowserAttachment[],
+  options: {
+    logger: BrowserLogger;
+    baseTimeoutMs: number;
+    minBaseTimeoutMs: number;
+    perFileTimeoutMs: number;
+    retries?: number;
+  },
+): Promise<{ attachmentNames: string[]; inputOnlyAttachments: boolean }> {
+  const attachmentNames = attachments.map((attachment) => path.basename(attachment.path));
+  const maxAttempts = Math.max(1, (options.retries ?? 1) + 1);
+  const waitBudget =
+    Math.max(options.baseTimeoutMs, options.minBaseTimeoutMs) +
+    Math.max(0, attachments.length - 1) * options.perFileTimeoutMs;
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    let inputOnlyAttachments = false;
+    if (attempt > 1) {
+      options.logger(
+        `[browser] Retrying attachment upload batch (${attempt}/${maxAttempts}) after resetting composer attachments.`,
+      );
+      await clearComposerAttachments(deps.runtime, 5_000, options.logger, {
+        preservePastedTextAttachments: deps.preservePastedTextAttachments ?? false,
+      });
+      await delay(750);
+    }
+
+    try {
+      for (let attachmentIndex = 0; attachmentIndex < attachments.length; attachmentIndex += 1) {
+        const attachment = attachments[attachmentIndex];
+        options.logger(`Uploading attachment: ${attachment.displayPath}`);
+        const uiConfirmed = await uploadAttachmentFile(
+          { runtime: deps.runtime, dom: deps.dom, input: deps.input },
+          attachment,
+          options.logger,
+          { expectedCount: attachmentIndex + 1 },
+        );
+        if (!uiConfirmed) {
+          inputOnlyAttachments = true;
+        }
+        await delay(500);
+      }
+      await waitForAttachmentCompletion(deps.runtime, waitBudget, attachmentNames, options.logger);
+      options.logger("All attachments uploaded");
+      return { attachmentNames, inputOnlyAttachments };
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      if (attempt >= maxAttempts || !shouldRetryAttachmentUploadError(message)) {
+        throw error;
+      }
+      options.logger(
+        `[browser] Attachment upload attempt ${attempt}/${maxAttempts} failed: ${message}`,
+      );
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 // NOTE: Previously, shouldSkipThinkingTimeSelection() would skip the thinking
@@ -1249,7 +1319,11 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     });
     const raceWithDisconnect = <T>(promise: Promise<T>): Promise<T> =>
       Promise.race([promise, disconnectPromise]);
-    const { Network, Page, Runtime, Input, DOM, Target } = client;
+    const { Network, Page, Runtime, Input, DOM, Target, Browser } = client;
+
+    if (!config.headless && config.hideWindow) {
+      await hideChromeWindow(chrome, logger);
+    }
 
     const domainEnablers = [Network.enable({}), Page.enable(), Runtime.enable()];
     if (DOM && typeof DOM.enable === "function") {
@@ -1579,6 +1653,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
           {
             runtime: Runtime,
             input: Input,
+            browser: Browser,
             inputTimeoutMs: config.inputTimeoutMs ?? undefined,
           },
           prompt,
@@ -1586,12 +1661,23 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         );
         promptAlreadyInserted = true;
         const baseTimeout = config.inputTimeoutMs ?? 30_000;
-        const perFileTimeout = 20_000;
-        const waitBudget =
-          Math.max(baseTimeout, 45_000) + (submissionAttachments.length - 1) * perFileTimeout;
-        const attachmentWaitBudget = Math.max(config.attachmentTimeoutMs ?? 0, waitBudget);
-        await waitForAttachmentCompletion(Runtime, attachmentWaitBudget, attachmentNames, logger);
-        logger("All attachments uploaded");
+        const uploadResult = await uploadBrowserAttachmentsWithRetry(
+          {
+            runtime: Runtime,
+            dom: DOM,
+            input: Input,
+            preservePastedTextAttachments: true,
+          },
+          submissionAttachments,
+          {
+            logger,
+            baseTimeoutMs: baseTimeout,
+            minBaseTimeoutMs: 45_000,
+            perFileTimeoutMs: 20_000,
+            retries: 1,
+          },
+        );
+        inputOnlyAttachments = uploadResult.inputOnlyAttachments;
       }
       if (deepResearch) {
         await raceWithDisconnect(
@@ -1609,7 +1695,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         );
         await raceWithDisconnect(ensurePromptReady(Runtime, config.inputTimeoutMs, logger));
         logger(
-          `Prompt textarea ready (after Deep Research activation, ${prompt.length.toLocaleString()} chars queued)`,
+          `Prompt textarea ready (after Deep Research activation, ${prompt.length.toLocaleString()} chars queued)`
         );
       }
       let baselineTurns = await readConversationTurnCount(Runtime, logger);
@@ -1617,6 +1703,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       const providerState: Record<string, unknown> = {
         runtime: Runtime,
         input: Input,
+        browser: Browser,
         logger,
         timeoutMs: config.timeoutMs,
         inputTimeoutMs: config.inputTimeoutMs ?? undefined,
@@ -1667,9 +1754,12 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
           }
         }
       }
+      // Reattach needs a /c/ URL; ChatGPT can update it late, so poll in the background.
+      scheduleConversationHint("post-submit", config.timeoutMs ?? 90 * 60_000);
       return {
         baselineTurns,
         baselineAssistantText,
+        baselineSandboxArtifacts,
         deepResearchTargetKeys: deepResearchTargetBaseline?.targetKeys,
         deepResearchTargetBaselineCaptured: deepResearchTargetBaseline?.captured,
       };
@@ -1682,6 +1772,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
 
     let baselineTurns: number | null = null;
     let baselineAssistantText: string | null = null;
+    let baselineSandboxArtifacts: ChatgptSandboxArtifactRef[] = [];
     let deepResearchTargetKeys: string[] = [];
     let deepResearchTargetBaselineCaptured = false;
     await acquireProfileLockIfNeeded();
@@ -1701,6 +1792,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       });
       baselineTurns = submission.baselineTurns;
       baselineAssistantText = submission.baselineAssistantText;
+      baselineSandboxArtifacts = submission.baselineSandboxArtifacts ?? [];
       deepResearchTargetKeys = submission.deepResearchTargetKeys ?? [];
       deepResearchTargetBaselineCaptured = submission.deepResearchTargetBaselineCaptured ?? false;
     } finally {
@@ -3053,7 +3145,7 @@ async function runRemoteBrowserMode(
       connectionClosedUnexpectedly = true;
     };
     client.on("disconnect", markConnectionLost);
-    const { Network, Page, Runtime, Input, DOM, Target } = client;
+    const { Network, Page, Runtime, Input, DOM, Target, Browser } = client;
 
     const domainEnablers = [Network.enable({}), Page.enable(), Runtime.enable()];
     if (DOM && typeof DOM.enable === "function") {
@@ -3211,6 +3303,7 @@ async function runRemoteBrowserMode(
           {
             runtime: Runtime,
             input: Input,
+            browser: Browser,
             inputTimeoutMs: config.inputTimeoutMs ?? undefined,
           },
           prompt,
@@ -3218,12 +3311,22 @@ async function runRemoteBrowserMode(
         );
         promptAlreadyInserted = true;
         const baseTimeout = config.inputTimeoutMs ?? 30_000;
-        const perFileTimeout = 15_000;
-        const waitBudget =
-          Math.max(baseTimeout, 30_000) + (submissionAttachments.length - 1) * perFileTimeout;
-        const attachmentWaitBudget = Math.max(config.attachmentTimeoutMs ?? 0, waitBudget);
-        await waitForAttachmentCompletion(Runtime, attachmentWaitBudget, attachmentNames, logger);
-        logger("All attachments uploaded");
+        await uploadBrowserAttachmentsWithRetry(
+          {
+            runtime: Runtime,
+            dom: DOM,
+            input: Input,
+            preservePastedTextAttachments: true,
+          },
+          submissionAttachments,
+          {
+            logger,
+            baseTimeoutMs: baseTimeout,
+            minBaseTimeoutMs: 30_000,
+            perFileTimeoutMs: 15_000,
+            retries: 1,
+          },
+        );
       }
       if (deepResearch) {
         await withRetries(() => activateDeepResearch(Runtime, Input, logger), {
@@ -3246,6 +3349,7 @@ async function runRemoteBrowserMode(
       const providerState: Record<string, unknown> = {
         runtime: Runtime,
         input: Input,
+        browser: Browser,
         logger,
         timeoutMs: config.timeoutMs,
         inputTimeoutMs: config.inputTimeoutMs ?? undefined,
@@ -4053,37 +4157,58 @@ async function waitForAssistantResponseWithReload(
   minTurnIndex?: number,
   expectedConversationId?: string,
 ) {
-  try {
-    return await waitForAssistantResponse(
-      Runtime,
-      timeoutMs,
-      logger,
-      minTurnIndex,
-      expectedConversationId,
+  const deadline = Date.now() + Math.max(1, timeoutMs);
+  let attempt = 0;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    const remainingMs = Math.max(1_000, deadline - Date.now());
+    const sliceMs = Math.min(
+      remainingMs,
+      attempt === 0 ? Math.max(180_000, Math.min(240_000, timeoutMs)) : remainingMs,
     );
-  } catch (error) {
-    if (!shouldReloadAfterAssistantError(error)) {
-      throw error;
+    try {
+      return await waitForAssistantResponse(
+        Runtime,
+        sliceMs,
+        logger,
+        minTurnIndex,
+        expectedConversationId,
+      );
+    } catch (error) {
+      lastError = error;
+      if (!shouldReloadAfterAssistantError(error) || Date.now() >= deadline) {
+        throw error;
+      }
+      const conversationUrl = await readConversationUrl(Runtime);
+      if (!conversationUrl || !isConversationUrl(conversationUrl)) {
+        throw error;
+      }
+      logger("Assistant response stalled; reloading conversation and retrying");
+      await Page.navigate({ url: conversationUrl });
+      await waitForResumedConversationHydration(Runtime, remainingMs, logger, {
+        requirePriorTurns: true,
+        requirePromptReady: false,
+        expectedConversationUrl: conversationUrl,
+      });
+      attempt += 1;
     }
-    const conversationUrl = await readConversationUrl(Runtime);
-    if (!conversationUrl || !isConversationUrl(conversationUrl)) {
-      throw error;
-    }
-    logger("Assistant response stalled; reloading conversation and retrying once");
-    await Page.navigate({ url: conversationUrl });
-    await waitForResumedConversationHydration(Runtime, timeoutMs, logger, {
-      requirePriorTurns: true,
-      requirePromptReady: false,
-      expectedConversationUrl: conversationUrl,
-    });
-    return await waitForAssistantResponse(
-      Runtime,
-      timeoutMs,
-      logger,
-      minTurnIndex,
-      expectedConversationId,
-    );
   }
+  throw lastError instanceof Error ? lastError : new Error("Assistant response timed out");
+}
+
+async function refreshChatgptConversationView(
+  Runtime: ChromeClient["Runtime"],
+  Page: ChromeClient["Page"],
+  logger: BrowserLogger,
+): Promise<string | null> {
+  const conversationUrl = await readConversationUrl(Runtime);
+  if (!conversationUrl || !isConversationUrl(conversationUrl)) {
+    return null;
+  }
+  logger("Refreshing ChatGPT conversation view before retrying response capture");
+  await Page.navigate({ url: conversationUrl });
+  await delay(1_500);
+  return conversationUrl;
 }
 
 function shouldReloadAfterAssistantError(error: unknown): boolean {
