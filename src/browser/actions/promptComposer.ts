@@ -175,7 +175,11 @@ export async function insertPromptText(
 
   await clearFocusedPromptWithKeyboard(input);
 
-  const nativePasteResult = await tryNativeClipboardPaste(deps, normalizedPrompt, readValueFunction);
+  const nativePasteResult = await tryNativeClipboardPaste(
+    deps,
+    normalizedPrompt,
+    readValueFunction,
+  );
   if (nativePasteResult.inserted) {
     logger(
       nativePasteResult.asAttachment
@@ -468,9 +472,7 @@ async function tryNativeClipboardPaste(
     returnByValue: true,
     awaitPromise: true,
   });
-  const value = result.result?.value as
-    | { exact?: boolean; pastedAttachment?: boolean }
-    | undefined;
+  const value = result.result?.value as { exact?: boolean; pastedAttachment?: boolean } | undefined;
   await restoreClipboardText(runtime, clipboardState.previousText);
   if (value?.pastedAttachment) {
     return { inserted: true, asAttachment: true };
@@ -1246,7 +1248,9 @@ async function verifyPromptCommitted(
     const fallbackCommit =
       info?.composerCleared &&
       Boolean(info?.hasNewTurn) &&
-      ((info?.stopVisible ?? false) || info?.assistantVisible || info?.inConversation);
+      ((info?.stopVisible ?? false) ||
+        info?.inConversation ||
+        Boolean(info?.hasPastedTextAttachment));
     if (fallbackCommit) {
       return typeof turnsCount === "number" && Number.isFinite(turnsCount) ? turnsCount : null;
     }
@@ -1255,8 +1259,7 @@ async function verifyPromptCommitted(
       Boolean(info?.inConversation) &&
       (Boolean(info?.hasNewTurn) ||
         Boolean(info?.stopVisible) ||
-        Boolean(info?.assistantVisible) ||
-        Boolean(info?.hasPastedTextAttachment));
+        (Boolean(info?.hasPastedTextAttachment) && Boolean(info?.hasNewTurn)));
     if (durableSubmission) {
       return typeof turnsCount === "number" && Number.isFinite(turnsCount) ? turnsCount : null;
     }

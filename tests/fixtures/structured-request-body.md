@@ -13,37 +13,32 @@ Please review this request as if it were pasted directly into the ChatGPT compos
 
 ```json
 {
-    "request_id": "oracle-newline-preservation-probe",
-    "metadata": {
-        "source": "codex-live-composer-test",
-        "priority": "high",
-        "tags": [
-            "browser",
-            "composer",
-            "newlines",
-            "indentation"
-        ]
+  "request_id": "oracle-newline-preservation-probe",
+  "metadata": {
+    "source": "codex-live-composer-test",
+    "priority": "high",
+    "tags": ["browser", "composer", "newlines", "indentation"]
+  },
+  "instructions": {
+    "summary": "Validate that text bodies survive insertion into the ChatGPT composer.",
+    "constraints": {
+      "preserve_newlines": true,
+      "preserve_indentation": true,
+      "submit_request": false
     },
-    "instructions": {
-        "summary": "Validate that text bodies survive insertion into the ChatGPT composer.",
-        "constraints": {
-            "preserve_newlines": true,
-            "preserve_indentation": true,
-            "submit_request": false
-        },
-        "steps": [
-            {
-                "index": 1,
-                "action": "insert",
-                "expected": "body appears exactly as provided"
-            },
-            {
-                "index": 2,
-                "action": "read_back",
-                "expected": "readback equals original body"
-            }
-        ]
-    }
+    "steps": [
+      {
+        "index": 1,
+        "action": "insert",
+        "expected": "body appears exactly as provided"
+      },
+      {
+        "index": 2,
+        "action": "read_back",
+        "expected": "readback equals original body"
+      }
+    ]
+  }
 }
 ```
 

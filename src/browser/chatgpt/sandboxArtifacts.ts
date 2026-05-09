@@ -149,6 +149,9 @@ export async function extractSandboxArtifactRefsFromRuntime(
           typeof item.documentIndex === "number" && Number.isFinite(item.documentIndex)
             ? item.documentIndex
             : 0,
+        artifactFreshness: isArtifactFreshness(item.artifactFreshness)
+          ? item.artifactFreshness
+          : undefined,
       },
     ];
   });
@@ -216,6 +219,7 @@ export async function downloadSandboxArtifacts(
       turnId: artifact.turnId,
       messageId: artifact.messageId,
       documentIndex: artifact.documentIndex,
+      artifactFreshness: artifact.artifactFreshness,
       sandboxPath: artifact.sandboxPath,
       fileId: artifact.fileId,
       fileName,
@@ -287,6 +291,9 @@ async function resolveSandboxArtifactsFromRuntime(
           typeof item.documentIndex === "number" && Number.isFinite(item.documentIndex)
             ? item.documentIndex
             : 0,
+        artifactFreshness: isArtifactFreshness(item.artifactFreshness)
+          ? item.artifactFreshness
+          : undefined,
         sandboxPath: typeof item.sandboxPath === "string" ? item.sandboxPath : undefined,
         fileId: typeof item.fileId === "string" ? item.fileId : undefined,
         downloadUrl: typeof item.downloadUrl === "string" ? item.downloadUrl : undefined,
@@ -414,6 +421,17 @@ function preferResolvedArtifact(
     return existing;
   }
   return next.documentIndex >= existing.documentIndex ? next : existing;
+}
+
+function isArtifactFreshness(
+  value: unknown,
+): value is NonNullable<ChatgptSandboxArtifactRef["artifactFreshness"]> {
+  return (
+    value === "messageId" ||
+    value === "turnIndex" ||
+    value === "baseline-diff" ||
+    value === "unverified"
+  );
 }
 
 function ensureExtension(name: string, mimeType?: string): string {

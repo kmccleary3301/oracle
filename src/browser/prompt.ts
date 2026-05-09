@@ -12,10 +12,7 @@ import {
 } from "../oracle.js";
 import { isKnownModel } from "../oracle/modelResolver.js";
 import { buildPromptMarkdown } from "../oracle/promptAssembly.js";
-import {
-  hasPromptText,
-  normalizePromptText,
-} from "../oracle/promptText.js";
+import { hasPromptText, normalizePromptText } from "../oracle/promptText.js";
 import type { BrowserAttachment } from "./types.js";
 import { buildAttachmentPlan } from "./policies.js";
 import { createStoredZip } from "./zipBundle.js";
@@ -299,7 +296,9 @@ export async function assembleBrowserPrompt(
     maxFileSizeBytes: runOptions.maxFileSizeBytes,
   });
   const userPrompt = normalizePromptText(runOptions.prompt ?? "");
-  const systemPrompt = hasPromptText(runOptions.system) ? normalizePromptText(runOptions.system) : "";
+  const systemPrompt = hasPromptText(runOptions.system)
+    ? normalizePromptText(runOptions.system)
+    : "";
   const sections = createFileSections(files, cwd);
   const markdown = buildPromptMarkdown(systemPrompt, userPrompt, sections);
 
@@ -360,7 +359,7 @@ export async function assembleBrowserPrompt(
     !shouldBundle && selectedPlan.inlineBlock
       ? [...baseComposerSections, selectedPlan.inlineBlock]
       : baseComposerSections
-    )
+  )
     .filter((section) => hasPromptText(section))
     .join("\n\n");
 
@@ -389,9 +388,7 @@ export async function assembleBrowserPrompt(
   const tokenizer = deps.tokenizeImpl ?? modelConfig.tokenizer;
   const tokenizerUserContent =
     inlineFileCount > 0 && selectedPlan.inlineBlock
-      ? [userPrompt, selectedPlan.inlineBlock]
-          .filter((value) => hasPromptText(value))
-          .join("\n\n")
+      ? [userPrompt, selectedPlan.inlineBlock].filter((value) => hasPromptText(value)).join("\n\n")
       : userPrompt;
   const tokenizerMessages = [
     systemPrompt ? { role: "system", content: systemPrompt } : null,

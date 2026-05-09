@@ -203,9 +203,10 @@ Useful CLI checks:
 - Events: `oracle job tail <jobId>`
 - Result: `oracle job result <jobId> --json`
 - Recover stale artifacts before cancelling: `oracle job recover <jobId> --artifact-types images,sandbox --output-dir ./oracle-recovered --json`
-- When the conversation URL is needed immediately after submit, add `--return-after-submit`.
-- Use `--browser-model-label` when the ChatGPT UI exposes a Pro label that must be pinned exactly.
-- Do not pass `--thinking-fallback` or `--return-after-submit` to `oracle chat turn`; those flags belong to durable `oracle job start ...` paths.
+- When you need the conversation URL immediately after submit, add `--return-after-submit`.
+- Use `--browser-model-label` when the ChatGPT UI exposes a Pro label you want to pin exactly.
+- Existing-conversation submit-only follow-up: `oracle chat turn "<conversation_url>" --turn-message "<task>" --file "src/**" --browser-model-label Pro --browser-thinking-time extended --thinking-fallback fail --return-after-submit --json`
+- For existing-conversation follow-ups that should wait for the answer, omit `--return-after-submit`; Oracle now anchors response/artifact capture to the post-submit turn to avoid stale answers.
 
 Prefer durable jobs when a browser request may outlive a single agent turn, when
 attachments are large, or when the conversation URL must be preserved immediately

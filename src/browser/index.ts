@@ -128,7 +128,10 @@ import {
   resolveSandboxArtifactOutputDir,
   waitForNewSandboxArtifactRefsFromRuntime,
 } from "./chatgpt/sandboxArtifacts.js";
-import type { ChatgptSandboxArtifactRef } from "./chatgpt/types.js";
+import type {
+  ChatgptDownloadedSandboxArtifact,
+  ChatgptSandboxArtifactRef,
+} from "./chatgpt/types.js";
 
 export type { BrowserAutomationConfig, BrowserRunOptions, BrowserRunResult } from "./types.js";
 export { CHATGPT_URL, DEFAULT_MODEL_STRATEGY, DEFAULT_MODEL_TARGET } from "./constants.js";
@@ -567,6 +570,84 @@ async function enableFocusEmulation(
   }
 }
 
+async function collectPostTurnSandboxArtifacts(
+  Runtime: ChromeClient["Runtime"],
+  logger: BrowserLogger,
+  options: {
+    baselineArtifacts: ChatgptSandboxArtifactRef[];
+    baselineTurns?: number | null;
+    answerMessageId?: string | null;
+    conversationUrl?: string;
+    waitTimeoutMs?: number;
+    outputDir?: string | null;
+  },
+): Promise<{
+  sandboxArtifacts: ChatgptSandboxArtifactRef[];
+  newSandboxArtifacts: ChatgptSandboxArtifactRef[];
+  downloadedSandboxArtifacts: ChatgptDownloadedSandboxArtifact[];
+  warnings: string[];
+}> {
+  const warnings: string[] = [];
+  try {
+    const baselineArtifacts = options.baselineArtifacts ?? [];
+    const newSandboxArtifacts = await waitForNewSandboxArtifactRefsFromRuntime(
+      Runtime,
+      baselineArtifacts,
+      options.waitTimeoutMs ?? 8_000,
+    );
+    const sandboxArtifacts = await extractSandboxArtifactRefsFromRuntime(Runtime);
+    const anchoredSandboxArtifacts = anchorSandboxArtifactsToCurrentTurn(newSandboxArtifacts, {
+      baselineTurns: options.baselineTurns,
+      answerMessageId: options.answerMessageId,
+    });
+    if (newSandboxArtifacts.length > 0 && anchoredSandboxArtifacts.length === 0) {
+      warnings.push("artifact_diff_unanchored_stale_candidates");
+    }
+    if (anchoredSandboxArtifacts.length === 0) {
+      return {
+        sandboxArtifacts,
+        newSandboxArtifacts: [],
+        downloadedSandboxArtifacts: [],
+        warnings,
+      };
+    }
+    const outputDir = resolveSandboxArtifactOutputDir(
+      options.outputDir ?? undefined,
+      options.conversationUrl ?? "",
+    );
+    const downloadedSandboxArtifacts = await downloadSandboxArtifacts(
+      Runtime,
+      anchoredSandboxArtifacts,
+      outputDir,
+    );
+    if (downloadedSandboxArtifacts.length === 0) {
+      warnings.push(
+        "Assistant response exposed sandbox artifact labels, but no downloadable files resolved.",
+      );
+    } else {
+      logger(
+        `Downloaded ${downloadedSandboxArtifacts.length} sandbox artifact${downloadedSandboxArtifacts.length === 1 ? "" : "s"}`,
+      );
+    }
+    return {
+      sandboxArtifacts,
+      newSandboxArtifacts: anchoredSandboxArtifacts,
+      downloadedSandboxArtifacts,
+      warnings,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger(`[browser] Sandbox artifact collection failed: ${message}`);
+    warnings.push(`Sandbox artifact collection failed: ${message}`);
+    return {
+      sandboxArtifacts: [],
+      newSandboxArtifacts: [],
+      downloadedSandboxArtifacts: [],
+      warnings,
+    };
+  }
+}
+
 function listIgnoredRemoteChromeFlags(config: {
   attachRunning?: ResolvedBrowserConfig["attachRunning"];
   headless?: ResolvedBrowserConfig["headless"];
@@ -812,6 +893,7 @@ export function maybeArchiveCompletedConversationForTest(
 type BrowserSubmissionResult = {
   baselineTurns: number | null;
   baselineAssistantText: string | null;
+  baselineSandboxArtifacts?: ChatgptSandboxArtifactRef[];
   deepResearchTargetKeys?: string[];
   deepResearchTargetBaselineCaptured?: boolean;
 };
@@ -989,6 +1071,28 @@ function buildSkippedModelSelectionEvidence(
     source: "config",
     capturedAt: new Date().toISOString(),
   };
+}
+
+export function anchorSandboxArtifactsToCurrentTurn<T extends ChatgptSandboxArtifactRef>(
+  artifacts: T[],
+  options: { baselineTurns?: number | null; answerMessageId?: string | null },
+): T[] {
+  const answerMessageId = options.answerMessageId?.trim();
+  if (answerMessageId) {
+    return artifacts
+      .filter((artifact) => artifact.messageId === answerMessageId)
+      .map((artifact) => ({ ...artifact, artifactFreshness: "messageId" }));
+  }
+  const baselineTurns =
+    typeof options.baselineTurns === "number" && Number.isFinite(options.baselineTurns)
+      ? Math.max(0, Math.floor(options.baselineTurns))
+      : null;
+  if (baselineTurns !== null) {
+    return artifacts
+      .filter((artifact) => artifact.turnIndex >= baselineTurns)
+      .map((artifact) => ({ ...artifact, artifactFreshness: "turnIndex" }));
+  }
+  return artifacts.map((artifact) => ({ ...artifact, artifactFreshness: "baseline-diff" }));
 }
 export async function runBrowserMode(options: BrowserRunOptions): Promise<BrowserRunResult> {
   const promptText = normalizePromptText(options.prompt ?? "");
@@ -2396,6 +2500,8 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     const answerTokens = estimateTokenCount(answerMarkdown);
     const sandboxArtifactResult = await collectPostTurnSandboxArtifacts(Runtime, logger, {
       baselineArtifacts: baselineSandboxArtifacts,
+      baselineTurns,
+      answerMessageId: answer.meta.messageId,
       conversationUrl: lastUrl,
       outputDir: config.sandboxArtifactsOutputDir,
     });
@@ -3947,6 +4053,8 @@ async function runRemoteBrowserMode(
     const answerTokens = estimateTokenCount(answerMarkdown);
     const sandboxArtifactResult = await collectPostTurnSandboxArtifacts(Runtime, logger, {
       baselineArtifacts: baselineSandboxArtifacts,
+      baselineTurns,
+      answerMessageId: answer.meta.messageId,
       conversationUrl: lastUrl,
       outputDir: config.sandboxArtifactsOutputDir,
     });

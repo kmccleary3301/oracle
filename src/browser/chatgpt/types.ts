@@ -74,6 +74,7 @@ export interface ChatgptSandboxArtifactRef {
   turnId?: string | null;
   messageId?: string | null;
   documentIndex: number;
+  artifactFreshness?: "messageId" | "turnIndex" | "baseline-diff" | "unverified";
 }
 
 export interface ChatgptDownloadedSandboxArtifact {
@@ -82,6 +83,7 @@ export interface ChatgptDownloadedSandboxArtifact {
   turnId?: string | null;
   messageId?: string | null;
   documentIndex: number;
+  artifactFreshness?: "messageId" | "turnIndex" | "baseline-diff" | "unverified";
   sandboxPath?: string;
   fileId?: string;
   fileName: string;

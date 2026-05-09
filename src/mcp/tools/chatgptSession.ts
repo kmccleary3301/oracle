@@ -49,7 +49,10 @@ const sendTurnInputShape = {
   timeoutMs: z.number().optional(),
   browserModelStrategy: z.enum(["select", "current", "ignore"]).optional().default("current"),
   browserModelLabel: z.string().optional(),
+  browserThinkingTime: z.enum(["light", "standard", "extended", "heavy"]).optional(),
+  thinkingFallback: z.enum(["allow", "fail"]).optional().default("allow"),
   includeSnapshot: z.boolean().optional().default(false),
+  returnAfterSubmit: z.boolean().optional().default(false),
 } satisfies z.ZodRawShape;
 
 const createSessionInputShape = {
@@ -60,7 +63,10 @@ const createSessionInputShape = {
   timeoutMs: z.number().optional(),
   browserModelStrategy: z.enum(["select", "current", "ignore"]).optional().default("current"),
   browserModelLabel: z.string().optional(),
+  browserThinkingTime: z.enum(["light", "standard", "extended", "heavy"]).optional(),
+  thinkingFallback: z.enum(["allow", "fail"]).optional().default("allow"),
   includeSnapshot: z.boolean().optional().default(false),
+  returnAfterSubmit: z.boolean().optional().default(false),
 } satisfies z.ZodRawShape;
 
 const pageShape = z.object({
@@ -98,6 +104,7 @@ const sandboxArtifactRefShape = z.object({
   turnId: z.string().nullable().optional(),
   messageId: z.string().nullable().optional(),
   documentIndex: z.number(),
+  artifactFreshness: z.enum(["messageId", "turnIndex", "baseline-diff", "unverified"]).optional(),
 });
 
 const downloadedSandboxArtifactShape = z.object({
@@ -106,6 +113,7 @@ const downloadedSandboxArtifactShape = z.object({
   turnId: z.string().nullable().optional(),
   messageId: z.string().nullable().optional(),
   documentIndex: z.number(),
+  artifactFreshness: z.enum(["messageId", "turnIndex", "baseline-diff", "unverified"]).optional(),
   sandboxPath: z.string().optional(),
   fileId: z.string().optional(),
   fileName: z.string(),
@@ -148,7 +156,7 @@ const browserStatusOutputShape = {
 } satisfies z.ZodRawShape;
 
 const sendTurnOutputShape = {
-  status: z.literal("completed"),
+  status: z.enum(["completed", "submitted"]),
   conversationUrl: z.string().optional(),
   answerText: z.string(),
   answerMarkdown: z.string(),
@@ -479,11 +487,14 @@ async function runCreateSession(parsed: z.infer<typeof createSessionInputSchema>
     prompt: parsed.prompt,
     attachments,
     timeoutMs: parsed.timeoutMs,
-    includeSnapshot: parsed.includeSnapshot,
+    includeSnapshot: parsed.returnAfterSubmit ? false : parsed.includeSnapshot,
+    returnAfterSubmit: parsed.returnAfterSubmit,
     config: {
       ...config,
       modelStrategy: parsed.browserModelStrategy as BrowserModelStrategy,
       desiredModel: parsed.browserModelLabel ?? config.desiredModel,
+      thinkingTime: parsed.browserThinkingTime ?? config.thinkingTime,
+      thinkingFallback: parsed.thinkingFallback ?? config.thinkingFallback,
       sandboxArtifactsOutputDir:
         parsed.sandboxArtifactsOutputDir ?? config.sandboxArtifactsOutputDir,
     },
@@ -499,11 +510,14 @@ async function runSendTurn(parsed: z.infer<typeof sendTurnInputSchema>) {
     prompt: parsed.prompt,
     attachments,
     timeoutMs: parsed.timeoutMs,
-    includeSnapshot: parsed.includeSnapshot,
+    includeSnapshot: parsed.returnAfterSubmit ? false : parsed.includeSnapshot,
+    returnAfterSubmit: parsed.returnAfterSubmit,
     config: {
       ...config,
       modelStrategy: parsed.browserModelStrategy as BrowserModelStrategy,
       desiredModel: parsed.browserModelLabel ?? config.desiredModel,
+      thinkingTime: parsed.browserThinkingTime ?? config.thinkingTime,
+      thinkingFallback: parsed.thinkingFallback ?? config.thinkingFallback,
       sandboxArtifactsOutputDir:
         parsed.sandboxArtifactsOutputDir ?? config.sandboxArtifactsOutputDir,
     },
