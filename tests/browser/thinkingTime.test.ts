@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildThinkingTimeExpressionForTest,
   ensureThinkingTimeIfAvailable,
+  inspectThinkingControls,
 } from "../../src/browser/actions/thinkingTime.js";
 
 describe("browser thinking-time selection expression", () => {
@@ -14,6 +15,7 @@ describe("browser thinking-time selection expression", () => {
     expect(expression).toContain('role=\\"menuitem\\"');
     expect(expression).toContain('role=\\"menuitemradio\\"');
     expect(expression).toContain("normalize");
+    expect(expression).toContain("thinkingLevelAliases");
     expect(expression).toContain("extended");
     expect(expression).toContain("standard");
   });
@@ -35,6 +37,23 @@ describe("browser thinking-time selection expression", () => {
     const result = await ensureThinkingTimeIfAvailable(runtime, "heavy", logger);
     expect(result).toEqual({
       requestedThinkingTime: "heavy",
+      normalizedThinkingTime: "heavy",
+      status: "unavailable",
+      fallbackUsed: true,
+      reason: "chip-not-found",
+      diagnostics: undefined,
+    });
+  });
+
+  it("preserves requested extended while exposing heavy normalization", async () => {
+    const runtime = {
+      evaluate: async () => ({ result: { value: { status: "chip-not-found" } } }),
+    } as any;
+    const logger = (() => {}) as any;
+    const result = await ensureThinkingTimeIfAvailable(runtime, "extended", logger);
+    expect(result).toMatchObject({
+      requestedThinkingTime: "extended",
+      normalizedThinkingTime: "heavy",
       status: "unavailable",
       fallbackUsed: true,
       reason: "chip-not-found",
@@ -49,9 +68,34 @@ describe("browser thinking-time selection expression", () => {
     const result = await ensureThinkingTimeIfAvailable(runtime, "heavy", logger);
     expect(result).toMatchObject({
       requestedThinkingTime: "heavy",
+      normalizedThinkingTime: "heavy",
       actualThinkingTime: "Heavy",
       status: "selected",
       fallbackUsed: false,
+    });
+  });
+
+  it("inspects visible thinking controls without selecting", async () => {
+    const runtime = {
+      evaluate: async () => ({
+        result: {
+          value: {
+            requestedThinkingTime: "extended",
+            normalizedThinkingTime: "heavy",
+            chipCandidates: [{ label: "Pro", selected: true }],
+            menuControls: [{ label: "Heavy", selected: false }],
+            availableOptions: ["Heavy"],
+          },
+        },
+      }),
+    } as any;
+
+    await expect(inspectThinkingControls(runtime, "extended")).resolves.toMatchObject({
+      requestedThinkingTime: "extended",
+      normalizedThinkingTime: "heavy",
+      chipCandidates: [{ label: "Pro", selected: true }],
+      menuControls: [{ label: "Heavy", selected: false }],
+      availableOptions: ["Heavy"],
     });
   });
 });

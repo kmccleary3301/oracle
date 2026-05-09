@@ -100,6 +100,7 @@ export interface BrowserRunResult {
   tookMs: number;
   answerTokens: number;
   answerChars: number;
+  submitted?: boolean;
   chromePid?: number;
   chromePort?: number;
   chromeHost?: string;

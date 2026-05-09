@@ -1,4 +1,5 @@
 import type { ThinkingTimeSelectionResult } from "../actions/thinkingTime.js";
+import type { ThinkingControlInfo, ThinkingControlsDiagnostics } from "../actions/thinkingTime.js";
 
 export interface ChatgptPageSnapshot {
   href: string;
@@ -145,8 +146,18 @@ export interface ChatgptAttachmentProbeResult {
   warnings: string[];
 }
 
+export interface ChatgptControlsInspectionResult {
+  page: ChatgptPageSnapshot;
+  modelMenuLabel?: string;
+  availableModelLabels: string[];
+  thinkingControls: ThinkingControlInfo[];
+  thinkingDiagnostics: ThinkingControlsDiagnostics;
+  warnings: string[];
+}
+
 export interface ChatgptTurnResult {
-  status: "completed" | "submitted";
+  status: "completed" | "submitted" | "failed";
+  submitted?: boolean;
   conversationUrl?: string;
   answerText: string;
   answerMarkdown: string;

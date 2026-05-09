@@ -156,7 +156,8 @@ const browserStatusOutputShape = {
 } satisfies z.ZodRawShape;
 
 const sendTurnOutputShape = {
-  status: z.enum(["completed", "submitted"]),
+  status: z.enum(["completed", "submitted", "failed"]),
+  submitted: z.boolean().optional(),
   conversationUrl: z.string().optional(),
   answerText: z.string(),
   answerMarkdown: z.string(),
@@ -172,6 +173,7 @@ const sendTurnOutputShape = {
   sandboxArtifacts: z.array(sandboxArtifactRefShape).optional(),
   newSandboxArtifacts: z.array(sandboxArtifactRefShape).optional(),
   downloadedSandboxArtifacts: z.array(downloadedSandboxArtifactShape).optional(),
+  thinkingTimeSelection: z.unknown().optional(),
   warnings: z.array(z.string()),
 } satisfies z.ZodRawShape;
 
