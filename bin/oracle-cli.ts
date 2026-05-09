@@ -2080,6 +2080,13 @@ chatCommand
   )
   .option("--browser-model-strategy <mode>", "Model picker strategy for this turn.", "current")
   .option("--browser-model-label <label>", "Exact/fuzzy ChatGPT model picker label to use.")
+  .option("--browser-thinking-time <level>", "Thinking time intensity.")
+  .option("--thinking-fallback <mode>", "Thinking selector fallback policy (allow|fail).", "allow")
+  .option(
+    "--return-after-submit",
+    "Submit the turn and persist the conversation URL without waiting for the answer.",
+    false,
+  )
   .option("--include-snapshot", "Include the resulting conversation snapshot.", false)
   .option("--json", "Print structured JSON.", false)
   .action(async (conversationUrl: string, rawCommandOptions, command?: Command) => {
@@ -2097,11 +2104,14 @@ chatCommand
       prompt: commandOptions.turnMessage,
       attachments,
       timeoutMs: commandOptions.timeout,
-      includeSnapshot: commandOptions.includeSnapshot,
+      includeSnapshot: commandOptions.returnAfterSubmit ? false : commandOptions.includeSnapshot,
+      returnAfterSubmit: commandOptions.returnAfterSubmit,
       config: {
         ...config,
         modelStrategy: commandOptions.browserModelStrategy,
         desiredModel: commandOptions.browserModelLabel ?? config.desiredModel,
+        thinkingTime: commandOptions.browserThinkingTime ?? config.thinkingTime,
+        thinkingFallback: commandOptions.thinkingFallback ?? config.thinkingFallback,
         sandboxArtifactsOutputDir:
           commandOptions.sandboxOutputDir ?? config.sandboxArtifactsOutputDir,
       },
@@ -2114,7 +2124,11 @@ chatCommand
       return;
     }
     console.log(`Conversation: ${result.conversationUrl ?? conversationUrl}`);
-    console.log(result.answerMarkdown || result.answerText);
+    if (result.status === "submitted") {
+      console.log("Status: submitted");
+    } else {
+      console.log(result.answerMarkdown || result.answerText);
+    }
     if (result.downloadedSandboxArtifacts?.length) {
       console.log(`Downloaded sandbox artifacts: ${result.downloadedSandboxArtifacts.length}`);
       for (const artifact of result.downloadedSandboxArtifacts) {

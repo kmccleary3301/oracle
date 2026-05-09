@@ -69,7 +69,9 @@ export async function renderPromptMarkdown(
     maxFileSizeBytes: options.maxFileSizeBytes,
   });
   const sections = createFileSections(files, cwd);
-  const systemPrompt = hasPromptText(options.system) ? normalizePromptText(options.system) : DEFAULT_SYSTEM_PROMPT;
+  const systemPrompt = hasPromptText(options.system)
+    ? normalizePromptText(options.system)
+    : DEFAULT_SYSTEM_PROMPT;
   const userPrompt = normalizePromptText(options.prompt ?? "");
   const lines = ["[SYSTEM]", systemPrompt, ""];
   lines.push("[USER]", userPrompt, "");

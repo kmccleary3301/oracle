@@ -214,7 +214,7 @@ export async function readAssistantSnapshot(
     if (typeof minTurnIndex === "number" && Number.isFinite(minTurnIndex)) {
       const turnIndex = typeof snapshot.turnIndex === "number" ? snapshot.turnIndex : null;
       if (turnIndex === null) {
-        return snapshot;
+        return null;
       }
       if (turnIndex < minTurnIndex) {
         return null;

@@ -284,7 +284,9 @@ export async function refreshChatgptConversation(
   const config = resolveBrowserConfig(options.config);
   const remoteChrome = config.remoteChrome;
   if (!remoteChrome) {
-    throw new Error("ChatGPT conversation refresh requires browser.remoteChrome or --remote-chrome.");
+    throw new Error(
+      "ChatGPT conversation refresh requires browser.remoteChrome or --remote-chrome.",
+    );
   }
   const connection = await connectToRemoteChrome(
     remoteChrome.host,
@@ -631,7 +633,8 @@ async function readTurnsFromRuntime(
         : "unknown";
     const index = typeof item.index === "number" ? item.index : 0;
     const copiedText = copiedMarkdowns.get(index);
-    const text = typeof copiedText === "string" ? copiedText : typeof item.text === "string" ? item.text : "";
+    const text =
+      typeof copiedText === "string" ? copiedText : typeof item.text === "string" ? item.text : "";
     return [
       {
         index,

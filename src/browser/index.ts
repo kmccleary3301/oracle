@@ -198,6 +198,8 @@ async function collectPostTurnSandboxArtifacts(
   logger: BrowserLogger,
   options: {
     baselineArtifacts: Awaited<ReturnType<typeof extractSandboxArtifactRefsFromRuntime>>;
+    baselineTurns?: number | null;
+    answerMessageId?: string | null;
     conversationUrl?: string;
     waitTimeoutMs?: number;
     outputDir?: string | null;
@@ -217,10 +219,17 @@ async function collectPostTurnSandboxArtifacts(
       options.waitTimeoutMs ?? 8_000,
     );
     const sandboxArtifacts = await extractSandboxArtifactRefsFromRuntime(Runtime);
-    if (newSandboxArtifacts.length === 0) {
+    const anchoredSandboxArtifacts = anchorSandboxArtifactsToCurrentTurn(newSandboxArtifacts, {
+      baselineTurns: options.baselineTurns,
+      answerMessageId: options.answerMessageId,
+    });
+    if (newSandboxArtifacts.length > 0 && anchoredSandboxArtifacts.length === 0) {
+      warnings.push("artifact_diff_unanchored_stale_candidates");
+    }
+    if (anchoredSandboxArtifacts.length === 0) {
       return {
         sandboxArtifacts,
-        newSandboxArtifacts,
+        newSandboxArtifacts: [],
         downloadedSandboxArtifacts: [],
         warnings,
       };
@@ -231,7 +240,7 @@ async function collectPostTurnSandboxArtifacts(
     );
     const downloadedSandboxArtifacts = await downloadSandboxArtifacts(
       Runtime,
-      newSandboxArtifacts,
+      anchoredSandboxArtifacts,
       outputDir,
     );
     if (downloadedSandboxArtifacts.length === 0) {
@@ -245,7 +254,7 @@ async function collectPostTurnSandboxArtifacts(
     }
     return {
       sandboxArtifacts,
-      newSandboxArtifacts,
+      newSandboxArtifacts: anchoredSandboxArtifacts,
       downloadedSandboxArtifacts,
       warnings,
     };
@@ -260,6 +269,30 @@ async function collectPostTurnSandboxArtifacts(
       warnings,
     };
   }
+}
+
+export function anchorSandboxArtifactsToCurrentTurn<
+  T extends Awaited<ReturnType<typeof extractSandboxArtifactRefsFromRuntime>>[number],
+>(
+  artifacts: T[],
+  options: { baselineTurns?: number | null; answerMessageId?: string | null },
+): T[] {
+  const answerMessageId = options.answerMessageId?.trim();
+  if (answerMessageId) {
+    return artifacts
+      .filter((artifact) => artifact.messageId === answerMessageId)
+      .map((artifact) => ({ ...artifact, artifactFreshness: "messageId" }));
+  }
+  const baselineTurns =
+    typeof options.baselineTurns === "number" && Number.isFinite(options.baselineTurns)
+      ? Math.max(0, Math.floor(options.baselineTurns))
+      : null;
+  if (baselineTurns !== null) {
+    return artifacts
+      .filter((artifact) => artifact.turnIndex >= baselineTurns)
+      .map((artifact) => ({ ...artifact, artifactFreshness: "turnIndex" }));
+  }
+  return artifacts.map((artifact) => ({ ...artifact, artifactFreshness: "baseline-diff" }));
 }
 
 export async function runBrowserMode(options: BrowserRunOptions): Promise<BrowserRunResult> {
@@ -1168,6 +1201,8 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     const answerTokens = estimateTokenCount(answerMarkdown);
     const sandboxArtifactResult = await collectPostTurnSandboxArtifacts(Runtime, logger, {
       baselineArtifacts: baselineSandboxArtifacts,
+      baselineTurns,
+      answerMessageId: answer.meta.messageId,
       conversationUrl: lastUrl,
       outputDir: config.sandboxArtifactsOutputDir,
     });
@@ -2075,6 +2110,8 @@ async function runRemoteBrowserMode(
     const answerTokens = estimateTokenCount(answerMarkdown);
     const sandboxArtifactResult = await collectPostTurnSandboxArtifacts(Runtime, logger, {
       baselineArtifacts: baselineSandboxArtifacts,
+      baselineTurns,
+      answerMessageId: answer.meta.messageId,
       conversationUrl: lastUrl,
       outputDir: config.sandboxArtifactsOutputDir,
     });
