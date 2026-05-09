@@ -63,6 +63,7 @@ import { warnIfOversizeBundle } from "../src/cli/bundleWarnings.js";
 import { formatRenderedMarkdown } from "../src/cli/renderOutput.js";
 import { resolveRenderFlag, resolveRenderPlain } from "../src/cli/renderFlags.js";
 import { resolveGeminiModelId } from "../src/oracle/geminiModels.js";
+import { asOracleUserError } from "../src/oracle/errors.js";
 import type { StatusOptions } from "../src/cli/sessionCommand.js";
 import { isErrorLogged } from "../src/cli/errorUtils.js";
 import { resolveOutputPath } from "../src/cli/writeOutputPath.js";
@@ -100,6 +101,7 @@ import {
   probeChatgptAttachments,
   readChatgptBrowserStatus,
   readChatgptConversationSnapshot,
+  inspectThinkingControlsForChatgptConversation,
   sendChatgptTurn,
 } from "../src/browser/chatgpt/session.js";
 import {
@@ -368,6 +370,8 @@ const suppressIntro =
   (routingCliArgs[0] === "bridge" &&
     (routingCliArgs[1] === "codex-config" || routingCliArgs[1] === "claude-config"));
 
+let activeJsonAction = false;
+
 const program = new Command();
 let introPrinted = false;
 program.hook("preAction", (_thisCommand, actionCommand) => {
@@ -375,6 +379,8 @@ program.hook("preAction", (_thisCommand, actionCommand) => {
   if (suppressIntro) return;
   if (introPrinted) return;
   const actionOptions = actionCommand?.optsWithGlobals?.() as { json?: boolean } | undefined;
+  activeJsonAction = Boolean(actionOptions?.json);
+  if (introPrinted) return;
   if (actionOptions?.json) return;
   console.log(formatIntroLine(VERSION, { env: process.env, richTty: isTty }));
   introPrinted = true;
@@ -2384,6 +2390,42 @@ chatCommand
     }
     for (const warning of result.warnings) {
       console.log(chalk.yellow(`Warning: ${warning}`));
+    }
+  });
+
+chatCommand
+  .command("inspect-controls <conversationUrl>")
+  .description("Inspect visible ChatGPT model and thinking controls.")
+  .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
+  .option("--browser-thinking-time <level>", "Requested thinking level to include in diagnostics.")
+  .option("--timeout <ms|s|m|h>", "Inspection timeout.", (value) =>
+    parseDurationOption(value, "Chat controls inspection timeout"),
+  )
+  .option("--keep-tab", "Leave the opened conversation tab alive.", false)
+  .option("--json", "Print structured JSON.", false)
+  .action(async (conversationUrl: string, rawCommandOptions, command?: Command) => {
+    const { options: commandOptions } = normalizeCommandActionOptions(rawCommandOptions, command);
+    const remoteChromeOption = commandOptions.remoteChrome ?? readCliOptionValue("--remote-chrome");
+    const config = await resolveChatgptCliBrowserConfig(remoteChromeOption);
+    const result = await inspectThinkingControlsForChatgptConversation({
+      conversationUrl,
+      requestedThinkingTime: commandOptions.browserThinkingTime,
+      timeoutMs: commandOptions.timeout,
+      keepTab: commandOptions.keepTab,
+      config,
+      log: (message) => {
+        if (!commandOptions.json) console.log(chalk.dim(message));
+      },
+    });
+    if (commandOptions.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log(`Conversation: ${result.page.href}`);
+    console.log(`Model menu: ${result.modelMenuLabel ?? "unknown"}`);
+    console.log(`Thinking controls: ${result.thinkingControls.length}`);
+    for (const control of result.thinkingControls) {
+      console.log(`- ${control.label || control.ariaLabel || control.testId || "unknown"}`);
     }
   });
 
@@ -4808,6 +4850,11 @@ async function main(): Promise<void> {
 }
 
 void main().catch((error: unknown) => {
+  if (activeJsonAction) {
+    console.log(JSON.stringify(formatJsonCliFailure(error), null, 2));
+    process.exitCode = 1;
+    return;
+  }
   if (error instanceof Error) {
     if (!isErrorLogged(error)) {
       console.error(chalk.red("✖"), error.message);
@@ -4817,3 +4864,21 @@ void main().catch((error: unknown) => {
   }
   process.exitCode = 1;
 });
+
+function formatJsonCliFailure(error: unknown): Record<string, unknown> {
+  const userError = asOracleUserError(error);
+  const details = userError?.details ?? {};
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    status: "failed",
+    submitted: Boolean((details as { submitted?: unknown }).submitted),
+    error: {
+      message,
+      name: error instanceof Error ? error.name : undefined,
+      category: userError?.category,
+      code: (details as { code?: unknown }).code,
+      stage: (details as { stage?: unknown }).stage,
+    },
+    thinkingTimeSelection: (details as { thinkingTimeSelection?: unknown }).thinkingTimeSelection,
+  };
+}

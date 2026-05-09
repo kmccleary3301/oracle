@@ -12,6 +12,7 @@ import type {
   BrowserLogger,
   ChromeClient,
 } from "../types.js";
+import { inspectThinkingControls } from "../actions/thinkingTime.js";
 import { extractGeneratedImagesFromRuntime, snapshotChatgptPage } from "./imageArtifacts.js";
 import { extractSandboxArtifactRefsFromRuntime } from "./sandboxArtifacts.js";
 import type {
@@ -19,8 +20,10 @@ import type {
   ChatgptAttachmentProbeResult,
   ChatgptConversationSnapshot,
   ChatgptConversationTurnSnapshot,
+  ChatgptControlsInspectionResult,
   ChatgptTurnResult,
 } from "./types.js";
+import type { ThinkingTimeLevel } from "../../oracle/types.js";
 import {
   clearComposerAttachments,
   captureConversationTurnMarkdowns,
@@ -48,6 +51,15 @@ export interface ChatgptConversationSnapshotOptions {
 }
 
 export interface ChatgptConversationRefreshOptions extends ChatgptConversationSnapshotOptions {}
+
+export interface ChatgptControlsInspectionOptions {
+  conversationUrl: string;
+  requestedThinkingTime?: ThinkingTimeLevel;
+  config?: BrowserAutomationConfig;
+  timeoutMs?: number;
+  keepTab?: boolean;
+  log?: BrowserLogger;
+}
 
 export interface ChatgptAttachmentProbeOptions {
   attachments: BrowserAttachment[];
@@ -236,6 +248,58 @@ export async function probeChatgptAttachments(
   }
 }
 
+export async function inspectThinkingControlsForChatgptConversation(
+  options: ChatgptControlsInspectionOptions,
+): Promise<ChatgptControlsInspectionResult> {
+  const logger = options.log ?? ((_message: string) => {});
+  const config = resolveBrowserConfig(options.config);
+  const remoteChrome = config.remoteChrome;
+  if (!remoteChrome) {
+    throw new Error(
+      "ChatGPT controls inspection requires browser.remoteChrome or --remote-chrome.",
+    );
+  }
+  const connection = await connectToRemoteChrome(
+    remoteChrome.host,
+    remoteChrome.port,
+    logger,
+    options.conversationUrl,
+    { maxTabs: config.remoteChromeMaxTabs },
+  );
+  const client = connection.client;
+  try {
+    const { Page, Runtime } = client;
+    await Promise.all([Page.enable(), Runtime.enable()]);
+    await navigateToChatGPT(Page, Runtime, options.conversationUrl, logger);
+    await waitForDocumentReady(Runtime, options.timeoutMs ?? 20_000);
+    const [page, thinkingDiagnostics] = await Promise.all([
+      snapshotChatgptPage(Runtime),
+      inspectThinkingControls(Runtime, options.requestedThinkingTime),
+    ]);
+    return {
+      page,
+      modelMenuLabel: page.modelMenuLabel,
+      availableModelLabels: page.modelMenuLabel ? [page.modelMenuLabel] : [],
+      thinkingControls: thinkingDiagnostics.menuControls,
+      thinkingDiagnostics,
+      warnings: [],
+    };
+  } finally {
+    try {
+      await client.close();
+    } finally {
+      if (!options.keepTab) {
+        await closeRemoteChromeTarget(
+          remoteChrome.host,
+          remoteChrome.port,
+          connection.targetId,
+          logger,
+        );
+      }
+    }
+  }
+}
+
 export async function readChatgptConversationSnapshot(
   options: ChatgptConversationSnapshotOptions,
 ): Promise<ChatgptConversationSnapshot> {
@@ -365,6 +429,7 @@ export async function sendChatgptTurn(options: ChatgptSendTurnOptions): Promise<
   const reconciledAnswer = reconcileAnswerWithSnapshot(result, snapshot);
   return {
     status: "completed",
+    submitted: result.submitted ?? true,
     conversationUrl: result.tabUrl,
     answerText: reconciledAnswer.answerText,
     answerMarkdown: reconciledAnswer.answerMarkdown,
@@ -428,6 +493,7 @@ export async function createChatgptSession(
   const reconciledAnswer = reconcileAnswerWithSnapshot(result, snapshot);
   return {
     status: "completed",
+    submitted: result.submitted ?? true,
     conversationUrl: result.tabUrl,
     answerText: reconciledAnswer.answerText,
     answerMarkdown: reconciledAnswer.answerMarkdown,
@@ -463,6 +529,7 @@ function serializeSubmittedTurnResult(result: {
 }): ChatgptTurnResult {
   return {
     status: "submitted",
+    submitted: true,
     conversationUrl: result.tabUrl,
     answerText: "",
     answerMarkdown: "",

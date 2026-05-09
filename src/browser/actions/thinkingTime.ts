@@ -41,10 +41,28 @@ export type ThinkingTimeSelectionStatus =
 
 export interface ThinkingTimeSelectionResult {
   requestedThinkingTime: ThinkingTimeLevel;
+  normalizedThinkingTime?: ThinkingTimeLevel;
   actualThinkingTime?: string | null;
   status: ThinkingTimeSelectionStatus;
   fallbackUsed: boolean;
   reason?: string;
+  diagnostics?: ThinkingControlsDiagnostics;
+}
+
+export interface ThinkingControlInfo {
+  label: string;
+  selected: boolean;
+  role?: string | null;
+  testId?: string | null;
+  ariaLabel?: string | null;
+}
+
+export interface ThinkingControlsDiagnostics {
+  requestedThinkingTime?: ThinkingTimeLevel;
+  normalizedThinkingTime?: ThinkingTimeLevel;
+  chipCandidates: ThinkingControlInfo[];
+  menuControls: ThinkingControlInfo[];
+  availableOptions: string[];
 }
 
 /**
@@ -143,6 +161,7 @@ export async function ensureThinkingTimeIfAvailable(
   logger: BrowserLogger,
   desiredModel?: string | null,
 ): Promise<ThinkingTimeSelectionResult> {
+  const normalizedLevel = normalizeThinkingTimeLevel(level);
   try {
     const result = await evaluateThinkingTimeSelection(Runtime, level, desiredModel);
     const capitalizedLevel = level.charAt(0).toUpperCase() + level.slice(1);
@@ -152,6 +171,7 @@ export async function ensureThinkingTimeIfAvailable(
         logger(`Thinking time: ${result.label ?? capitalizedLevel} (already selected)`);
         return {
           requestedThinkingTime: level,
+          normalizedThinkingTime: normalizedLevel,
           actualThinkingTime: result.label ?? capitalizedLevel,
           status: "already-selected",
           fallbackUsed: false,
@@ -160,6 +180,7 @@ export async function ensureThinkingTimeIfAvailable(
         logger(`Thinking time: ${result.label ?? capitalizedLevel}`);
         return {
           requestedThinkingTime: level,
+          normalizedThinkingTime: normalizedLevel,
           actualThinkingTime: result.label ?? capitalizedLevel,
           status: "selected",
           fallbackUsed: false,
@@ -171,9 +192,11 @@ export async function ensureThinkingTimeIfAvailable(
         }
         return {
           requestedThinkingTime: level,
+          normalizedThinkingTime: normalizedLevel,
           status: "unavailable",
           fallbackUsed: true,
           reason: result.status,
+          diagnostics: result.diagnostics,
         };
       case "option-not-found":
       case "selection-unverified":
@@ -187,9 +210,11 @@ export async function ensureThinkingTimeIfAvailable(
         }
         return {
           requestedThinkingTime: level,
+          normalizedThinkingTime: normalizedLevel,
           status: "option-not-found",
           fallbackUsed: true,
           reason: result.status,
+          diagnostics: result.diagnostics,
         };
       default:
         if (logger.verbose) {
@@ -197,6 +222,7 @@ export async function ensureThinkingTimeIfAvailable(
         }
         return {
           requestedThinkingTime: level,
+          normalizedThinkingTime: normalizedLevel,
           status: "failed",
           fallbackUsed: true,
           reason: "unknown-outcome",
@@ -210,11 +236,25 @@ export async function ensureThinkingTimeIfAvailable(
     }
     return {
       requestedThinkingTime: level,
+      normalizedThinkingTime: normalizedLevel,
       status: "failed",
       fallbackUsed: true,
       reason: message,
     };
   }
+}
+
+export async function inspectThinkingControls(
+  Runtime: ChromeClient["Runtime"],
+  level?: ThinkingTimeLevel,
+): Promise<ThinkingControlsDiagnostics> {
+  const outcome = await Runtime.evaluate({
+    expression: buildThinkingControlsInspectionExpression(level),
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  const value = outcome.result?.value as Partial<ThinkingControlsDiagnostics> | undefined;
+  return normalizeThinkingControlsDiagnostics(value, level);
 }
 
 async function evaluateThinkingTimeSelection(
@@ -246,6 +286,7 @@ function buildThinkingTimeExpression(
 
   return `(async () => {
     ${buildClickDispatcher()}
+    ${buildThinkingControlsHelpers()}
 
     const MENU_CONTAINER_SELECTOR = ${menuContainerLiteral};
     const MENU_ITEM_SELECTOR = ${menuItemLiteral};

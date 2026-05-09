@@ -160,6 +160,31 @@ export function redactBrowserConfigForDebugLogForTest(
   return redactBrowserConfigForDebugLog(config);
 }
 
+export class ThinkingTimeSelectionError extends BrowserAutomationError {
+  readonly thinkingTimeSelection: ThinkingTimeSelectionResult;
+  readonly submitted = false;
+
+  constructor(thinkingTimeSelection: ThinkingTimeSelectionResult) {
+    const requested = thinkingTimeSelection.requestedThinkingTime;
+    const normalized = thinkingTimeSelection.normalizedThinkingTime;
+    const detail =
+      normalized && normalized !== requested
+        ? `${requested} (normalized to ${normalized})`
+        : requested;
+    super(
+      `Unable to set requested thinking time ${detail}: ${thinkingTimeSelection.reason ?? thinkingTimeSelection.status}`,
+      {
+        stage: "thinking-time-selection",
+        code: "thinking-time-selection-failed",
+        submitted: false,
+        thinkingTimeSelection,
+      },
+    );
+    this.name = "ThinkingTimeSelectionError";
+    this.thinkingTimeSelection = thinkingTimeSelection;
+  }
+}
+
 function isCloudflareChallengeError(error: unknown): error is BrowserAutomationError {
   if (!(error instanceof BrowserAutomationError)) return false;
   return (error.details as { stage?: string } | undefined)?.stage === "cloudflare-challenge";
@@ -1712,9 +1737,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         }),
       );
       if (thinkingTimeSelection.fallbackUsed && config.thinkingFallback === "fail") {
-        throw new Error(
-          `Unable to set requested thinking time ${thinkingTime}: ${thinkingTimeSelection.reason ?? thinkingTimeSelection.status}`,
-        );
+        throw new ThinkingTimeSelectionError(thinkingTimeSelection);
       }
     }
     const profileLockTimeoutMs = manualLogin ? (config.profileLockTimeoutMs ?? 0) : 0;
@@ -1919,6 +1942,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         tookMs: durationMs,
         answerTokens: 0,
         answerChars: 0,
+        submitted: true,
         chromePid: chrome.pid,
         chromePort: chrome.port,
         chromeHost,
@@ -2519,6 +2543,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       tookMs: durationMs,
       answerTokens,
       answerChars,
+      submitted: true,
       chromePid: chrome.pid,
       chromePort: chrome.port,
       chromeHost,
@@ -3380,9 +3405,7 @@ async function runRemoteBrowserMode(
         },
       );
       if (thinkingTimeSelection.fallbackUsed && config.thinkingFallback === "fail") {
-        throw new Error(
-          `Unable to set requested thinking time ${thinkingTime}: ${thinkingTimeSelection.reason ?? thinkingTimeSelection.status}`,
-        );
+        throw new ThinkingTimeSelectionError(thinkingTimeSelection);
       }
     }
     const submitOnce = async (prompt: string, submissionAttachments: BrowserAttachment[]) => {
@@ -3595,6 +3618,7 @@ async function runRemoteBrowserMode(
         tookMs: durationMs,
         answerTokens: 0,
         answerChars: 0,
+        submitted: true,
         chromePid: undefined,
         chromePort: port,
         chromeHost: host,
@@ -4068,6 +4092,7 @@ async function runRemoteBrowserMode(
       answerTokens,
       answerChars,
       browserTransport: "cdp",
+      submitted: true,
       chromePid: undefined,
       chromePort: port,
       chromeHost: host,

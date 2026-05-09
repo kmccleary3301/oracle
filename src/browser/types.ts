@@ -193,6 +193,7 @@ export interface BrowserRunResult {
   answerTokens: number;
   answerChars: number;
   browserTransport?: "cdp";
+  submitted?: boolean;
   chromePid?: number;
   chromePort?: number;
   chromeHost?: string;

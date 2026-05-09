@@ -17,6 +17,7 @@ describe("browser thinking-time selection expression", () => {
     expect(expression).toContain('role=\\"menuitem\\"');
     expect(expression).toContain('role=\\"menuitemradio\\"');
     expect(expression).toContain("normalize");
+    expect(expression).toContain("thinkingLevelAliases");
     expect(expression).toContain("extended");
     expect(expression).toContain("standard");
   });
@@ -2714,5 +2715,29 @@ describe("browser thinking-time selection expression", () => {
         FakeElement,
       ),
     ).resolves.toEqual({ status: "switched", label: "Instant" });
+  });
+
+  it("inspects visible thinking controls without selecting", async () => {
+    const runtime = {
+      evaluate: async () => ({
+        result: {
+          value: {
+            requestedThinkingTime: "extended",
+            normalizedThinkingTime: "heavy",
+            chipCandidates: [{ label: "Pro", selected: true }],
+            menuControls: [{ label: "Heavy", selected: false }],
+            availableOptions: ["Heavy"],
+          },
+        },
+      }),
+    } as any;
+
+    await expect(inspectThinkingControls(runtime, "extended")).resolves.toMatchObject({
+      requestedThinkingTime: "extended",
+      normalizedThinkingTime: "heavy",
+      chipCandidates: [{ label: "Pro", selected: true }],
+      menuControls: [{ label: "Heavy", selected: false }],
+      availableOptions: ["Heavy"],
+    });
   });
 });
