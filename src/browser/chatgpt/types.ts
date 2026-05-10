@@ -159,6 +159,10 @@ export interface ChatgptTurnResult {
   status: "completed" | "submitted" | "failed";
   submitted?: boolean;
   conversationUrl?: string;
+  submittedAt?: string;
+  earliestRecoveryAt?: string;
+  recommendedRecoveryDelayMs?: number;
+  monitoringGuidance?: string;
   answerText: string;
   answerMarkdown: string;
   tookMs: number;

@@ -91,7 +91,7 @@ export function registerMcpJobTools(server: McpServer): void {
     {
       title: "Check Oracle async job status",
       description:
-        "Poll a long-running Oracle MCP job started by an async ChatGPT/Images tool. Completed jobs include the same structured result the synchronous tool would return.",
+        "Poll an Oracle MCP job started by an async tool. For ChatGPT jobs launched with returnAfterSubmit, job status completed means the launcher finished and the prompt was submitted; it does not mean GPT-5.5 Pro has finished answering. Inspect the result status and obey earliestRecoveryAt/recommendedRecoveryDelayMs before recovery checks.",
       inputSchema: jobStatusInputShape,
       outputSchema: jobStatusOutputShape,
     },
@@ -210,7 +210,7 @@ export function registerMcpJobTools(server: McpServer): void {
     {
       title: "Read Oracle async job result",
       description:
-        "Read the full result payload for a daemon-backed Oracle async job after completion.",
+        "Read the full result payload for a daemon-backed Oracle async job after completion. For ChatGPT returnAfterSubmit jobs, a ready result may have status=submitted with empty answer text; recover the final answer later from the conversation URL after earliestRecoveryAt.",
       inputSchema: jobStatusInputShape,
       outputSchema: jobResultOutputShape,
     },

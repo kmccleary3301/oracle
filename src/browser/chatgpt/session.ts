@@ -527,10 +527,18 @@ function serializeSubmittedTurnResult(result: {
   thinkingTimeSelection?: ChatgptTurnResult["thinkingTimeSelection"];
   warnings?: string[];
 }): ChatgptTurnResult {
+  const submittedAt = new Date().toISOString();
+  const recommendedRecoveryDelayMs = resolveSubmittedRecoveryDelayMs(result.thinkingTimeSelection);
+  const earliestRecoveryAt = new Date(Date.now() + recommendedRecoveryDelayMs).toISOString();
   return {
     status: "submitted",
     submitted: true,
     conversationUrl: result.tabUrl,
+    submittedAt,
+    earliestRecoveryAt,
+    recommendedRecoveryDelayMs,
+    monitoringGuidance:
+      "The ChatGPT turn was submitted and is expected to continue server-side. A completed launcher job is not a completed Pro answer; do not treat quiet time as failure. Avoid recovery before earliestRecoveryAt unless the user explicitly asks or the request is known to be short.",
     answerText: "",
     answerMarkdown: "",
     tookMs: result.tookMs,
@@ -547,6 +555,19 @@ function serializeSubmittedTurnResult(result: {
     thinkingTimeSelection: result.thinkingTimeSelection,
     warnings: result.warnings ?? [],
   };
+}
+
+function resolveSubmittedRecoveryDelayMs(
+  thinkingTimeSelection?: ChatgptTurnResult["thinkingTimeSelection"],
+): number {
+  const requested = thinkingTimeSelection?.requestedThinkingTime;
+  if (requested === "extended" || requested === "heavy") {
+    return 20 * 60_000;
+  }
+  if (requested === "standard") {
+    return 10 * 60_000;
+  }
+  return 5 * 60_000;
 }
 
 function resolveDirectChatInputTimeoutMs(

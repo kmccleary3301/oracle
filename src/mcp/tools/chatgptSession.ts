@@ -159,6 +159,10 @@ const sendTurnOutputShape = {
   status: z.enum(["completed", "submitted", "failed"]),
   submitted: z.boolean().optional(),
   conversationUrl: z.string().optional(),
+  submittedAt: z.string().optional(),
+  earliestRecoveryAt: z.string().optional(),
+  recommendedRecoveryDelayMs: z.number().optional(),
+  monitoringGuidance: z.string().optional(),
   answerText: z.string(),
   answerMarkdown: z.string(),
   tookMs: z.number(),
@@ -206,7 +210,7 @@ export function registerChatgptSessionTools(server: McpServer): void {
     {
       title: "Start async ChatGPT conversation",
       description:
-        "Start a long-running ChatGPT conversation turn and return immediately with a job id. Poll oracle_job_status to collect the completed text, images, and sandbox artifacts.",
+        "Start a long-running ChatGPT conversation turn and return immediately with a job id. For GPT-5.5 Pro/Extended or large attachment runs, prefer returnAfterSubmit: true and treat the daemon job completion as launcher completion, not answer completion. Pro can normally stay quiet for 40 minutes to 2+ hours; do not infer failure from silence. Use the submitted result's earliestRecoveryAt/recommendedRecoveryDelayMs, then refresh/read the conversation and recover artifacts with freshness checks.",
       inputSchema: createSessionInputShape,
       outputSchema: asyncJobStartOutputShape,
     },
@@ -251,7 +255,7 @@ export function registerChatgptSessionTools(server: McpServer): void {
     {
       title: "Create ChatGPT conversation",
       description:
-        "Create a new ChatGPT conversation by sending an initial prompt through the logged-in browser. Defaults to the current model/mode.",
+        "Create a new ChatGPT conversation by sending an initial prompt through the logged-in browser. Defaults to the current model/mode. For GPT-5.5 Pro/Extended or large attachment runs, set returnAfterSubmit: true unless you intentionally want to hard-wait; a submitted result means the prompt was launched, not that the Pro answer is complete.",
       inputSchema: createSessionInputShape,
       outputSchema: sendTurnOutputShape,
     },
@@ -417,7 +421,7 @@ export function registerChatgptSessionTools(server: McpServer): void {
     {
       title: "Start async ChatGPT conversation turn",
       description:
-        "Start a long-running turn on an existing ChatGPT conversation and return immediately with a job id. Poll oracle_job_status to collect the completed result.",
+        "Start a long-running turn on an existing ChatGPT conversation and return immediately with a job id. For GPT-5.5 Pro/Extended or large attachment runs, prefer returnAfterSubmit: true and treat daemon job completion as launcher completion, not answer completion. Pro can normally stay quiet for 40 minutes to 2+ hours; do not infer failure from silence. Use earliestRecoveryAt/recommendedRecoveryDelayMs from the submitted result before recovery checks.",
       inputSchema: sendTurnInputShape,
       outputSchema: asyncJobStartOutputShape,
     },
@@ -462,7 +466,7 @@ export function registerChatgptSessionTools(server: McpServer): void {
     {
       title: "Send ChatGPT conversation turn",
       description:
-        "Append one prompt turn to an existing ChatGPT conversation through the logged-in browser. Defaults to the current model/mode.",
+        "Append one prompt turn to an existing ChatGPT conversation through the logged-in browser. Defaults to the current model/mode. For GPT-5.5 Pro/Extended or large attachment runs, set returnAfterSubmit: true unless you intentionally want to hard-wait; a submitted result means the prompt was launched, not that the Pro answer is complete.",
       inputSchema: sendTurnInputShape,
       outputSchema: sendTurnOutputShape,
     },
