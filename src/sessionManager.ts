@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import { createWriteStream } from "node:fs";
 import type { WriteStream } from "node:fs";
 import net from "node:net";
-import type { BrowserModelStrategy, CookieParam } from "./browser/types.js";
+import type { BrowserModelStrategy, CookieParam, ThinkingFallbackMode } from "./browser/types.js";
 import type {
   TransportFailureReason,
   AzureOptions,
@@ -59,7 +59,7 @@ export interface BrowserSessionConfig {
   /** Thinking time intensity: 'light', 'standard', 'extended', 'heavy' */
   thinkingTime?: ThinkingTimeLevel;
   /** Whether missing Thinking controls should continue with current/default mode or fail. */
-  thinkingFallback?: "allow" | "fail";
+  thinkingFallback?: ThinkingFallbackMode;
 }
 
 export interface BrowserRuntimeMetadata {

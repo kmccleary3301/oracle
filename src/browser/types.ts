@@ -11,6 +11,12 @@ import type { ThinkingTimeSelectionResult } from "./actions/thinkingTime.js";
 export type ChromeClient = Awaited<ReturnType<typeof CDP>>;
 export type CookieParam = Protocol.Network.CookieParam;
 export type BrowserModelStrategy = "select" | "current" | "ignore";
+export type ThinkingFallbackMode =
+  | "allow"
+  | "fail"
+  | "submit-current-with-warning"
+  | "skip-if-control-absent"
+  | "wait-for-manual";
 
 export type BrowserLogger = ((message: string) => void) & {
   verbose?: boolean;
@@ -69,7 +75,7 @@ export interface BrowserAutomationConfig {
   /** Thinking time intensity level for Thinking/Pro models: light, standard, extended, heavy */
   thinkingTime?: ThinkingTimeLevel;
   /** Whether missing Thinking controls should fail the run or continue with current/default mode. */
-  thinkingFallback?: "allow" | "fail";
+  thinkingFallback?: ThinkingFallbackMode;
 }
 
 export interface BrowserRunOptions {
@@ -134,7 +140,7 @@ export type ResolvedBrowserConfig = Required<
   desiredModel?: string | null;
   modelStrategy?: BrowserModelStrategy;
   thinkingTime?: ThinkingTimeLevel;
-  thinkingFallback?: "allow" | "fail";
+  thinkingFallback?: ThinkingFallbackMode;
   debugPort?: number | null;
   inlineCookiesSource?: string | null;
   remoteChrome?: { host: string; port: number } | null;

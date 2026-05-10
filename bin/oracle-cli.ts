@@ -6,6 +6,7 @@ import { once } from "node:events";
 import { createInterface } from "node:readline/promises";
 import { Command, Option } from "commander";
 import type { OptionValues } from "commander";
+import type { ThinkingFallbackMode } from "../src/browser/types.js";
 // Allow `npx @steipete/oracle oracle-mcp` to resolve the MCP server even though npx runs the default binary.
 if (process.argv[2] === "oracle-mcp") {
   const { startMcpServer } = await import("../src/mcp/server.js");
@@ -51,6 +52,7 @@ import {
 import { copyToClipboard } from "../src/cli/clipboard.js";
 import { buildMarkdownBundle } from "../src/cli/markdownBundle.js";
 import { shouldDetachSession } from "../src/cli/detach.js";
+import { normalizeDurableJobFileInputs } from "../src/cli/durableJobFiles.js";
 import { applyHiddenAliases } from "../src/cli/hiddenAliases.js";
 import { buildBrowserConfig, resolveBrowserModelLabel } from "../src/cli/browserConfig.js";
 import { performSessionRun } from "../src/cli/sessionRunner.js";
@@ -174,7 +176,7 @@ interface CliOptions extends OptionValues {
   browserManualLogin?: boolean;
   browserManualLoginProfileDir?: string;
   browserThinkingTime?: "light" | "standard" | "extended" | "heavy";
-  browserThinkingFallback?: "allow" | "fail";
+  browserThinkingFallback?: ThinkingFallbackMode;
   browserAllowCookieErrors?: boolean;
   browserAttachments?: string;
   browserInlineFiles?: boolean;
@@ -225,6 +227,14 @@ interface RestartCommandOptions {
   remoteHost?: string;
   remoteToken?: string;
 }
+
+const thinkingFallbackModes = [
+  "allow",
+  "fail",
+  "submit-current-with-warning",
+  "skip-if-control-absent",
+  "wait-for-manual",
+] as const;
 
 const VERSION = getCliVersion();
 const CLI_ENTRYPOINT = fileURLToPath(import.meta.url);
@@ -630,11 +640,8 @@ program
       .hideHelp(),
   )
   .addOption(
-    new Option(
-      "--browser-thinking-fallback <mode>",
-      "Thinking selector fallback policy: allow continues if unavailable; fail aborts if the requested level cannot be selected.",
-    )
-      .choices(["allow", "fail"])
+    new Option("--browser-thinking-fallback <mode>", "Thinking selector fallback policy.")
+      .choices([...thinkingFallbackModes])
       .hideHelp(),
   )
   .addOption(
@@ -981,7 +988,11 @@ jobCommand
   .option("--browser-model-strategy <mode>", "Model picker strategy.", "current")
   .option("--browser-model-label <label>", "Exact/fuzzy ChatGPT model picker label to use.")
   .option("--browser-thinking-time <level>", "Thinking time intensity.")
-  .option("--thinking-fallback <mode>", "Thinking selector fallback policy (allow|fail).", "allow")
+  .addOption(
+    new Option("--thinking-fallback <mode>", "Thinking selector fallback policy.")
+      .choices([...thinkingFallbackModes])
+      .default("allow"),
+  )
   .option(
     "--return-after-submit",
     "For ChatGPT create-session jobs, submit the prompt and persist the conversation URL without waiting for the answer.",
@@ -991,7 +1002,11 @@ jobCommand
   .option("--connection-path <path>", "Path for the daemon connection artifact.")
   .option("--json", "Print structured JSON.", false)
   .action(async (kind: string, commandOptions, command: Command) => {
-    const client = await resolveDaemonCliClient(commandOptions.connectionPath);
+    const submitCwd = process.cwd();
+    const rawFiles = resolveCommandFileInputs(commandOptions, command);
+    const normalizedFiles = commandOptions.inputJson
+      ? []
+      : await normalizeDurableJobFileInputs(rawFiles, submitCwd);
     const input = commandOptions.inputJson
       ? JSON.parse(commandOptions.inputJson)
       : {
@@ -1002,7 +1017,9 @@ jobCommand
             readCliOptionValue("--turn-message"),
           conversationUrl: commandOptions.conversationUrl,
           projectUrl: commandOptions.projectUrl,
-          files: resolveCommandFileInputs(commandOptions, command),
+          files: normalizedFiles.map((file) => file.resolvedPath),
+          submitCwd,
+          normalizedFiles,
           outputDir: commandOptions.outputDir,
           download: commandOptions.download,
           remoteChrome: commandOptions.remoteChrome,
@@ -1014,9 +1031,22 @@ jobCommand
           returnAfterSubmit: commandOptions.returnAfterSubmit,
           artifactTypes: parseArtifactTypesOption(commandOptions.artifactTypes),
         };
+    const client = await resolveDaemonCliClient(commandOptions.connectionPath);
     const result = await client.startJob({ kind: kind as never, input });
+    const output =
+      commandOptions.inputJson || normalizedFiles.length === 0
+        ? result
+        : {
+            ...result,
+            submitCwd,
+            normalizedFiles,
+            warnings: [
+              ...((result as { warnings?: string[] }).warnings ?? []),
+              "Resolved durable job file inputs to absolute paths before daemon submission.",
+            ],
+          };
     if (commandOptions.json) {
-      console.log(JSON.stringify(result, null, 2));
+      console.log(JSON.stringify(output, null, 2));
       return;
     }
     console.log(`Started ${result.kind} job ${result.jobId} (${result.status}).`);
@@ -1271,7 +1301,11 @@ imageCommand
     "--browser-thinking-time <level>",
     "Thinking time intensity for image generation: light, standard, extended, heavy.",
   )
-  .option("--thinking-fallback <mode>", "Thinking selector fallback policy (allow|fail).", "allow")
+  .addOption(
+    new Option("--thinking-fallback <mode>", "Thinking selector fallback policy.")
+      .choices([...thinkingFallbackModes])
+      .default("allow"),
+  )
   .option(
     "--artifact-types <types>",
     "Comma-separated extraction types (images,sandbox). Defaults to images only for image generation.",
@@ -1439,7 +1473,11 @@ imageCommand
     "--browser-thinking-time <level>",
     "Thinking time intensity for image editing: light, standard, extended, heavy.",
   )
-  .option("--thinking-fallback <mode>", "Thinking selector fallback policy (allow|fail).", "allow")
+  .addOption(
+    new Option("--thinking-fallback <mode>", "Thinking selector fallback policy.")
+      .choices([...thinkingFallbackModes])
+      .default("allow"),
+  )
   .option(
     "--artifact-types <types>",
     "Comma-separated extraction types (images,sandbox). Defaults to images only for image editing.",
@@ -2121,7 +2159,11 @@ chatCommand
   .option("--browser-model-strategy <mode>", "Model picker strategy for this turn.", "current")
   .option("--browser-model-label <label>", "Exact/fuzzy ChatGPT model picker label to use.")
   .option("--browser-thinking-time <level>", "Thinking time intensity.")
-  .option("--thinking-fallback <mode>", "Thinking selector fallback policy (allow|fail).", "allow")
+  .addOption(
+    new Option("--thinking-fallback <mode>", "Thinking selector fallback policy.")
+      .choices([...thinkingFallbackModes])
+      .default("allow"),
+  )
   .option(
     "--return-after-submit",
     "Submit the turn and persist the conversation URL without waiting for the answer.",

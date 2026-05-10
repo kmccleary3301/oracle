@@ -23,4 +23,12 @@ describe("shouldPreserveBrowserOnErrorForTest", () => {
     });
     expect(shouldPreserveBrowserOnErrorForTest(error, false)).toBe(false);
   });
+
+  test("preserves headful manual-intervention errors", () => {
+    const error = new BrowserAutomationError("manual intervention required", {
+      stage: "thinking-time-selection",
+      manualIntervention: true,
+    });
+    expect(shouldPreserveBrowserOnErrorForTest(error, false)).toBe(true);
+  });
 });

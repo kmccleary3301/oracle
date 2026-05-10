@@ -40,6 +40,17 @@ const extractSandboxArtifactsInputShape = {
   keepTab: z.boolean().optional().default(false),
 } satisfies z.ZodRawShape;
 
+const thinkingFallbackSchema = z
+  .enum([
+    "allow",
+    "fail",
+    "submit-current-with-warning",
+    "skip-if-control-absent",
+    "wait-for-manual",
+  ])
+  .optional()
+  .default("allow");
+
 const sendTurnInputShape = {
   conversationUrl: z.string().url(),
   prompt: z.string().min(1),
@@ -50,7 +61,7 @@ const sendTurnInputShape = {
   browserModelStrategy: z.enum(["select", "current", "ignore"]).optional().default("current"),
   browserModelLabel: z.string().optional(),
   browserThinkingTime: z.enum(["light", "standard", "extended", "heavy"]).optional(),
-  thinkingFallback: z.enum(["allow", "fail"]).optional().default("allow"),
+  thinkingFallback: thinkingFallbackSchema,
   includeSnapshot: z.boolean().optional().default(false),
   returnAfterSubmit: z.boolean().optional().default(false),
 } satisfies z.ZodRawShape;
@@ -64,7 +75,7 @@ const createSessionInputShape = {
   browserModelStrategy: z.enum(["select", "current", "ignore"]).optional().default("current"),
   browserModelLabel: z.string().optional(),
   browserThinkingTime: z.enum(["light", "standard", "extended", "heavy"]).optional(),
-  thinkingFallback: z.enum(["allow", "fail"]).optional().default("allow"),
+  thinkingFallback: thinkingFallbackSchema,
   includeSnapshot: z.boolean().optional().default(false),
   returnAfterSubmit: z.boolean().optional().default(false),
 } satisfies z.ZodRawShape;

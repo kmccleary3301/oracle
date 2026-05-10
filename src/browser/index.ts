@@ -9,6 +9,7 @@ import type {
   BrowserLogger,
   ChromeClient,
   BrowserAttachment,
+  ThinkingFallbackMode,
 } from "./types.js";
 import {
   launchChrome,
@@ -76,7 +77,10 @@ export class ThinkingTimeSelectionError extends BrowserAutomationError {
   readonly thinkingTimeSelection: ThinkingTimeSelectionResult;
   readonly submitted = false;
 
-  constructor(thinkingTimeSelection: ThinkingTimeSelectionResult) {
+  constructor(
+    thinkingTimeSelection: ThinkingTimeSelectionResult,
+    options: { manualIntervention?: boolean } = {},
+  ) {
     const requested = thinkingTimeSelection.requestedThinkingTime;
     const normalized = thinkingTimeSelection.normalizedThinkingTime;
     const detail =
@@ -89,6 +93,7 @@ export class ThinkingTimeSelectionError extends BrowserAutomationError {
         stage: "thinking-time-selection",
         code: "thinking-time-selection-failed",
         submitted: false,
+        manualIntervention: options.manualIntervention ?? false,
         thinkingTimeSelection,
       },
     );
@@ -103,7 +108,14 @@ function isCloudflareChallengeError(error: unknown): error is BrowserAutomationE
 }
 
 function shouldPreserveBrowserOnError(error: unknown, headless: boolean): boolean {
-  return !headless && isCloudflareChallengeError(error);
+  if (headless) return false;
+  if (isCloudflareChallengeError(error)) return true;
+  if (error instanceof BrowserAutomationError) {
+    return Boolean(
+      (error.details as { manualIntervention?: unknown } | undefined)?.manualIntervention,
+    );
+  }
+  return false;
 }
 
 export function shouldPreserveBrowserOnErrorForTest(error: unknown, headless: boolean): boolean {
@@ -111,6 +123,30 @@ export function shouldPreserveBrowserOnErrorForTest(error: unknown, headless: bo
 }
 
 const MARKDOWN_CAPTURE_TIMEOUT_MS = 10_000;
+
+function shouldAbortForThinkingFallback(
+  mode: ThinkingFallbackMode | undefined,
+  selection: ThinkingTimeSelectionResult,
+): boolean {
+  if (!selection.fallbackUsed) return false;
+  return mode === "fail" || mode === "wait-for-manual";
+}
+
+function thinkingFallbackWarning(
+  mode: ThinkingFallbackMode | undefined,
+  selection: ThinkingTimeSelectionResult | undefined,
+): string | null {
+  if (!selection?.fallbackUsed) return null;
+  const requested = selection.requestedThinkingTime;
+  const normalized = selection.normalizedThinkingTime;
+  const detail = normalized && normalized !== requested ? `${requested}/${normalized}` : requested;
+  const reason = selection.reason ?? selection.status;
+  const action =
+    mode === "skip-if-control-absent"
+      ? "skipped thinking selector because the control was absent"
+      : "continued with the current/default thinking mode";
+  return `Requested thinking time ${detail} was not selected (${reason}); ${action}.`;
+}
 
 async function uploadBrowserAttachmentsWithRetry(
   deps: {
@@ -732,8 +768,10 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
           },
         }),
       );
-      if (thinkingTimeSelection.fallbackUsed && config.thinkingFallback === "fail") {
-        throw new ThinkingTimeSelectionError(thinkingTimeSelection);
+      if (shouldAbortForThinkingFallback(config.thinkingFallback, thinkingTimeSelection)) {
+        throw new ThinkingTimeSelectionError(thinkingTimeSelection, {
+          manualIntervention: config.thinkingFallback === "wait-for-manual",
+        });
       }
     }
     const profileLockTimeoutMs = manualLogin ? (config.profileLockTimeoutMs ?? 0) : 0;
@@ -912,8 +950,9 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         controllerPid: process.pid,
         thinkingTimeSelection,
         warnings: [
+          thinkingFallbackWarning(config.thinkingFallback, thinkingTimeSelection),
           "Prompt submitted without waiting for the assistant response; recover the final answer from the conversation URL later.",
-        ],
+        ].filter((warning): warning is string => Boolean(warning)),
       };
     }
     stopThinkingMonitor = startThinkingStatusMonitor(Runtime, logger, options.verbose ?? false);
@@ -1249,7 +1288,10 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       newSandboxArtifacts: sandboxArtifactResult.newSandboxArtifacts,
       downloadedSandboxArtifacts: sandboxArtifactResult.downloadedSandboxArtifacts,
       thinkingTimeSelection,
-      warnings: sandboxArtifactResult.warnings,
+      warnings: [
+        thinkingFallbackWarning(config.thinkingFallback, thinkingTimeSelection),
+        ...sandboxArtifactResult.warnings,
+      ].filter((warning): warning is string => Boolean(warning)),
     };
   } catch (error) {
     const normalizedError = error instanceof Error ? error : new Error(String(error));
@@ -1697,8 +1739,10 @@ async function runRemoteBrowserMode(
           },
         },
       );
-      if (thinkingTimeSelection.fallbackUsed && config.thinkingFallback === "fail") {
-        throw new ThinkingTimeSelectionError(thinkingTimeSelection);
+      if (shouldAbortForThinkingFallback(config.thinkingFallback, thinkingTimeSelection)) {
+        throw new ThinkingTimeSelectionError(thinkingTimeSelection, {
+          manualIntervention: config.thinkingFallback === "wait-for-manual",
+        });
       }
     }
 
@@ -1852,8 +1896,9 @@ async function runRemoteBrowserMode(
         controllerPid: process.pid,
         thinkingTimeSelection,
         warnings: [
+          thinkingFallbackWarning(config.thinkingFallback, thinkingTimeSelection),
           "Prompt submitted without waiting for the assistant response; recover the final answer from the conversation URL later.",
-        ],
+        ].filter((warning): warning is string => Boolean(warning)),
       };
     }
     stopThinkingMonitor = startThinkingStatusMonitor(Runtime, logger, options.verbose ?? false);
@@ -2159,7 +2204,10 @@ async function runRemoteBrowserMode(
       newSandboxArtifacts: sandboxArtifactResult.newSandboxArtifacts,
       downloadedSandboxArtifacts: sandboxArtifactResult.downloadedSandboxArtifacts,
       thinkingTimeSelection,
-      warnings: sandboxArtifactResult.warnings,
+      warnings: [
+        thinkingFallbackWarning(config.thinkingFallback, thinkingTimeSelection),
+        ...sandboxArtifactResult.warnings,
+      ].filter((warning): warning is string => Boolean(warning)),
     };
   } catch (error) {
     const normalizedError = error instanceof Error ? error : new Error(String(error));

@@ -1,7 +1,7 @@
 import { normalizeChatgptUrl, CHATGPT_URL } from "../browserMode.js";
 import type { UserConfig } from "../config.js";
 import type { ThinkingTimeLevel } from "../oracle.js";
-import type { BrowserModelStrategy } from "../browser/types.js";
+import type { BrowserModelStrategy, ThinkingFallbackMode } from "../browser/types.js";
 
 export interface BrowserDefaultsOptions {
   chatgptUrl?: string;
@@ -25,7 +25,7 @@ export interface BrowserDefaultsOptions {
   browserKeepBrowser?: boolean;
   browserModelStrategy?: BrowserModelStrategy;
   browserThinkingTime?: ThinkingTimeLevel;
-  browserThinkingFallback?: "allow" | "fail";
+  browserThinkingFallback?: ThinkingFallbackMode;
   browserManualLogin?: boolean;
   browserManualLoginProfileDir?: string | null;
   remoteChrome?: string;
