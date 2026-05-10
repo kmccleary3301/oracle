@@ -16,6 +16,17 @@ import type { ThinkingTimeLevel } from "../../oracle/types.js";
 import { startMcpJob } from "../jobs.js";
 
 const DEFAULT_CHATGPT_IMAGE_TURN_TIMEOUT_MS = 30 * 60_000;
+const thinkingFallbackSchema = z
+  .enum([
+    "allow",
+    "fail",
+    "submit-current-with-warning",
+    "skip-if-control-absent",
+    "wait-for-manual",
+  ])
+  .optional()
+  .default("allow")
+  .describe("Thinking selector fallback policy.");
 
 const extractImagesInputShape = {
   conversationUrl: z
@@ -90,11 +101,7 @@ const generateImagesInputShape = {
     .enum(["light", "standard", "extended", "heavy"])
     .optional()
     .describe("Thinking time intensity for image generation."),
-  thinkingFallback: z
-    .enum(["allow", "fail"])
-    .optional()
-    .default("allow")
-    .describe("Whether missing Thinking controls should continue or fail the turn."),
+  thinkingFallback: thinkingFallbackSchema,
   artifactTypes: z
     .array(z.enum(["images", "sandbox"]))
     .optional()
@@ -135,11 +142,7 @@ const editImageInputShape = {
     .enum(["light", "standard", "extended", "heavy"])
     .optional()
     .describe("Thinking time intensity for image editing."),
-  thinkingFallback: z
-    .enum(["allow", "fail"])
-    .optional()
-    .default("allow")
-    .describe("Whether missing Thinking controls should continue or fail the turn."),
+  thinkingFallback: thinkingFallbackSchema,
   artifactTypes: z
     .array(z.enum(["images", "sandbox"]))
     .optional()

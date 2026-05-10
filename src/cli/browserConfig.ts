@@ -12,6 +12,7 @@ import type {
   BrowserArchiveMode,
   BrowserModelStrategy,
   BrowserResearchMode,
+  ThinkingFallbackMode,
 } from "../browser/types.js";
 import type { CookieParam } from "../browser/types.js";
 import { getOracleHomeDir } from "../oracleHome.js";
@@ -88,7 +89,7 @@ export interface BrowserFlagOptions {
   /** Thinking time intensity: 'light', 'standard', 'extended', 'extra-high', 'heavy' */
   browserThinkingTime?: ThinkingTimeLevel;
   /** Whether missing Thinking controls should continue with current/default mode or fail. */
-  browserThinkingFallback?: "allow" | "fail";
+  browserThinkingFallback?: ThinkingFallbackMode;
   browserResearch?: BrowserResearchMode;
   browserArchive?: BrowserArchiveMode;
   browserModelLabel?: string;

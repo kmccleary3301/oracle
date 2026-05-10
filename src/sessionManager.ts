@@ -10,6 +10,7 @@ import type {
   BrowserModelStrategy,
   BrowserResearchMode,
   CookieParam,
+  ThinkingFallbackMode,
 } from "./browser/types.js";
 import type {
   TransportFailureReason,
@@ -95,7 +96,7 @@ export interface BrowserSessionConfig {
   /** Browser-only: existing ChatGPT conversation URL to resume before submitting. */
   resumeConversationUrl?: string | null;
   /** Whether missing Thinking controls should continue with current/default mode or fail. */
-  thinkingFallback?: "allow" | "fail";
+  thinkingFallback?: ThinkingFallbackMode;
 }
 
 export interface BrowserRuntimeMetadata {

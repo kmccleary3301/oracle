@@ -23,6 +23,12 @@ export type CookieParam = Protocol.Network.CookieParam;
 export type BrowserModelStrategy = "select" | "current" | "ignore";
 export type BrowserResearchMode = "off" | "deep";
 export type BrowserArchiveMode = "auto" | "always" | "never";
+export type ThinkingFallbackMode =
+  | "allow"
+  | "fail"
+  | "submit-current-with-warning"
+  | "skip-if-control-absent"
+  | "wait-for-manual";
 
 export type BrowserLogger = ((message: string) => void) & {
   verbose?: boolean;
@@ -194,7 +200,7 @@ export interface BrowserAutomationConfig {
   /** Existing ChatGPT conversation URL to open before submitting the prompt. */
   resumeConversationUrl?: string | null;
   /** Whether missing Thinking controls should fail the run or continue with current/default mode. */
-  thinkingFallback?: "allow" | "fail";
+  thinkingFallback?: ThinkingFallbackMode;
 }
 
 export interface BrowserRunOptions {
@@ -320,7 +326,7 @@ export type ResolvedBrowserConfig = Required<
   desiredModel?: string | null;
   modelStrategy?: BrowserModelStrategy;
   thinkingTime?: ThinkingTimeLevel;
-  thinkingFallback?: "allow" | "fail";
+  thinkingFallback?: ThinkingFallbackMode;
   debugPort?: number | null;
   inlineCookiesSource?: string | null;
   remoteChrome?: { host: string; port: number } | null;

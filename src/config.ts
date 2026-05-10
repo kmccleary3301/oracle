@@ -7,6 +7,7 @@ import type {
   BrowserArchiveMode,
   BrowserModelStrategy,
   BrowserResearchMode,
+  ThinkingFallbackMode,
 } from "./browser/types.js";
 import type { ThinkingTimeLevel, ModelOverridesConfig } from "./oracle/types.js";
 
@@ -76,7 +77,7 @@ export interface BrowserConfigDefaults {
   /** Archive completed ChatGPT conversations after local artifacts are saved. */
   archiveConversations?: BrowserArchiveMode;
   /** Whether missing Thinking controls should continue with current/default mode or fail. */
-  thinkingFallback?: "allow" | "fail";
+  thinkingFallback?: ThinkingFallbackMode;
   /** Skip cookie sync and reuse a persistent automation profile (waits for manual ChatGPT login). */
   manualLogin?: boolean;
   /** Manual-login profile directory override (also available via ORACLE_BROWSER_PROFILE_DIR). */

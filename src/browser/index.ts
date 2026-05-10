@@ -12,6 +12,7 @@ import type {
   BrowserAttachment,
   ResolvedBrowserConfig,
   BrowserArchiveResult,
+  ThinkingFallbackMode,
 } from "./types.js";
 import {
   launchChrome,
@@ -177,7 +178,10 @@ export class ThinkingTimeSelectionError extends BrowserAutomationError {
   readonly thinkingTimeSelection: ThinkingTimeSelectionResult;
   readonly submitted = false;
 
-  constructor(thinkingTimeSelection: ThinkingTimeSelectionResult) {
+  constructor(
+    thinkingTimeSelection: ThinkingTimeSelectionResult,
+    options: { manualIntervention?: boolean } = {},
+  ) {
     const requested = thinkingTimeSelection.requestedThinkingTime;
     const normalized = thinkingTimeSelection.normalizedThinkingTime;
     const detail =
@@ -190,6 +194,7 @@ export class ThinkingTimeSelectionError extends BrowserAutomationError {
         stage: "thinking-time-selection",
         code: "thinking-time-selection-failed",
         submitted: false,
+        manualIntervention: options.manualIntervention ?? false,
         thinkingTimeSelection,
       },
     );
@@ -256,6 +261,33 @@ function createBrowserRunWarning(code: string, message: string): BrowserRunWarni
 function shouldRetryAttachmentUploadError(message: string): boolean {
   return /too many files|too large|exceeds?|unsupported file|aggregate limit|inline limit|limit/i.test(
     message,
+  );
+}
+
+function shouldAbortForThinkingFallback(
+  mode: ThinkingFallbackMode | undefined,
+  selection: ThinkingTimeSelectionResult,
+): boolean {
+  if (!selection.fallbackUsed) return false;
+  return mode === "fail" || mode === "wait-for-manual";
+}
+
+function thinkingFallbackWarning(
+  mode: ThinkingFallbackMode | undefined,
+  selection: ThinkingTimeSelectionResult | undefined,
+): BrowserRunWarning | null {
+  if (!selection?.fallbackUsed) return null;
+  const requested = selection.requestedThinkingTime;
+  const normalized = selection.normalizedThinkingTime;
+  const detail = normalized && normalized !== requested ? `${requested}/${normalized}` : requested;
+  const reason = selection.reason ?? selection.status;
+  const action =
+    mode === "skip-if-control-absent"
+      ? "skipped thinking selector because the control was absent"
+      : "continued with the current/default thinking mode";
+  return createBrowserRunWarning(
+    "browser_thinking_fallback",
+    `Requested thinking time ${detail} was not selected (${reason}); ${action}.`,
   );
 }
 
@@ -1830,8 +1862,10 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
           },
         ),
       );
-      if (thinkingTimeSelection.fallbackUsed && config.thinkingFallback === "fail") {
-        throw new ThinkingTimeSelectionError(thinkingTimeSelection);
+      if (shouldAbortForThinkingFallback(config.thinkingFallback, thinkingTimeSelection)) {
+        throw new ThinkingTimeSelectionError(thinkingTimeSelection, {
+          manualIntervention: config.thinkingFallback === "wait-for-manual",
+        });
       }
     }
     const acquireProfileLockIfNeeded = async () => {};
@@ -2042,11 +2076,12 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         controllerPid: process.pid,
         thinkingTimeSelection,
         warnings: [
+          thinkingFallbackWarning(config.thinkingFallback, thinkingTimeSelection),
           createBrowserRunWarning(
             "browser_return_after_submit",
             "Prompt submitted without waiting for the assistant response; recover the final answer from the conversation URL later.",
           ),
-        ],
+        ].filter((warning): warning is BrowserRunWarning => Boolean(warning)),
       };
     }
     const imageArtifactMinTurnIndex = baselineTurns;
@@ -2677,7 +2712,10 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       newSandboxArtifacts: sandboxArtifactResult.newSandboxArtifacts,
       downloadedSandboxArtifacts: sandboxArtifactResult.downloadedSandboxArtifacts,
       thinkingTimeSelection,
-      warnings: sandboxArtifactResult.warnings,
+      warnings: [
+        thinkingFallbackWarning(config.thinkingFallback, thinkingTimeSelection),
+        ...sandboxArtifactResult.warnings,
+      ].filter((warning): warning is string => Boolean(warning)),
     };
   } catch (error) {
     const normalizedError = error instanceof Error ? error : new Error(String(error));
@@ -3476,8 +3514,10 @@ async function runRemoteBrowserMode(
           },
         },
       );
-      if (thinkingTimeSelection.fallbackUsed && config.thinkingFallback === "fail") {
-        throw new ThinkingTimeSelectionError(thinkingTimeSelection);
+      if (shouldAbortForThinkingFallback(config.thinkingFallback, thinkingTimeSelection)) {
+        throw new ThinkingTimeSelectionError(thinkingTimeSelection, {
+          manualIntervention: config.thinkingFallback === "wait-for-manual",
+        });
       }
     }
     const submitOnce = async (prompt: string, submissionAttachments: BrowserAttachment[]) => {
@@ -3711,11 +3751,12 @@ async function runRemoteBrowserMode(
         controllerPid: process.pid,
         thinkingTimeSelection,
         warnings: [
+          thinkingFallbackWarning(config.thinkingFallback, thinkingTimeSelection),
           createBrowserRunWarning(
             "browser_return_after_submit",
             "Prompt submitted without waiting for the assistant response; recover the final answer from the conversation URL later.",
           ),
-        ],
+        ].filter((warning): warning is BrowserRunWarning => Boolean(warning)),
       };
     }
     // Helper to normalize text for echo detection (collapse whitespace, lowercase)
@@ -4231,7 +4272,10 @@ async function runRemoteBrowserMode(
       newSandboxArtifacts: sandboxArtifactResult.newSandboxArtifacts,
       downloadedSandboxArtifacts: sandboxArtifactResult.downloadedSandboxArtifacts,
       thinkingTimeSelection,
-      warnings: sandboxArtifactResult.warnings,
+      warnings: [
+        thinkingFallbackWarning(config.thinkingFallback, thinkingTimeSelection),
+        ...sandboxArtifactResult.warnings,
+      ].filter((warning): warning is string => Boolean(warning)),
     };
   } catch (error) {
     const normalizedError = error instanceof Error ? error : new Error(String(error));

@@ -35,6 +35,17 @@ export interface ChatgptDaemonHandlerOptions {
   session?: string;
 }
 
+const thinkingFallbackSchema = z
+  .enum([
+    "allow",
+    "fail",
+    "submit-current-with-warning",
+    "skip-if-control-absent",
+    "wait-for-manual",
+  ])
+  .optional()
+  .default("allow");
+
 const imageJobInputSchema = z.object({
   prompt: z.string().min(1),
   files: z.array(z.string()).optional().default([]),
@@ -47,7 +58,7 @@ const imageJobInputSchema = z.object({
   browserModelStrategy: z.enum(["select", "current", "ignore"]).optional().default("current"),
   browserModelLabel: z.string().optional(),
   browserThinkingTime: z.enum(["light", "standard", "extended", "heavy"]).optional(),
-  thinkingFallback: z.enum(["allow", "fail"]).optional().default("allow"),
+  thinkingFallback: thinkingFallbackSchema,
   artifactTypes: z
     .array(z.enum(["images", "sandbox"]))
     .optional()
@@ -64,7 +75,7 @@ const createSessionJobInputSchema = z.object({
   browserModelStrategy: z.enum(["select", "current", "ignore"]).optional().default("current"),
   browserModelLabel: z.string().optional(),
   browserThinkingTime: z.enum(["light", "standard", "extended", "heavy"]).optional(),
-  thinkingFallback: z.enum(["allow", "fail"]).optional().default("allow"),
+  thinkingFallback: thinkingFallbackSchema,
   includeSnapshot: z.boolean().optional().default(false),
   returnAfterSubmit: z.boolean().optional().default(false),
 });

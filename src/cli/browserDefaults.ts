@@ -7,6 +7,7 @@ import type {
   BrowserArchiveMode,
   BrowserModelStrategy,
   BrowserResearchMode,
+  ThinkingFallbackMode,
 } from "../browser/types.js";
 
 export interface BrowserDefaultsOptions {
@@ -38,7 +39,7 @@ export interface BrowserDefaultsOptions {
   browserKeepBrowser?: boolean;
   browserModelStrategy?: BrowserModelStrategy;
   browserThinkingTime?: ThinkingTimeLevel;
-  browserThinkingFallback?: "allow" | "fail";
+  browserThinkingFallback?: ThinkingFallbackMode;
   browserResearch?: BrowserResearchMode;
   browserArchive?: BrowserArchiveMode;
   browserManualLogin?: boolean;
