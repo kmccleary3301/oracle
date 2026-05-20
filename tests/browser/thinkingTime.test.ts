@@ -3,6 +3,7 @@ import {
   buildThinkingTimeExpressionForTest,
   ensureThinkingTimeIfAvailable,
   inspectThinkingControls,
+  verifyThinkingTimeSelection,
 } from "../../src/browser/actions/thinkingTime.js";
 
 describe("browser thinking-time selection expression", () => {
@@ -45,7 +46,7 @@ describe("browser thinking-time selection expression", () => {
     });
   });
 
-  it("preserves requested extended while exposing heavy normalization", async () => {
+  it("preserves requested extended without normalizing it to heavy", async () => {
     const runtime = {
       evaluate: async () => ({ result: { value: { status: "chip-not-found" } } }),
     } as any;
@@ -53,7 +54,7 @@ describe("browser thinking-time selection expression", () => {
     const result = await ensureThinkingTimeIfAvailable(runtime, "extended", logger);
     expect(result).toMatchObject({
       requestedThinkingTime: "extended",
-      normalizedThinkingTime: "heavy",
+      normalizedThinkingTime: "extended",
       status: "unavailable",
       fallbackUsed: true,
       reason: "chip-not-found",
@@ -92,10 +93,36 @@ describe("browser thinking-time selection expression", () => {
 
     await expect(inspectThinkingControls(runtime, "extended")).resolves.toMatchObject({
       requestedThinkingTime: "extended",
-      normalizedThinkingTime: "heavy",
+      normalizedThinkingTime: "extended",
       chipCandidates: [{ label: "Pro", selected: true }],
       menuControls: [{ label: "Heavy", selected: false }],
       availableOptions: ["Heavy"],
+    });
+  });
+
+  it("does not verify heavy as a match for requested extended", async () => {
+    const runtime = {
+      evaluate: async () => ({
+        result: {
+          value: {
+            actualThinkingTime: "Heavy",
+            diagnostics: {
+              requestedThinkingTime: "extended",
+              normalizedThinkingTime: "extended",
+              chipCandidates: [{ label: "Heavy", selected: true }],
+              menuControls: [],
+              availableOptions: ["Heavy"],
+            },
+          },
+        },
+      }),
+    } as any;
+
+    await expect(verifyThinkingTimeSelection(runtime, "extended")).resolves.toMatchObject({
+      requestedThinkingTime: "extended",
+      normalizedThinkingTime: "extended",
+      matches: false,
+      actualThinkingTime: "Heavy",
     });
   });
 });

@@ -40,13 +40,18 @@ import {
   readAssistantSnapshot,
 } from "./pageActions.js";
 import { INPUT_SELECTORS } from "./constants.js";
-import { ensureThinkingTimeIfAvailable } from "./actions/thinkingTime.js";
+import { verifyModelSelection } from "./actions/modelSelection.js";
+import {
+  ensureThinkingTimeIfAvailable,
+  verifyThinkingTimeSelection,
+} from "./actions/thinkingTime.js";
 import type { ThinkingTimeSelectionResult } from "./actions/thinkingTime.js";
 import { estimateTokenCount, withRetries, delay } from "./utils.js";
 import { formatElapsed } from "../oracle/format.js";
 import { CHATGPT_URL, CONVERSATION_TURN_SELECTOR, DEFAULT_MODEL_STRATEGY } from "./constants.js";
 import type { LaunchedChrome } from "chrome-launcher";
 import { BrowserAutomationError } from "../oracle/errors.js";
+import type { ThinkingTimeLevel } from "../oracle/types.js";
 import { alignPromptEchoPair, buildPromptEchoMatcher } from "./reattachHelpers.js";
 import type { ProfileRunLock } from "./profileState.js";
 import { normalizePromptText } from "../oracle/promptText.js";
@@ -146,6 +151,55 @@ function thinkingFallbackWarning(
       ? "skipped thinking selector because the control was absent"
       : "continued with the current/default thinking mode";
   return `Requested thinking time ${detail} was not selected (${reason}); ${action}.`;
+}
+
+async function verifyRequestedModelAndThinkingBeforeSubmit(
+  runtime: ChromeClient["Runtime"],
+  config: {
+    desiredModel?: string | null;
+    modelStrategy?: string | null;
+    thinkingTime?: ThinkingTimeLevel | null;
+  },
+  logger: BrowserLogger,
+): Promise<void> {
+  if (config.desiredModel && config.modelStrategy !== "ignore") {
+    const verification = await verifyModelSelection(runtime, config.desiredModel);
+    if (!verification.matches) {
+      throw new BrowserAutomationError(
+        `Refusing to submit: selected ChatGPT model does not match requested model "${config.desiredModel}". ` +
+          `Selected: ${verification.selectedLabel ?? verification.buttonLabel ?? "unknown"}.`,
+        {
+          stage: "pre-submit-selection-verification",
+          code: "model-verification-failed",
+          submitted: false,
+          requestedModel: config.desiredModel,
+          modelVerification: verification,
+        },
+      );
+    }
+    logger(
+      `Verified model before submit: ${verification.selectedLabel ?? verification.buttonLabel ?? config.desiredModel}`,
+    );
+  }
+  if (config.thinkingTime) {
+    const verification = await verifyThinkingTimeSelection(runtime, config.thinkingTime);
+    if (!verification.matches) {
+      throw new BrowserAutomationError(
+        `Refusing to submit: selected ChatGPT thinking time does not match requested "${config.thinkingTime}". ` +
+          `Selected: ${verification.actualThinkingTime ?? "unknown"}.`,
+        {
+          stage: "pre-submit-selection-verification",
+          code: "thinking-time-verification-failed",
+          submitted: false,
+          requestedThinkingTime: config.thinkingTime,
+          thinkingTimeVerification: verification,
+        },
+      );
+    }
+    logger(
+      `Verified thinking time before submit: ${verification.actualThinkingTime ?? config.thinkingTime}`,
+    );
+  }
 }
 
 async function uploadBrowserAttachmentsWithRetry(
@@ -774,6 +828,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         });
       }
     }
+    await raceWithDisconnect(verifyRequestedModelAndThinkingBeforeSubmit(Runtime, config, logger));
     const profileLockTimeoutMs = manualLogin ? (config.profileLockTimeoutMs ?? 0) : 0;
     let profileLock: ProfileRunLock | null = null;
     const acquireProfileLockIfNeeded = async () => {
@@ -1745,6 +1800,7 @@ async function runRemoteBrowserMode(
         });
       }
     }
+    await verifyRequestedModelAndThinkingBeforeSubmit(Runtime, config, logger);
 
     const submitOnce = async (prompt: string, submissionAttachments: BrowserAttachment[]) => {
       const baselineSnapshot = await readAssistantSnapshot(Runtime).catch(() => null);

@@ -7,6 +7,15 @@ import {
 import { logDomFailure } from "../domDebug.js";
 import { buildClickDispatcher } from "./domEvents.js";
 
+export interface ModelSelectionVerificationResult {
+  requestedModel: string;
+  matches: boolean;
+  buttonLabel?: string | null;
+  selectedLabel?: string | null;
+  selectedTestId?: string | null;
+  availableOptions: string[];
+}
+
 export async function ensureModelSelection(
   Runtime: ChromeClient["Runtime"],
   desiredModel: string,
@@ -56,6 +65,28 @@ export async function ensureModelSelection(
       throw new Error("Unable to locate the ChatGPT model selector button.");
     }
   }
+}
+
+export async function verifyModelSelection(
+  Runtime: ChromeClient["Runtime"],
+  desiredModel: string,
+): Promise<ModelSelectionVerificationResult> {
+  const outcome = await Runtime.evaluate({
+    expression: buildModelVerificationExpression(desiredModel),
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  const result = outcome.result?.value as Partial<ModelSelectionVerificationResult> | undefined;
+  return {
+    requestedModel: desiredModel,
+    matches: Boolean(result?.matches),
+    buttonLabel: result?.buttonLabel ?? null,
+    selectedLabel: result?.selectedLabel ?? null,
+    selectedTestId: result?.selectedTestId ?? null,
+    availableOptions: Array.isArray(result?.availableOptions)
+      ? result.availableOptions.filter((item): item is string => typeof item === "string")
+      : [],
+  };
 }
 
 /**
@@ -439,6 +470,116 @@ function buildModelSelectionExpression(
   })()`;
 }
 
+function buildModelVerificationExpression(targetModel: string): string {
+  const primaryLabelLiteral = JSON.stringify(targetModel);
+  const menuContainerLiteral = JSON.stringify(MENU_CONTAINER_SELECTOR);
+  const menuItemLiteral = JSON.stringify(MENU_ITEM_SELECTOR);
+  return `(async () => {
+    ${buildClickDispatcher()}
+    const BUTTON_SELECTOR = '${MODEL_BUTTON_SELECTOR}';
+    const PRIMARY_LABEL = ${primaryLabelLiteral};
+    const normalizeText = (value) => {
+      if (!value) return '';
+      return value
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, ' ')
+        .replace(/\\s+/g, ' ')
+        .trim();
+    };
+    const normalizedTarget = normalizeText(PRIMARY_LABEL);
+    const desiredVersion = normalizedTarget.includes('5 5')
+      ? '5-5'
+      : normalizedTarget.includes('5 4')
+        ? '5-4'
+        : normalizedTarget.includes('5 2')
+        ? '5-2'
+        : normalizedTarget.includes('5 1')
+          ? '5-1'
+          : normalizedTarget.includes('5 0')
+            ? '5-0'
+            : null;
+    const wantsPro = normalizedTarget.includes(' pro') || normalizedTarget.endsWith(' pro') || normalizedTarget.includes('pro');
+    const wantsThinking = normalizedTarget.includes('thinking');
+    const wantsInstant = normalizedTarget.includes('instant');
+    const versionAliases = (version) => {
+      if (version === '5-5') return ['5 5', '55', 'gpt55', 'gpt 55'];
+      if (version === '5-4') return ['5 4', '54', 'gpt54', 'gpt 54'];
+      if (version === '5-2') return ['5 2', '52', 'gpt52', 'gpt 52'];
+      if (version === '5-1') return ['5 1', '51', 'gpt51', 'gpt 51'];
+      if (version === '5-0') return ['5 0', '50', 'gpt50', 'gpt 50'];
+      return [];
+    };
+    const strictMatch = (label, testId) => {
+      const combined = normalizeText([label, testId].filter(Boolean).join(' '));
+      if (!combined) return false;
+      if (desiredVersion && !versionAliases(desiredVersion).some((alias) => combined.includes(alias))) {
+        return false;
+      }
+      const hasPro = combined.includes(' pro') || combined.endsWith(' pro') || combined.includes('proresearch') || combined.includes('research grade');
+      const hasThinking = combined.includes('thinking') || combined.includes('reasoning');
+      const hasInstant = combined.includes('instant');
+      if (wantsPro && !hasPro) return false;
+      if (!wantsPro && hasPro) return false;
+      if (wantsThinking && !hasThinking) return false;
+      if (!wantsThinking && hasThinking) return false;
+      if (wantsInstant && !hasInstant) return false;
+      if (!wantsInstant && hasInstant) return false;
+      if (!desiredVersion && !wantsPro && !wantsThinking && !wantsInstant) {
+        return combined.includes(normalizedTarget);
+      }
+      return true;
+    };
+    const button = document.querySelector(BUTTON_SELECTOR);
+    const buttonLabel = (button?.textContent ?? '').trim();
+    const selectedOption = () => {
+      const roots = Array.from(document.querySelectorAll(${menuContainerLiteral}));
+      const nodes = roots.flatMap((root) => Array.from(root.querySelectorAll(${menuItemLiteral})));
+      const selectedStates = ['checked', 'selected', 'on', 'true'];
+      return nodes.find((node) => {
+        const ariaChecked = node.getAttribute?.('aria-checked');
+        const ariaSelected = node.getAttribute?.('aria-selected');
+        const ariaCurrent = node.getAttribute?.('aria-current');
+        const dataSelected = node.getAttribute?.('data-selected');
+        const dataState = (node.getAttribute?.('data-state') ?? '').toLowerCase();
+        return ariaChecked === 'true' || ariaSelected === 'true' || ariaCurrent === 'true' || dataSelected === 'true' || selectedStates.includes(dataState);
+      }) ?? null;
+    };
+    const collectAvailableOptions = () => {
+      const roots = Array.from(document.querySelectorAll(${menuContainerLiteral}));
+      const nodes = roots.length > 0
+        ? roots.flatMap((root) => Array.from(root.querySelectorAll(${menuItemLiteral})))
+        : Array.from(document.querySelectorAll(${menuItemLiteral}));
+      return Array.from(new Set(nodes.map((node) => (node?.textContent ?? '').trim()).filter(Boolean))).slice(0, 20);
+    };
+    const closeMenu = async () => {
+      try {
+        for (const target of [document, window]) {
+          target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
+          target.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
+        }
+      } catch {}
+      await new Promise((resolve) => setTimeout(resolve, 80));
+    };
+    if (button && dispatchClickSequence(button)) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    const selected = selectedOption();
+    const selectedLabel = (selected?.textContent ?? '').trim() || null;
+    const selectedTestId = selected?.getAttribute?.('data-testid') || null;
+    const matches = strictMatch(selectedLabel, selectedTestId) || strictMatch(buttonLabel, null);
+    const availableOptions = collectAvailableOptions();
+    await closeMenu();
+    return {
+      requestedModel: PRIMARY_LABEL,
+      matches,
+      buttonLabel,
+      selectedLabel,
+      selectedTestId,
+      availableOptions,
+    };
+  })()`;
+}
+
 export function buildModelMatchersLiteralForTest(targetModel: string) {
   return buildModelMatchersLiteral(targetModel);
 }
@@ -634,4 +775,8 @@ function buildModelMatchersLiteral(targetModel: string): {
 
 export function buildModelSelectionExpressionForTest(targetModel: string): string {
   return buildModelSelectionExpression(targetModel, "select");
+}
+
+export function buildModelVerificationExpressionForTest(targetModel: string): string {
+  return buildModelVerificationExpression(targetModel);
 }

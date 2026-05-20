@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   buildModelMatchersLiteralForTest,
   buildModelSelectionExpressionForTest,
+  buildModelVerificationExpressionForTest,
+  verifyModelSelection,
 } from "../../src/browser/actions/modelSelection.js";
 
 const expectContains = (arr: string[], value: string) => {
@@ -86,5 +88,34 @@ describe("browser model selection matchers", () => {
     expect(expression).toContain("const closeMenu = async () =>");
     expect(expression).toContain("key: 'Escape'");
     expect(expression).toContain("await closeMenu();");
+  });
+
+  it("verifies selected model strictly before submit", async () => {
+    const runtime = {
+      evaluate: async () => ({
+        result: {
+          value: {
+            requestedModel: "gpt-5.5-pro",
+            matches: false,
+            buttonLabel: "ChatGPT",
+            selectedLabel: "GPT-5.5",
+            selectedTestId: "model-switcher-gpt-5-5",
+            availableOptions: ["GPT-5.5", "GPT-5.5 Pro"],
+          },
+        },
+      }),
+    } as any;
+
+    await expect(verifyModelSelection(runtime, "gpt-5.5-pro")).resolves.toMatchObject({
+      requestedModel: "gpt-5.5-pro",
+      matches: false,
+      selectedLabel: "GPT-5.5",
+    });
+  });
+
+  it("requires pro in the model verification expression for pro targets", () => {
+    const expression = buildModelVerificationExpressionForTest("gpt-5.5-pro");
+    expect(expression).toContain("wantsPro && !hasPro");
+    expect(expression).toContain("!wantsPro && hasPro");
   });
 });

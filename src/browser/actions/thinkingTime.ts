@@ -44,6 +44,14 @@ export interface ThinkingControlsDiagnostics {
   availableOptions: string[];
 }
 
+export interface ThinkingTimeVerificationResult {
+  requestedThinkingTime: ThinkingTimeLevel;
+  normalizedThinkingTime: ThinkingTimeLevel;
+  matches: boolean;
+  actualThinkingTime?: string | null;
+  diagnostics: ThinkingControlsDiagnostics;
+}
+
 /**
  * Selects a specific thinking time level in ChatGPT's composer pill menu.
  * @param level - The thinking time intensity: 'light', 'standard', 'extended', or 'heavy'
@@ -182,6 +190,44 @@ export async function inspectThinkingControls(
   return normalizeThinkingControlsDiagnostics(value, level);
 }
 
+export async function verifyThinkingTimeSelection(
+  Runtime: ChromeClient["Runtime"],
+  level: ThinkingTimeLevel,
+): Promise<ThinkingTimeVerificationResult> {
+  const outcome = await Runtime.evaluate({
+    expression: buildThinkingTimeVerificationExpression(level),
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  const value = outcome.result?.value as
+    | {
+        actualThinkingTime?: string | null;
+        diagnostics?: Partial<ThinkingControlsDiagnostics>;
+      }
+    | undefined;
+  const diagnostics = normalizeThinkingControlsDiagnostics(value?.diagnostics, level);
+  const normalizedLevel = normalizeThinkingTimeLevel(level);
+  const selectedControls = [...diagnostics.chipCandidates, ...diagnostics.menuControls]
+    .filter((control) => control.selected)
+    .map((control) => [control.label, control.ariaLabel, control.testId].filter(Boolean).join(" "))
+    .filter(Boolean);
+  const visibleLabels = [
+    value?.actualThinkingTime ?? "",
+    ...selectedControls,
+    ...diagnostics.chipCandidates.map((control) =>
+      [control.label, control.ariaLabel, control.testId].filter(Boolean).join(" "),
+    ),
+  ].filter(Boolean);
+  const matches = visibleLabels.some((label) => thinkingLabelMatchesLevel(label, normalizedLevel));
+  return {
+    requestedThinkingTime: level,
+    normalizedThinkingTime: normalizedLevel,
+    matches,
+    actualThinkingTime: value?.actualThinkingTime ?? visibleLabels[0] ?? null,
+    diagnostics,
+  };
+}
+
 async function evaluateThinkingTimeSelection(
   Runtime: ChromeClient["Runtime"],
   level: ThinkingTimeLevel,
@@ -212,6 +258,13 @@ function buildThinkingTimeExpression(level: ThinkingTimeLevel): string {
     const chip = findThinkingChip();
     if (!chip) {
       return { status: 'chip-not-found', diagnostics: inspectThinkingControls(TARGET_LEVEL) };
+    }
+
+    const chipText = normalize([chip.textContent, chip.getAttribute?.('aria-label'), chip.getAttribute?.('data-testid')]
+      .filter(Boolean)
+      .join(' '));
+    if (TARGET_ALIASES.some((alias) => chipText.includes(alias))) {
+      return { status: 'already-selected', label: chip.textContent?.trim?.() || chip.getAttribute?.('aria-label') || null };
     }
 
     dispatchClickSequence(chip);
@@ -296,6 +349,43 @@ function buildThinkingControlsInspectionExpression(level?: ThinkingTimeLevel): s
   })()`;
 }
 
+function buildThinkingTimeVerificationExpression(level: ThinkingTimeLevel): string {
+  const targetLevelLiteral = JSON.stringify(level.toLowerCase());
+  return `(async () => {
+    ${buildClickDispatcher()}
+    ${buildThinkingControlsHelpers()}
+    const TARGET_LEVEL = ${targetLevelLiteral};
+    const closeMenu = async () => {
+      try {
+        for (const target of [document, window]) {
+          target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
+          target.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
+        }
+      } catch {}
+      await new Promise((resolve) => setTimeout(resolve, 80));
+    };
+    const selectedOption = () => {
+      const nodes = Array.from(document.querySelectorAll(MENU_ITEM_SELECTOR));
+      return nodes.find((node) => {
+        const ariaChecked = node.getAttribute?.('aria-checked');
+        const ariaSelected = node.getAttribute?.('aria-selected');
+        const dataState = (node.getAttribute?.('data-state') || '').toLowerCase();
+        return ariaChecked === 'true' || ariaSelected === 'true' || ['checked', 'selected', 'on'].includes(dataState);
+      }) || null;
+    };
+    const chip = findThinkingChip();
+    if (chip) {
+      dispatchClickSequence(chip);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    const selected = selectedOption();
+    const actualThinkingTime = selected?.textContent?.trim?.() || chip?.textContent?.trim?.() || chip?.getAttribute?.('aria-label') || null;
+    const diagnostics = inspectThinkingControls(TARGET_LEVEL);
+    await closeMenu();
+    return { actualThinkingTime, diagnostics };
+  })()`;
+}
+
 function buildThinkingControlsHelpers(): string {
   const menuContainerLiteral = JSON.stringify(MENU_CONTAINER_SELECTOR);
   const menuItemLiteral = JSON.stringify(MENU_ITEM_SELECTOR);
@@ -357,7 +447,10 @@ function buildThinkingControlsHelpers(): string {
     const thinkingLevelAliases = (level) => {
       const normalized = normalizeThinkingLevel(level);
       if (normalized === 'heavy') {
-        return ['heavy', 'extended', 'deep', 'pro', 'longer', 'thorough', 'maximum'];
+        return ['heavy', 'deep', 'maximum'];
+      }
+      if (normalized === 'extended') {
+        return ['extended', 'longer', 'thorough'];
       }
       if (normalized === 'standard') {
         return ['standard', 'normal', 'auto', 'default'];
@@ -370,21 +463,44 @@ function buildThinkingControlsHelpers(): string {
 
     const findThinkingChip = () => {
       const candidates = [];
-      for (const selector of CHIP_SELECTORS) {
-        candidates.push(...Array.from(document.querySelectorAll(selector)));
+      const pushCandidate = (node, score) => {
+        if (!node || candidates.some((entry) => entry.node === node)) return;
+        candidates.push({ node, score });
+      };
+
+      const composerRoots = Array.from(document.querySelectorAll('[data-testid="composer-footer-actions"], form, [data-testid*="composer"]'));
+      for (const root of composerRoots) {
+        for (const selector of CHIP_SELECTORS) {
+          for (const node of Array.from(root.querySelectorAll(selector))) {
+            pushCandidate(node, 100);
+          }
+        }
       }
-      for (const btn of candidates) {
+      for (const selector of CHIP_SELECTORS) {
+        for (const node of Array.from(document.querySelectorAll(selector))) {
+          pushCandidate(node, 0);
+        }
+      }
+
+      candidates.sort((a, b) => b.score - a.score);
+      for (const entry of candidates) {
+        const btn = entry.node;
         const hasMenu = btn.getAttribute?.('aria-haspopup') === 'menu';
         const aria = normalize(btn.getAttribute?.('aria-label') ?? '');
         const text = normalize(btn.textContent ?? '');
         const testId = normalize(btn.getAttribute?.('data-testid') ?? '');
         const combined = [aria, text, testId].join(' ');
-        if (!hasMenu && !combined.includes('thinking') && !combined.includes('pro')) continue;
+        const inComposer = entry.score > 0;
+        const hasThinkingLevelLabel = ['heavy', 'extended', 'standard', 'light', 'auto', 'quick', 'fast', 'longer', 'deep'].some((word) =>
+          combined.includes(word)
+        );
+        if (!hasMenu && !combined.includes('thinking') && !combined.includes('reasoning') && !hasThinkingLevelLabel) continue;
         if (
+          hasThinkingLevelLabel ||
           combined.includes('thinking') ||
           combined.includes('think') ||
           combined.includes('reasoning') ||
-          combined.includes('pro')
+          (inComposer && combined.includes('pro'))
         ) {
           return btn;
         }
@@ -421,7 +537,26 @@ function buildThinkingControlsHelpers(): string {
 }
 
 function normalizeThinkingTimeLevel(level: ThinkingTimeLevel): ThinkingTimeLevel {
-  return level === "extended" ? "heavy" : level;
+  return level;
+}
+
+function thinkingLabelMatchesLevel(label: string, level: ThinkingTimeLevel): boolean {
+  const normalized = label
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return false;
+  if (level === "heavy") {
+    return /\bheavy\b|\bdeep\b|\bmaximum\b/.test(normalized);
+  }
+  if (level === "extended") {
+    return /\bextended\b|\blonger\b|\bthorough\b/.test(normalized);
+  }
+  if (level === "standard") {
+    return /\bstandard\b|\bnormal\b|\bauto\b|\bdefault\b/.test(normalized);
+  }
+  return /\blight\b|\bquick\b|\bfast\b/.test(normalized);
 }
 
 function normalizeThinkingControlsDiagnostics(
