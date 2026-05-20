@@ -5,6 +5,7 @@ import {
   ensureThinkingTime,
   inferThinkingTargetModelKindForTest,
   inspectThinkingControls,
+  verifyThinkingTimeSelection,
 } from "../../src/browser/actions/thinkingTime.js";
 
 describe("browser thinking-time selection expression", () => {
@@ -55,6 +56,21 @@ describe("browser thinking-time selection expression", () => {
     expect(buildThinkingTimeExpressionForTest("heavy")).not.toContain(
       "heavy: ['heavy', 'extra high'",
     );
+  });
+
+  it("preserves requested extended without normalizing it to heavy", async () => {
+    const runtime = {
+      evaluate: async () => ({ result: { value: { status: "chip-not-found" } } }),
+    } as never;
+    const logger = (() => {}) as never;
+    const result = await ensureThinkingTimeIfAvailable(runtime, "extended", logger);
+    expect(result).toMatchObject({
+      requestedThinkingTime: "extended",
+      normalizedThinkingTime: "extended",
+      status: "unavailable",
+      fallbackUsed: true,
+      reason: "chip-not-found",
+    });
   });
 
   it("accepts standard selected-state markers when verifying effort", () => {
@@ -2840,6 +2856,32 @@ describe("browser thinking-time selection expression", () => {
       chipCandidates: [{ label: "Pro", selected: true }],
       menuControls: [{ label: "Heavy", selected: false }],
       availableOptions: ["Heavy"],
+    });
+  });
+
+  it("does not verify heavy as a match for requested extended", async () => {
+    const runtime = {
+      evaluate: async () => ({
+        result: {
+          value: {
+            actualThinkingTime: "Heavy",
+            diagnostics: {
+              requestedThinkingTime: "extended",
+              normalizedThinkingTime: "extended",
+              chipCandidates: [{ label: "Heavy", selected: true }],
+              menuControls: [],
+              availableOptions: ["Heavy"],
+            },
+          },
+        },
+      }),
+    } as any;
+
+    await expect(verifyThinkingTimeSelection(runtime, "extended")).resolves.toMatchObject({
+      requestedThinkingTime: "extended",
+      normalizedThinkingTime: "extended",
+      matches: false,
+      actualThinkingTime: "Heavy",
     });
   });
 });

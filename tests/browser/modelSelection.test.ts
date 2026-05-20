@@ -4,7 +4,9 @@ import {
   buildComposerSignalMatchersForTest,
   buildModelMatchersLiteralForTest,
   buildModelSelectionExpressionForTest,
+  buildModelVerificationExpressionForTest,
   ensureModelSelection,
+  verifyModelSelection,
 } from "../../src/browser/actions/modelSelection.js";
 
 const expectContains = (arr: string[], value: string) => {
@@ -1659,5 +1661,36 @@ describe("ensureModelSelection composer-pill wait", () => {
         buttonPollMs: 1,
       }),
     ).rejects.toThrow(/Unable to locate the ChatGPT model selector button/);
+  });
+});
+
+describe("model selection verification", () => {
+  it("reports a mismatched selected model before submit", async () => {
+    const runtime = {
+      evaluate: async () => ({
+        result: {
+          value: {
+            requestedModel: "gpt-5.5-pro",
+            matches: false,
+            buttonLabel: "ChatGPT",
+            selectedLabel: "GPT-5.5",
+            selectedTestId: "model-switcher-gpt-5-5",
+            availableOptions: ["GPT-5.5", "GPT-5.5 Pro"],
+          },
+        },
+      }),
+    } as never;
+
+    await expect(verifyModelSelection(runtime, "gpt-5.5-pro")).resolves.toMatchObject({
+      requestedModel: "gpt-5.5-pro",
+      matches: false,
+      selectedLabel: "GPT-5.5",
+    });
+  });
+
+  it("requires Pro in the model verification expression for Pro targets", () => {
+    const expression = buildModelVerificationExpressionForTest("gpt-5.5-pro");
+    expect(expression).toContain("wantsPro && !hasPro");
+    expect(expression).toContain("!wantsPro && hasPro");
   });
 });

@@ -66,6 +66,14 @@ export interface ThinkingControlsDiagnostics {
   availableOptions: string[];
 }
 
+export interface ThinkingTimeVerificationResult {
+  requestedThinkingTime: ThinkingTimeLevel;
+  normalizedThinkingTime: ThinkingTimeLevel;
+  matches: boolean;
+  actualThinkingTime?: string | null;
+  diagnostics: ThinkingControlsDiagnostics;
+}
+
 /**
  * Surfaces the model-picker snapshot captured alongside a failed detection.
  *
@@ -260,6 +268,31 @@ export async function inspectThinkingControls(
   });
   const value = outcome.result?.value as Partial<ThinkingControlsDiagnostics> | undefined;
   return normalizeThinkingControlsDiagnostics(value, level);
+}
+
+export async function verifyThinkingTimeSelection(
+  Runtime: ChromeClient["Runtime"],
+  level: ThinkingTimeLevel,
+): Promise<ThinkingTimeVerificationResult> {
+  const diagnostics = await inspectThinkingControls(Runtime, level);
+  const normalizedLevel = normalizeThinkingTimeLevel(level) ?? level;
+  const selectedControls = [...diagnostics.chipCandidates, ...diagnostics.menuControls]
+    .filter((control) => control.selected)
+    .map((control) => [control.label, control.ariaLabel, control.testId].filter(Boolean).join(" "))
+    .filter(Boolean);
+  const visibleLabels = [
+    ...selectedControls,
+    ...diagnostics.chipCandidates.map((control) =>
+      [control.label, control.ariaLabel, control.testId].filter(Boolean).join(" "),
+    ),
+  ].filter(Boolean);
+  return {
+    requestedThinkingTime: level,
+    normalizedThinkingTime: normalizedLevel,
+    matches: visibleLabels.some((label) => thinkingLabelMatchesLevel(label, normalizedLevel)),
+    actualThinkingTime: visibleLabels[0] ?? null,
+    diagnostics,
+  };
 }
 
 async function evaluateThinkingTimeSelection(
