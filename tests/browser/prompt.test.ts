@@ -97,8 +97,32 @@ describe("assembleBrowserPrompt", () => {
     expect(result.inlineFileCount).toBe(1);
     expect(result.fallback).toEqual(
       expect.objectContaining({
-        composerText: "Explain the bug",
-        attachments: [expect.objectContaining({ path: "/repo/a.txt", displayPath: "a.txt" })],
+        composerText:
+          "Your request is the entire `# MAIN REQUEST` body of text attached here. Treat that attached `# MAIN REQUEST` document as the full request, and use any other attachments as supporting materials.",
+        attachments: [
+          expect.objectContaining({ displayPath: "MAIN_REQUEST.md" }),
+          expect.objectContaining({ path: "/repo/a.txt", displayPath: "a.txt" }),
+        ],
+      }),
+    );
+  });
+
+  test("creates MAIN_REQUEST fallback for prompt-only multiline bodies", async () => {
+    const options = buildOptions({
+      prompt: "Line 1\n\nLine 2",
+      file: [],
+      browserAttachments: "auto",
+    });
+    const result = await assembleBrowserPrompt(options, {
+      cwd: "/repo",
+      readFilesImpl: async () => [],
+    });
+    expect(result.attachmentMode).toBe("inline");
+    expect(result.fallback).toEqual(
+      expect.objectContaining({
+        composerText:
+          "Your request is the entire `# MAIN REQUEST` body of text attached here. Treat that attached `# MAIN REQUEST` document as the full request, and use any other attachments as supporting materials.",
+        attachments: [expect.objectContaining({ displayPath: "MAIN_REQUEST.md" })],
       }),
     );
   });
