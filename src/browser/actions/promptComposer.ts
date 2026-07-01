@@ -90,6 +90,7 @@ export async function insertPromptText(
   const { runtime, input } = deps;
   const normalizedPrompt = normalizePromptText(prompt);
   const readValueFunction = buildComposerReadValueFunction();
+  const prefersStructuredInsert = normalizedPrompt.includes("\n");
 
   await waitForDomReady(runtime, logger, deps.inputTimeoutMs ?? undefined);
   const focusResult = await runtime.evaluate({
@@ -150,22 +151,21 @@ export async function insertPromptText(
 
   await clearFocusedPromptWithKeyboard(input);
 
-  const nativePasteResult = await tryNativeClipboardPaste(
-    deps,
-    normalizedPrompt,
-    readValueFunction,
-  );
-  if (nativePasteResult.inserted) {
-    logger(
-      nativePasteResult.asAttachment
-        ? "Inserted prompt via ChatGPT pasted-text attachment"
-        : "Inserted prompt via native clipboard paste",
-    );
-  }
-
   let hardBreakNonExact = false;
   let hardBreakInserted = false;
-  if (!nativePasteResult.inserted) {
+  let nativePasteResult: {
+    inserted: boolean;
+    asAttachment: boolean;
+    promotedToComposer: boolean;
+    requiresFallback: boolean;
+  } = {
+    inserted: false,
+    asAttachment: false,
+    promotedToComposer: false,
+    requiresFallback: false,
+  };
+
+  if (prefersStructuredInsert) {
     const hardBreakResult = await runtime.evaluate({
       expression: `(() => {
         const inputSelectors = ${JSON.stringify(INPUT_SELECTORS)};
@@ -216,14 +216,43 @@ export async function insertPromptText(
       logger("Inserted prompt via contenteditable hard line breaks");
     } else if (hardBreakNonExact) {
       logger("Inserted prompt via contenteditable hard line breaks with non-exact readback");
-    } else {
-      await input.insertText({ text: normalizedPrompt });
     }
+  }
+
+  if (!hardBreakInserted && hardBreakNonExact) {
+    await clearFocusedPromptWithKeyboard(input);
+  }
+
+  if (!hardBreakInserted) {
+    nativePasteResult = await tryNativeClipboardPaste(deps, normalizedPrompt, readValueFunction);
+    if (nativePasteResult.inserted) {
+      logger(
+        nativePasteResult.promotedToComposer
+          ? "Promoted pasted-text attachment into the composer"
+          : "Inserted prompt via native clipboard paste",
+      );
+    }
+  }
+
+  if (!hardBreakInserted && !nativePasteResult.inserted && !nativePasteResult.requiresFallback) {
+    await input.insertText({ text: normalizedPrompt });
   }
 
   // Some pages (notably ChatGPT when subscriptions/widgets load) need a brief settle
   // before the send button becomes enabled; give it a short breather to avoid races.
   await delay(500);
+
+  if (nativePasteResult.requiresFallback) {
+    await logDomFailure(runtime, logger, "prompt-too-large");
+    throw new BrowserAutomationError(
+      "Prompt was converted into a pasted-text attachment instead of verified composer text.",
+      {
+        stage: "submit-prompt",
+        code: "prompt-too-large",
+        promptLength: normalizedPrompt.length,
+      },
+    );
+  }
 
   const primarySelectorLiteral = JSON.stringify(PROMPT_PRIMARY_SELECTOR);
   const fallbackSelectorLiteral = JSON.stringify(PROMPT_FALLBACK_SELECTOR);
@@ -268,7 +297,7 @@ export async function insertPromptText(
     fallbackValueRaw,
     activeValueRaw,
   );
-  if (composerEmpty && !nativePasteResult.asAttachment) {
+  if (composerEmpty && !nativePasteResult.requiresFallback) {
     logger("Prompt composer was empty after first insert attempt; retrying after refocus.");
     await runtime.evaluate({
       expression: `(() => {
@@ -338,9 +367,7 @@ export async function insertPromptText(
   const observedActive = postVerification.result?.value?.activeValue ?? "";
   if (
     !containsPromptSnippet(observedEditor, observedFallback, observedActive) &&
-    !hardBreakInserted &&
-    !hardBreakNonExact &&
-    !nativePasteResult.asAttachment
+    !nativePasteResult.requiresFallback
   ) {
     await logDomFailure(runtime, logger, "prompt-insert-mismatch");
     throw new Error("Failed to insert the requested prompt text into the composer.");
@@ -354,7 +381,7 @@ export async function insertPromptText(
     promptLength >= 50_000 &&
     observedLength > 0 &&
     observedLength < promptLength - 2_000 &&
-    !nativePasteResult.asAttachment
+    !nativePasteResult.requiresFallback
   ) {
     // Learned: very large prompts can truncate silently; fail fast so we can fall back to file uploads.
     await logDomFailure(runtime, logger, "prompt-too-large");
@@ -374,10 +401,20 @@ async function tryNativeClipboardPaste(
   deps: InsertPromptDeps,
   prompt: string,
   readValueFunction: string,
-): Promise<{ inserted: boolean; asAttachment: boolean }> {
+): Promise<{
+  inserted: boolean;
+  asAttachment: boolean;
+  promotedToComposer: boolean;
+  requiresFallback: boolean;
+}> {
   const { runtime, input, browser } = deps;
   if (!browser || !shouldUseNativePaste(prompt)) {
-    return { inserted: false, asAttachment: false };
+    return {
+      inserted: false,
+      asAttachment: false,
+      promotedToComposer: false,
+      requiresFallback: false,
+    };
   }
   await browser
     .grantPermissions({
@@ -402,7 +439,12 @@ async function tryNativeClipboardPaste(
     | { ok?: boolean; previousText?: string | null }
     | undefined;
   if (!clipboardState?.ok) {
-    return { inserted: false, asAttachment: false };
+    return {
+      inserted: false,
+      asAttachment: false,
+      promotedToComposer: false,
+      requiresFallback: false,
+    };
   }
   await input.dispatchKeyEvent({
     type: "keyDown",
@@ -448,11 +490,85 @@ async function tryNativeClipboardPaste(
     awaitPromise: true,
   });
   const value = result.result?.value as { exact?: boolean; pastedAttachment?: boolean } | undefined;
-  await restoreClipboardText(runtime, clipboardState.previousText);
-  if (value?.pastedAttachment) {
-    return { inserted: true, asAttachment: true };
+  let promotedToComposer = false;
+  let exact = Boolean(value?.exact);
+  if (!exact && value?.pastedAttachment) {
+    const promoted = await tryPromotePastedTextAttachment(runtime, readValueFunction, prompt);
+    promotedToComposer = promoted.promoted;
+    exact = promoted.exact;
   }
-  return { inserted: Boolean(value?.exact), asAttachment: false };
+  await restoreClipboardText(runtime, clipboardState.previousText);
+  if (value?.pastedAttachment && !exact) {
+    return {
+      inserted: false,
+      asAttachment: true,
+      promotedToComposer: false,
+      requiresFallback: true,
+    };
+  }
+  return {
+    inserted: exact,
+    asAttachment: Boolean(value?.pastedAttachment),
+    promotedToComposer,
+    requiresFallback: false,
+  };
+}
+
+async function tryPromotePastedTextAttachment(
+  runtime: ChromeClient["Runtime"],
+  readValueFunction: string,
+  prompt: string,
+): Promise<{ promoted: boolean; exact: boolean }> {
+  const promoteAttempt = await runtime.evaluate({
+    expression: `(() => {
+      ${buildClickDispatcher()}
+      const buttonText = (node) =>
+        [
+          node?.getAttribute?.('aria-label') || '',
+          node?.getAttribute?.('title') || '',
+          node?.textContent || '',
+        ].join(' ').trim();
+      const buttons = Array.from(document.querySelectorAll('button,[role="button"]'));
+      const target = buttons.find((node) =>
+        /show in text field|show in chat|move to text field/i.test(buttonText(node)),
+      );
+      if (!target) {
+        return { clicked: false };
+      }
+      dispatchClickSequence(target);
+      return { clicked: true };
+    })()`,
+    returnByValue: true,
+    awaitPromise: true,
+  });
+  if (!promoteAttempt.result?.value?.clicked) {
+    return { promoted: false, exact: false };
+  }
+  await delay(750);
+  const postPromote = await runtime.evaluate({
+    expression: `(() => {
+      const inputSelectors = ${JSON.stringify(INPUT_SELECTORS)};
+      const prompt = ${JSON.stringify(prompt)};
+      ${readValueFunction}
+      const isVisible = (node) => {
+        if (!node || typeof node.getBoundingClientRect !== 'function') return false;
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const node = inputSelectors
+        .map((selector) => document.querySelector(selector))
+        .filter(Boolean)
+        .find((candidate) => isVisible(candidate)) || null;
+      const value = node ? readValue(node) : '';
+      return { exact: value === prompt, value };
+    })()`,
+    returnByValue: true,
+    awaitPromise: true,
+  });
+  return {
+    promoted: true,
+    exact: Boolean(postPromote.result?.value?.exact),
+  };
 }
 
 async function restoreClipboardText(

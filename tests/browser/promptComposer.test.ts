@@ -138,7 +138,7 @@ describe("promptComposer", () => {
     }
   });
 
-  test("uses native paste attachment path for large multiline prompts", async () => {
+  test("promotes pasted-text attachments back into the composer", async () => {
     const largePrompt = `${"A\nB\n".repeat(5_100)}done`;
     const runtime = {
       evaluate: vi
@@ -147,28 +147,43 @@ describe("promptComposer", () => {
           result: { value: { ready: true, composer: true, fileInput: true } },
         })
         .mockResolvedValueOnce({ result: { value: { focused: true } } })
+        .mockResolvedValueOnce({
+          result: { value: { inserted: false, value: "" } },
+        })
         .mockResolvedValueOnce({ result: { value: { ok: true, previousText: "old clipboard" } } })
         .mockResolvedValueOnce({
           result: { value: { value: "", pastedAttachment: true, exact: false } },
         })
         .mockResolvedValueOnce({
-          result: { value: true },
+          result: { value: { clicked: true } },
+        })
+        .mockResolvedValueOnce({
+          result: { value: { exact: true, value: largePrompt } },
         })
         .mockResolvedValueOnce({
           result: {
             value: {
-              editorText: "",
+              editorText: largePrompt,
               fallbackValue: "",
-              activeValue: "",
+              activeValue: largePrompt,
             },
           },
         })
         .mockResolvedValueOnce({
           result: {
             value: {
-              editorText: "",
+              editorText: largePrompt,
               fallbackValue: "",
-              activeValue: "",
+              activeValue: largePrompt,
+            },
+          },
+        })
+        .mockResolvedValueOnce({
+          result: {
+            value: {
+              editorText: largePrompt,
+              fallbackValue: "",
+              activeValue: largePrompt,
             },
           },
         }),
@@ -207,7 +222,67 @@ describe("promptComposer", () => {
       permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"],
     });
     expect(input.insertText).not.toHaveBeenCalled();
-    expect(logger).toHaveBeenCalledWith("Inserted prompt via ChatGPT pasted-text attachment");
+    expect(logger).toHaveBeenCalledWith("Promoted pasted-text attachment into the composer");
+  });
+
+  test("fails with prompt-too-large when pasted-text attachment cannot be promoted", async () => {
+    const largePrompt = `${"A\nB\n".repeat(5_100)}done`;
+    const runtime = {
+      evaluate: vi
+        .fn()
+        .mockResolvedValueOnce({
+          result: { value: { ready: true, composer: true, fileInput: true } },
+        })
+        .mockResolvedValueOnce({ result: { value: { focused: true } } })
+        .mockResolvedValueOnce({
+          result: { value: { inserted: false, value: "" } },
+        })
+        .mockResolvedValueOnce({ result: { value: { ok: true, previousText: "old clipboard" } } })
+        .mockResolvedValueOnce({
+          result: { value: { value: "", pastedAttachment: true, exact: false } },
+        })
+        .mockResolvedValueOnce({
+          result: { value: { clicked: false } },
+        })
+        .mockResolvedValueOnce({
+          result: { value: true },
+        }),
+    } as unknown as {
+      evaluate: (args: {
+        expression: string;
+        returnByValue?: boolean;
+        awaitPromise?: boolean;
+      }) => Promise<unknown>;
+    };
+    const input = {
+      insertText: vi.fn().mockResolvedValue(undefined),
+      dispatchKeyEvent: vi.fn().mockResolvedValue(undefined),
+    } as unknown as {
+      insertText: ReturnType<typeof vi.fn>;
+      dispatchKeyEvent: ReturnType<typeof vi.fn>;
+    };
+    const browser = {
+      grantPermissions: vi.fn().mockResolvedValue(undefined),
+    } as unknown as {
+      grantPermissions: ReturnType<typeof vi.fn>;
+    };
+    const logger = vi.fn() as unknown as BrowserLogger;
+
+    await expect(
+      insertPromptText(
+        {
+          runtime: runtime as never,
+          input: input as never,
+          browser: browser as never,
+          inputTimeoutMs: 1_000,
+        },
+        largePrompt,
+        logger,
+      ),
+    ).rejects.toMatchObject({
+      name: "BrowserAutomationError",
+      details: expect.objectContaining({ code: "prompt-too-large" }),
+    });
   });
 
   test("tries native clipboard paste before editor-specific insertion", async () => {
