@@ -20,6 +20,8 @@ import { createStoredZip } from "./zipBundle.js";
 const DEFAULT_BROWSER_INLINE_CHAR_BUDGET = 60_000;
 const MAX_BROWSER_ATTACHMENTS = 10;
 const MAX_BROWSER_ZIP_BUNDLE_BYTES = 128 * 1024 * 1024;
+const MAIN_REQUEST_ATTACHMENT_NAME = "MAIN_REQUEST.md";
+const MAIN_REQUEST_HEADING = "# MAIN REQUEST";
 
 const MEDIA_EXTENSIONS = new Set([
   ".mp4",
@@ -333,6 +335,9 @@ export async function assembleBrowserPrompt(
           ? inlinePlan
           : uploadPlan;
 
+  const baseComposerText = baseComposerSections
+    .filter((section) => hasPromptText(section))
+    .join("\n\n");
   const textBundleSources: BrowserBundleSource[] = sections.map((section) => ({
     absolutePath: section.absolutePath,
     displayPath: section.displayPath,
@@ -409,8 +414,13 @@ export async function assembleBrowserPrompt(
   }
 
   let fallback: BrowserPromptArtifacts["fallback"] = null;
-  if (attachmentsPolicy === "auto" && selectedPlan.mode === "inline" && sections.length > 0) {
-    const fallbackComposerText = baseComposerSections.join("\n\n");
+  const shouldPrepareFallback =
+    attachmentsPolicy === "auto" &&
+    selectedPlan.mode === "inline" &&
+    (sections.length > 0 ||
+      (hasPromptText(baseComposerText) &&
+        (baseComposerText.includes("\n") || baseComposerText.length >= 8_000)));
+  if (shouldPrepareFallback) {
     const fallbackAttachments = [...uploadPlan.attachments, ...rawUploadAttachments];
     let fallbackBundled: BrowserBundleMetadata | null = null;
     const fallbackBundleFormat = resolveBrowserBundleFormat(bundleFormat, {
@@ -435,12 +445,23 @@ export async function assembleBrowserPrompt(
       }
       fallbackBundled = writtenBundle.metadata;
     }
-    assertAttachmentCount(fallbackAttachments, fallbackBundleFormat);
-    fallback = {
-      composerText: fallbackComposerText,
-      attachments: fallbackAttachments,
-      bundled: fallbackBundled,
-    };
+    if (hasPromptText(baseComposerText)) {
+      const mainRequestAttachment = await createMainRequestAttachment(baseComposerText);
+      const fallbackOutputAttachments = [mainRequestAttachment, ...fallbackAttachments];
+      assertAttachmentCount(fallbackOutputAttachments, fallbackBundleFormat);
+      fallback = {
+        composerText: buildMainRequestStubPrompt(),
+        attachments: fallbackOutputAttachments,
+        bundled: fallbackBundled,
+      };
+    } else if (fallbackAttachments.length > 0) {
+      assertAttachmentCount(fallbackAttachments, fallbackBundleFormat);
+      fallback = {
+        composerText: "",
+        attachments: fallbackAttachments,
+        bundled: fallbackBundled,
+      };
+    }
   }
 
   return {
@@ -460,5 +481,21 @@ export async function assembleBrowserPrompt(
           : selectedPlan.mode,
     fallback,
     bundled,
+  };
+}
+
+function buildMainRequestStubPrompt(): string {
+  return "Your request is the entire `# MAIN REQUEST` body of text attached here. Treat that attached `# MAIN REQUEST` document as the full request, and use any other attachments as supporting materials.";
+}
+
+async function createMainRequestAttachment(requestBody: string): Promise<BrowserAttachment> {
+  const requestDir = await fs.mkdtemp(path.join(os.tmpdir(), "oracle-browser-request-"));
+  const requestPath = path.join(requestDir, MAIN_REQUEST_ATTACHMENT_NAME);
+  const content = `${MAIN_REQUEST_HEADING}\n\n${requestBody.replace(/\s+$/u, "")}\n`;
+  await fs.writeFile(requestPath, content, "utf8");
+  return {
+    path: requestPath,
+    displayPath: MAIN_REQUEST_ATTACHMENT_NAME,
+    sizeBytes: Buffer.byteLength(content, "utf8"),
   };
 }
