@@ -2490,6 +2490,67 @@ describe("waitForAttachmentVisible", () => {
   });
 });
 
+describe("clearComposerAttachments", () => {
+  test("waits when a generic attachment chip has no recognized remove button", async () => {
+    vi.useFakeTimers();
+    class FakeElement {
+      parentElement: FakeElement | null = null;
+      textContent = "";
+
+      getBoundingClientRect() {
+        return { width: 10, height: 10 };
+      }
+
+      closest() {
+        return this;
+      }
+
+      querySelectorAll(selector: string) {
+        const normalized = selector.toLowerCase();
+        if (
+          normalized.includes('data-testid*="attachment"') &&
+          normalized.includes('data-testid*="chip"')
+        ) {
+          return [this];
+        }
+        return [];
+      }
+
+      querySelector() {
+        return null;
+      }
+    }
+
+    const root = new FakeElement();
+    const document = {
+      body: root,
+      querySelectorAll: () => [root],
+      querySelector: () => root,
+    };
+    const runtime = {
+      evaluate: vi.fn(async ({ expression }: { expression: string }) => ({
+        result: {
+          value: new Script(expression).runInNewContext({
+            document,
+            HTMLElement: FakeElement,
+            HTMLButtonElement: FakeElement,
+            HTMLInputElement: FakeElement,
+          }),
+        },
+      })),
+    } as unknown as ChromeClient["Runtime"];
+
+    try {
+      const promise = attachments.clearComposerAttachments(runtime, 300);
+      const assertion = expect(promise).rejects.toThrow(/Existing attachments still present/);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("waitForAttachmentCompletion", () => {
   test("resolves when composer ready", async () => {
     const evaluate = vi.fn();
