@@ -2,7 +2,6 @@
 import "dotenv/config";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { once } from "node:events";
 import { createInterface } from "node:readline/promises";
 import { Command, Option } from "commander";
 import type { OptionValues } from "commander";
@@ -88,6 +87,7 @@ import {
   isTraceValueFlag,
 } from "../src/cli/perfTrace.js";
 import { resolveBrowserFollowupReference } from "../src/cli/followup.js";
+import { buildBrowserConfig } from "../src/cli/browserConfig.js";
 import { extractChatgptImagesFromConfiguredBrowser } from "../src/browser/chatgpt/imageArtifacts.js";
 import { extractChatgptSandboxArtifactsFromConfiguredBrowser } from "../src/browser/chatgpt/sandboxArtifacts.js";
 import {

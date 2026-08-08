@@ -3,8 +3,8 @@ import type { ThinkingTimeLevel } from "../../src/oracle/types.js";
 import {
   buildThinkingTimeExpressionForTest,
   ensureThinkingTime,
-  ensureThinkingTimeIfAvailable,
   inferThinkingTargetModelKindForTest,
+  inspectThinkingControls,
 } from "../../src/browser/actions/thinkingTime.js";
 
 describe("browser thinking-time selection expression", () => {
@@ -17,7 +17,6 @@ describe("browser thinking-time selection expression", () => {
     expect(expression).toContain('role=\\"menuitem\\"');
     expect(expression).toContain('role=\\"menuitemradio\\"');
     expect(expression).toContain("normalize");
-    expect(expression).toContain("thinkingLevelAliases");
     expect(expression).toContain("extended");
     expect(expression).toContain("standard");
   });
@@ -2723,7 +2722,7 @@ describe("browser thinking-time selection expression", () => {
         result: {
           value: {
             requestedThinkingTime: "extended",
-            normalizedThinkingTime: "heavy",
+            normalizedThinkingTime: "extended",
             chipCandidates: [{ label: "Pro", selected: true }],
             menuControls: [{ label: "Heavy", selected: false }],
             availableOptions: ["Heavy"],
@@ -2734,7 +2733,7 @@ describe("browser thinking-time selection expression", () => {
 
     await expect(inspectThinkingControls(runtime, "extended")).resolves.toMatchObject({
       requestedThinkingTime: "extended",
-      normalizedThinkingTime: "heavy",
+      normalizedThinkingTime: "extended",
       chipCandidates: [{ label: "Pro", selected: true }],
       menuControls: [{ label: "Heavy", selected: false }],
       availableOptions: ["Heavy"],

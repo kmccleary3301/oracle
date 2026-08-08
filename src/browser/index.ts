@@ -47,7 +47,6 @@ import {
 } from "./pageActions.js";
 import { INPUT_SELECTORS } from "./constants.js";
 import {
-  ensureThinkingTime,
   ensureThinkingTimeIfAvailable,
   type ThinkingTimeSelectionResult,
 } from "./actions/thinkingTime.js";
@@ -60,7 +59,7 @@ import {
 } from "./actions/deepResearch.js";
 import { estimateTokenCount, withRetries, delay } from "./utils.js";
 import { formatElapsed } from "../oracle/format.js";
-import type { BrowserModelSelectionEvidence } from "../sessionStore.js";
+import type { BrowserModelSelectionEvidence, BrowserRunWarning } from "../sessionStore.js";
 import { CHATGPT_URL, DEFAULT_MODEL_STRATEGY } from "./constants.js";
 import type { LaunchedChrome } from "chrome-launcher";
 import { BrowserAutomationError } from "../oracle/errors.js";
@@ -235,7 +234,16 @@ export function classifyPreservedBrowserErrorForTest(
 ): PreservedBrowserErrorKind | null {
   return classifyPreservedBrowserError(error, headless);
 }
-const MARKDOWN_CAPTURE_TIMEOUT_MS = 10_000;
+
+function createBrowserRunWarning(code: string, message: string): BrowserRunWarning {
+  return { code, severity: "warning", message };
+}
+
+function shouldRetryAttachmentUploadError(message: string): boolean {
+  return /too many files|too large|exceeds?|unsupported file|aggregate limit|inline limit|limit/i.test(
+    message,
+  );
+}
 
 async function uploadBrowserAttachmentsWithRetry(
   deps: {
@@ -610,9 +618,9 @@ async function collectPostTurnSandboxArtifacts(
   sandboxArtifacts: ChatgptSandboxArtifactRef[];
   newSandboxArtifacts: ChatgptSandboxArtifactRef[];
   downloadedSandboxArtifacts: ChatgptDownloadedSandboxArtifact[];
-  warnings: string[];
+  warnings: BrowserRunWarning[];
 }> {
-  const warnings: string[] = [];
+  const warnings: BrowserRunWarning[] = [];
   try {
     const baselineArtifacts = options.baselineArtifacts ?? [];
     const newSandboxArtifacts = await waitForNewSandboxArtifactRefsFromRuntime(
@@ -626,7 +634,12 @@ async function collectPostTurnSandboxArtifacts(
       answerMessageId: options.answerMessageId,
     });
     if (newSandboxArtifacts.length > 0 && anchoredSandboxArtifacts.length === 0) {
-      warnings.push("artifact_diff_unanchored_stale_candidates");
+      warnings.push(
+        createBrowserRunWarning(
+          "artifact_diff_unanchored_stale_candidates",
+          "New sandbox artifacts could not be anchored to the current assistant turn.",
+        ),
+      );
     }
     if (anchoredSandboxArtifacts.length === 0) {
       return {
@@ -647,7 +660,10 @@ async function collectPostTurnSandboxArtifacts(
     );
     if (downloadedSandboxArtifacts.length === 0) {
       warnings.push(
-        "Assistant response exposed sandbox artifact labels, but no downloadable files resolved.",
+        createBrowserRunWarning(
+          "sandbox_artifact_download_unresolved",
+          "Assistant response exposed sandbox artifact labels, but no downloadable files resolved.",
+        ),
       );
     } else {
       logger(
@@ -663,7 +679,12 @@ async function collectPostTurnSandboxArtifacts(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger(`[browser] Sandbox artifact collection failed: ${message}`);
-    warnings.push(`Sandbox artifact collection failed: ${message}`);
+    warnings.push(
+      createBrowserRunWarning(
+        "sandbox_artifact_collection_failed",
+        `Sandbox artifact collection failed: ${message}`,
+      ),
+    );
     return {
       sandboxArtifacts: [],
       newSandboxArtifacts: [],
@@ -1355,6 +1376,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
   let answerText = "";
   let answerMarkdown = "";
   let answerHtml = "";
+  let answerMessageId: string | null = null;
   let runStatus: "attempted" | "complete" = "attempted";
   let connectionClosedUnexpectedly = false;
   let stopThinkingMonitor: (() => void) | null = null;
@@ -1449,10 +1471,6 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     const raceWithDisconnect = <T>(promise: Promise<T>): Promise<T> =>
       Promise.race([promise, disconnectPromise]);
     const { Network, Page, Runtime, Input, DOM, Target, Browser } = client;
-
-    if (!config.headless && config.hideWindow) {
-      await hideChromeWindow(chrome, logger);
-    }
 
     const domainEnablers = [Network.enable({}), Page.enable(), Runtime.enable()];
     if (DOM && typeof DOM.enable === "function") {
@@ -1725,16 +1743,17 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         withRetries(
           () => ensureThinkingTimeIfAvailable(Runtime, thinkingTime, logger, thinkingTargetModel),
           {
-          retries: 2,
-          delayMs: 300,
-          onRetry: (attempt, error) => {
-            if (options.verbose) {
-              logger(
-                `[retry] Thinking time (${thinkingTime}) attempt ${attempt + 1}: ${error instanceof Error ? error.message : error}`,
-              );
-            }
+            retries: 2,
+            delayMs: 300,
+            onRetry: (attempt, error) => {
+              if (options.verbose) {
+                logger(
+                  `[retry] Thinking time (${thinkingTime}) attempt ${attempt + 1}: ${error instanceof Error ? error.message : error}`,
+                );
+              }
+            },
           },
-        }),
+        ),
       );
       if (thinkingTimeSelection.fallbackUsed && config.thinkingFallback === "fail") {
         throw new ThinkingTimeSelectionError(thinkingTimeSelection);
@@ -1768,6 +1787,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         generatedBundle: a.generatedBundle === true,
       }));
       let inputOnlyAttachments = false;
+      const promptAlreadyInserted = submissionAttachments.length > 0;
       await raceWithDisconnect(clearPromptComposer(Runtime, logger));
       await raceWithDisconnect(ensurePromptReady(Runtime, config.inputTimeoutMs, logger));
       if (submissionAttachments.length > 0) {
@@ -1786,7 +1806,6 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
           prompt,
           logger,
         );
-        promptAlreadyInserted = true;
         const baseTimeout = config.inputTimeoutMs ?? 30_000;
         const uploadResult = await uploadBrowserAttachmentsWithRetry(
           {
@@ -1822,7 +1841,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         );
         await raceWithDisconnect(ensurePromptReady(Runtime, config.inputTimeoutMs, logger));
         logger(
-          `Prompt textarea ready (after Deep Research activation, ${prompt.length.toLocaleString()} chars queued)`
+          `Prompt textarea ready (after Deep Research activation, ${prompt.length.toLocaleString()} chars queued)`,
         );
       }
       let baselineTurns = await readConversationTurnCount(Runtime, logger);
@@ -1837,6 +1856,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         attachmentTimeoutMs: config.attachmentTimeoutMs ?? undefined,
         baselineTurns: baselineTurns ?? undefined,
         attachmentNames: attachmentExpectations,
+        promptAlreadyInserted,
         onPromptSubmitted: markPromptSubmitted,
       };
       const deepResearchTargetBaseline =
@@ -1881,8 +1901,6 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
           }
         }
       }
-      // Reattach needs a /c/ URL; ChatGPT can update it late, so poll in the background.
-      scheduleConversationHint("post-submit", config.timeoutMs ?? 90 * 60_000);
       return {
         baselineTurns,
         baselineAssistantText,
@@ -1954,7 +1972,10 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         controllerPid: process.pid,
         thinkingTimeSelection,
         warnings: [
-          "Prompt submitted without waiting for the assistant response; recover the final answer from the conversation URL later.",
+          createBrowserRunWarning(
+            "browser_return_after_submit",
+            "Prompt submitted without waiting for the assistant response; recover the final answer from the conversation URL later.",
+          ),
         ],
       };
     }
@@ -2298,6 +2319,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         expectedConversationId(),
       ).catch(() => null);
       const finalText = typeof finalSnapshot?.text === "string" ? finalSnapshot.text.trim() : "";
+      answerMessageId = finalSnapshot?.messageId ?? turnAnswer.meta.messageId ?? null;
       if (finalText && finalText !== turnPrompt.trim()) {
         const trimmedMarkdown = turnAnswerMarkdown.trim();
         const finalIsEcho = promptEchoMatcher ? promptEchoMatcher.isEcho(finalText) : false;
@@ -2525,7 +2547,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     const sandboxArtifactResult = await collectPostTurnSandboxArtifacts(Runtime, logger, {
       baselineArtifacts: baselineSandboxArtifacts,
       baselineTurns,
-      answerMessageId: answer.meta.messageId,
+      answerMessageId,
       conversationUrl: lastUrl,
       outputDir: config.sandboxArtifactsOutputDir,
     });
@@ -3211,6 +3233,7 @@ async function runRemoteBrowserMode(
   let answerText = "";
   let answerMarkdown = "";
   let answerHtml = "";
+  let answerMessageId: string | null = null;
   let connectionClosedUnexpectedly = false;
   let runStatus: "attempted" | "complete" = "attempted";
   let stopThinkingMonitor: (() => void) | null = null;
@@ -3415,11 +3438,11 @@ async function runRemoteBrowserMode(
       );
       const baselineAssistantText =
         typeof baselineSnapshot?.text === "string" ? baselineSnapshot.text.trim() : "";
-      const attachmentNames = submissionAttachments.map((a) => path.basename(a.path));
       const attachmentExpectations = submissionAttachments.map((a) => ({
         name: path.basename(a.path),
         generatedBundle: a.generatedBundle === true,
       }));
+      const promptAlreadyInserted = submissionAttachments.length > 0;
       await clearPromptComposer(Runtime, logger);
       await ensurePromptReady(Runtime, config.inputTimeoutMs, logger);
       if (submissionAttachments.length > 0) {
@@ -3438,7 +3461,6 @@ async function runRemoteBrowserMode(
           prompt,
           logger,
         );
-        promptAlreadyInserted = true;
         const baseTimeout = config.inputTimeoutMs ?? 30_000;
         await uploadBrowserAttachmentsWithRetry(
           {
@@ -3485,6 +3507,7 @@ async function runRemoteBrowserMode(
         attachmentTimeoutMs: config.attachmentTimeoutMs ?? undefined,
         baselineTurns: baselineTurns ?? undefined,
         attachmentNames: attachmentExpectations,
+        promptAlreadyInserted,
         onPromptSubmitted: markPromptSubmitted,
       };
       const deepResearchTargetBaseline =
@@ -3506,6 +3529,7 @@ async function runRemoteBrowserMode(
       return {
         baselineTurns,
         baselineAssistantText,
+        baselineSandboxArtifacts,
         deepResearchTargetKeys: deepResearchTargetBaseline?.targetKeys,
         deepResearchTargetBaselineCaptured: deepResearchTargetBaseline?.captured,
       };
@@ -3518,6 +3542,7 @@ async function runRemoteBrowserMode(
 
     let baselineTurns: number | null = null;
     let baselineAssistantText: string | null = null;
+    let baselineSandboxArtifacts: ChatgptSandboxArtifactRef[] = [];
     let deepResearchTargetKeys: string[] = [];
     let deepResearchTargetBaselineCaptured = false;
     const submission = await runSubmissionWithRecovery({
@@ -3534,6 +3559,7 @@ async function runRemoteBrowserMode(
     });
     baselineTurns = submission.baselineTurns;
     baselineAssistantText = submission.baselineAssistantText;
+    baselineSandboxArtifacts = submission.baselineSandboxArtifacts ?? [];
     deepResearchTargetKeys = submission.deepResearchTargetKeys ?? [];
     deepResearchTargetBaselineCaptured = submission.deepResearchTargetBaselineCaptured ?? false;
     const imageArtifactMinTurnIndex = baselineTurns;
@@ -3628,11 +3654,13 @@ async function runRemoteBrowserMode(
         controllerPid: process.pid,
         thinkingTimeSelection,
         warnings: [
-          "Prompt submitted without waiting for the assistant response; recover the final answer from the conversation URL later.",
+          createBrowserRunWarning(
+            "browser_return_after_submit",
+            "Prompt submitted without waiting for the assistant response; recover the final answer from the conversation URL later.",
+          ),
         ],
       };
     }
-    stopThinkingMonitor = startThinkingStatusMonitor(Runtime, logger, options.verbose ?? false);
     // Helper to normalize text for echo detection (collapse whitespace, lowercase)
     const normalizeForComparison = (text: string): string =>
       text.toLowerCase().replace(/\s+/g, " ").trim();
@@ -3892,6 +3920,7 @@ async function runRemoteBrowserMode(
         expectedConversationId(),
       ).catch(() => null);
       const finalText = typeof finalSnapshot?.text === "string" ? finalSnapshot.text.trim() : "";
+      answerMessageId = finalSnapshot?.messageId ?? turnAnswer.meta.messageId ?? null;
       if (
         finalText &&
         finalText !== turnAnswerMarkdown.trim() &&
@@ -4078,7 +4107,7 @@ async function runRemoteBrowserMode(
     const sandboxArtifactResult = await collectPostTurnSandboxArtifacts(Runtime, logger, {
       baselineArtifacts: baselineSandboxArtifacts,
       baselineTurns,
-      answerMessageId: answer.meta.messageId,
+      answerMessageId,
       conversationUrl: lastUrl,
       outputDir: config.sandboxArtifactsOutputDir,
     });
@@ -4290,7 +4319,7 @@ async function waitForAssistantResponseWithReload(
   minTurnIndex?: number,
   expectedConversationId?: string,
 ) {
-  const deadline = Date.now() + Math.max(1, timeoutMs);
+  let deadline = Date.now() + Math.max(1, timeoutMs);
   let attempt = 0;
   let lastError: unknown;
   while (Date.now() < deadline) {
@@ -4309,7 +4338,7 @@ async function waitForAssistantResponseWithReload(
       );
     } catch (error) {
       lastError = error;
-      if (!shouldReloadAfterAssistantError(error) || Date.now() >= deadline) {
+      if (!shouldReloadAfterAssistantError(error) || (attempt > 0 && Date.now() >= deadline)) {
         throw error;
       }
       const conversationUrl = await readConversationUrl(Runtime);
@@ -4323,25 +4352,13 @@ async function waitForAssistantResponseWithReload(
         requirePromptReady: false,
         expectedConversationUrl: conversationUrl,
       });
+      if (Date.now() >= deadline) {
+        deadline = Date.now() + Math.max(1, timeoutMs);
+      }
       attempt += 1;
     }
   }
   throw lastError instanceof Error ? lastError : new Error("Assistant response timed out");
-}
-
-async function refreshChatgptConversationView(
-  Runtime: ChromeClient["Runtime"],
-  Page: ChromeClient["Page"],
-  logger: BrowserLogger,
-): Promise<string | null> {
-  const conversationUrl = await readConversationUrl(Runtime);
-  if (!conversationUrl || !isConversationUrl(conversationUrl)) {
-    return null;
-  }
-  logger("Refreshing ChatGPT conversation view before retrying response capture");
-  await Page.navigate({ url: conversationUrl });
-  await delay(1_500);
-  return conversationUrl;
 }
 
 function shouldReloadAfterAssistantError(error: unknown): boolean {

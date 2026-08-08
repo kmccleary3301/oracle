@@ -87,6 +87,7 @@ export async function listChatgptProjects(
     remoteChrome.port,
     logger,
     config.chatgptUrl ?? config.url ?? CHATGPT_URL,
+    undefined,
     { maxTabs: config.remoteChromeMaxTabs },
   );
   const client = connection.client;
@@ -128,6 +129,7 @@ export async function readChatgptProject(
     remoteChrome.port,
     logger,
     options.projectUrl,
+    undefined,
     { maxTabs: config.remoteChromeMaxTabs },
   );
   const client = connection.client;
@@ -187,6 +189,7 @@ export async function createChatgptProject(
     remoteChrome.port,
     logger,
     config.chatgptUrl ?? config.url ?? CHATGPT_URL,
+    undefined,
     { maxTabs: config.remoteChromeMaxTabs },
   );
   const client = connection.client;
@@ -265,6 +268,7 @@ export async function planChatgptConversationDelete(
     remoteChrome.port,
     logger,
     options.conversationUrl,
+    undefined,
     { maxTabs: config.remoteChromeMaxTabs },
   );
   const client = connection.client;
@@ -334,6 +338,7 @@ export async function deleteChatgptConversation(
     remoteChrome.port,
     logger,
     options.conversationUrl,
+    undefined,
     { maxTabs: config.remoteChromeMaxTabs },
   );
   const client = connection.client;
@@ -420,6 +425,7 @@ export async function moveChatgptConversationToProject(
     remoteChrome.port,
     logger,
     options.conversationUrl,
+    undefined,
     { maxTabs: config.remoteChromeMaxTabs },
   );
   const client = connection.client;
@@ -519,6 +525,7 @@ export async function renameChatgptProject(
     remoteChrome.port,
     logger,
     options.projectUrl,
+    undefined,
     { maxTabs: config.remoteChromeMaxTabs },
   );
   const client = connection.client;

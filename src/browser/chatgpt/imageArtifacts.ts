@@ -132,6 +132,7 @@ export async function extractChatgptImagesFromConfiguredBrowser(
     remoteChrome.port,
     logger,
     options.conversationUrl,
+    undefined,
     { maxTabs: config.remoteChromeMaxTabs },
   );
   const client = connection.client;

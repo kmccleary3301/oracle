@@ -154,8 +154,7 @@ export function resolveBrowserConfig(
       config?.remoteChromeBrowserWSEndpoint ?? DEFAULT_BROWSER_CONFIG.remoteChromeBrowserWSEndpoint,
     remoteChromeProfileRoot:
       config?.remoteChromeProfileRoot ?? DEFAULT_BROWSER_CONFIG.remoteChromeProfileRoot,
-    remoteChromeMaxTabs:
-      config?.remoteChromeMaxTabs ?? DEFAULT_BROWSER_CONFIG.remoteChromeMaxTabs,
+    remoteChromeMaxTabs: config?.remoteChromeMaxTabs ?? DEFAULT_BROWSER_CONFIG.remoteChromeMaxTabs,
     thinkingTime: config?.thinkingTime,
     thinkingFallback: config?.thinkingFallback ?? DEFAULT_BROWSER_CONFIG.thinkingFallback,
     researchMode,

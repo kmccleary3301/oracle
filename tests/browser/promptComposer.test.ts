@@ -6,10 +6,6 @@ import {
   insertPromptText,
   submitPrompt,
 } from "../../src/browser/actions/promptComposer.js";
-import {
-  CONVERSATION_TURN_CONTAINER_SELECTOR,
-  CONVERSATION_TURN_SELECTOR,
-} from "../../src/browser/constants.js";
 import type { BrowserLogger } from "../../src/browser/types.js";
 
 describe("promptComposer", () => {

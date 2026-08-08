@@ -248,6 +248,7 @@ function buildModelSelectionExpression(
     const wantsPro = normalizedTarget.includes(' pro') || normalizedTarget.endsWith(' pro') || normalizedTokens.includes('pro');
     const wantsInstant = normalizedTarget.includes('instant');
     const wantsThinking = normalizedTarget.includes('thinking');
+    const latestVersion = '5-6';
     const targetUsesCurrentGpt55Alias =
       desiredVersion === '5-5' || normalizedTarget === 'pro' || normalizedTarget === 'chatgpt pro';
     const labelHasProWord = (label) => label === 'pro' || label.startsWith('pro ') || label.includes(' pro ') || label.endsWith(' pro');
@@ -321,7 +322,7 @@ function buildModelSelectionExpression(
       return Array.from(document.querySelectorAll('button.__composer-pill')).find(looksLikeModelPill) ?? null;
     };
 
-    const closeMenu = () => {
+    const closeMenu = async () => {
       const dialogCloseButton = document.querySelector(
         '[role="dialog"] [data-testid="close-button"]',
       );
@@ -622,7 +623,6 @@ function buildModelSelectionExpression(
     }
 
     let lastPointerClick = 0;
-    let selectionAttempted = false;
     const pointerClick = () => {
       if (dispatchClickSequence(button)) {
         lastPointerClick = performance.now();
@@ -1025,7 +1025,7 @@ function buildModelSelectionExpression(
     const submenuKey = (normalizedText, testid) =>
       normalizeText(testid ?? '') + '|' + normalizedText;
 
-    const findBestOption = () => {
+    const findBestOption = (selectedOnly = false) => {
       // Walk through every menu item and keep whichever earns the highest score.
       let bestMatch = null;
       const menus = queryPickerMenus();
@@ -1038,6 +1038,9 @@ function buildModelSelectionExpression(
           const text = option.textContent ?? '';
           const normalizedText = normalizeText(text);
           const testid = option.getAttribute('data-testid') ?? '';
+          if (selectedOnly && !canTrustSelectedOption(option, normalizedText, testid)) {
+            continue;
+          }
           const optionSubmenuKey = submenuKey(normalizedText, testid);
           if (isSubmenuOption(option, testid) && openedSubmenuKeys.has(optionSubmenuKey)) {
             continue;
@@ -1175,7 +1178,7 @@ function buildModelSelectionExpression(
         if (selectedMatch && selectedMatch.score > 0 && (!match || selectedMatch.score >= match.score)) {
           await closeMenu();
           resolve({
-            status: selectionAttempted ? 'switched' : 'already-selected',
+            status: clickedTargetOption ? 'switched' : 'already-selected',
             label: getOptionLabel(selectedMatch.node) || selectedMatch.label,
           });
           return;
@@ -1186,7 +1189,7 @@ function buildModelSelectionExpression(
             canTrustSelectedOption(match.node, match.normalizedText, match.testid)
           ) {
             const resolvedLabel = getResolvedLabel(match.label);
-            closeMenu();
+            await closeMenu();
             resolve({
               status: clickedTargetOption ? 'switched' : 'already-selected',
               label: resolvedLabel,
@@ -1207,10 +1210,10 @@ function buildModelSelectionExpression(
           clickedTargetOption = true;
           dispatchClickSequence(match.node);
           // Wait for the selected model signal to settle before reopening the picker.
-          waitForTargetSelection(previousButtonLabel, previousComposerSignal).then((selectionSettled) => {
+          waitForTargetSelection(previousButtonLabel, previousComposerSignal).then(async (selectionSettled) => {
             if (selectionSettled === 'target') {
               const resolvedLabel = getResolvedLabel(match.label);
-              closeMenu();
+              await closeMenu();
               resolve({ status: 'switched', label: resolvedLabel });
               return;
             }

@@ -1,7 +1,7 @@
 import { rm } from "node:fs/promises";
 import net from "node:net";
-import { execFile, spawn } from "node:child_process";
-import { promisify } from "node:util";
+import os from "node:os";
+import { spawn } from "node:child_process";
 import CDP from "chrome-remote-interface";
 import { launch, Launcher, type LaunchedChrome } from "chrome-launcher";
 import type { BrowserLogger, ResolvedBrowserConfig, ChromeClient } from "./types.js";
@@ -15,8 +15,6 @@ import {
   pruneRemoteChromeTargets,
   recordRemoteChromeTarget,
 } from "./remoteChromeTabs.js";
-
-const execFileAsync = promisify(execFile);
 
 export async function launchChrome(
   config: ResolvedBrowserConfig,
@@ -221,10 +219,14 @@ export async function connectToRemoteChrome(
         `Failed to close unused remote Chrome tab ${targetId}: ${message}`,
     });
     if (targetConnection) {
-      await recordRemoteChromeTarget(host, port, targetConnection.targetId, targetUrl).catch((error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        logger(`[tabs] failed to record remote Chrome tab ${targetConnection.targetId}: ${message}`);
-      });
+      await recordRemoteChromeTarget(host, port, targetConnection.targetId, targetUrl).catch(
+        (error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          logger(
+            `[tabs] failed to record remote Chrome tab ${targetConnection.targetId}: ${message}`,
+          );
+        },
+      );
       return {
         client: targetConnection.client,
         targetId: targetConnection.targetId,
@@ -1067,35 +1069,12 @@ async function waitForTcpPort(host: string, port: number, timeoutMs: number): Pr
   throw new Error(`Timed out waiting for TCP ${host}:${port}: ${lastError}`);
 }
 
-function resolveRemoteDebugHost(): string | null {
-  const override =
-    process.env.ORACLE_BROWSER_REMOTE_DEBUG_HOST?.trim() || process.env.WSL_HOST_IP?.trim();
-  if (override) {
-    return override;
-  }
-  if (!isWsl()) {
-    return null;
-  }
-  try {
-    const resolv = readFileSync("/etc/resolv.conf", "utf8");
-    for (const line of resolv.split("\n")) {
-      const match = line.match(/^nameserver\s+([0-9.]+)/);
-      if (match?.[1]) {
-        return match[1];
-      }
-    }
-  } catch {
-    // ignore; fall back to localhost
-  }
-  return null;
-}
-
 function isWsl(): boolean {
-  if (process.platform !== "linux") {
-    return false;
-  }
   if (process.env.WSL_DISTRO_NAME) {
     return true;
+  }
+  if (process.platform !== "linux") {
+    return false;
   }
   const release = os.release();
   return release.toLowerCase().includes("microsoft");

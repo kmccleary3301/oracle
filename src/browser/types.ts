@@ -26,6 +26,7 @@ export type BrowserLogger = ((message: string) => void) & {
 
 export interface BrowserAttachment {
   path: string;
+  hostPaths?: string[];
   displayPath: string;
   sizeBytes?: number;
   generatedBundle?: boolean;
@@ -209,7 +210,6 @@ export interface BrowserRunResult {
   newSandboxArtifacts?: ChatgptSandboxArtifactRef[];
   downloadedSandboxArtifacts?: ChatgptDownloadedSandboxArtifact[];
   thinkingTimeSelection?: ThinkingTimeSelectionResult;
-  warnings?: string[];
 }
 
 export type ResolvedBrowserConfig = Required<

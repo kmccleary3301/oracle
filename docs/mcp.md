@@ -67,6 +67,7 @@ The MCP response includes `structuredContent.images[]` with the saved file path,
 - Behavior: manages the ChatGPT Project Sources tab through local browser automation. v1 is intentionally append-only: it can list existing sources and add files, but it cannot delete, replace, or sync.
 - Safety: `add` requires `confirmMutation: true` unless `dryRun: true`. This keeps agent callers from mutating a persistent ChatGPT Project by accident.
 - Workflow: use this when Claude Code, Codex, or another MCP host needs a durable shared context file in a ChatGPT Project. Use `consult` when you want an actual model answer.
+
 ### Long-running ChatGPT browser jobs
 
 Use the async tools for ChatGPT Pro, image generation/editing, or any turn that

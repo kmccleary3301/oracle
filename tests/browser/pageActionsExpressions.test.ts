@@ -25,10 +25,8 @@ describe("browser automation expressions", () => {
 
   test("assistant extractor treats image-only ChatGPT turns as responses", () => {
     const expression = buildAssistantExtractorForTest("capture");
-    expect(expression).toContain("/backend-api/estuary/content?id=file_");
-    expect(expression).toContain("Generated image.");
-    expect(expression).toContain("stopped thinking edit");
-    expect(expression).toContain("thought for");
+    expect(expression).toContain("generatedImageFileIds");
+    expect(expression).toContain("url.searchParams.get('id')");
   });
 
   test("assistant extractor indexes top-level turns instead of nested role nodes", () => {

@@ -31,19 +31,6 @@ export interface AttachmentReadyExpectation {
 }
 
 type AttachmentReadyInput = string | AttachmentReadyExpectation;
-function escapeHtml(text: string): string {
-  return text
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-function buildClipboardHtml(prompt: string): string {
-  const body = escapeHtml(normalizePromptText(prompt)).replace(/\n/g, "<br>");
-  return `<div>${body}</div>`;
-}
 
 function buildComposerReadValueFunction(): string {
   return `const readValue = (node) => {

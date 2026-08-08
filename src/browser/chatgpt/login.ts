@@ -508,6 +508,7 @@ async function openChatgptLoginSession(
       config.remoteChrome.port,
       logger,
       targetUrl,
+      undefined,
       { maxTabs: config.remoteChromeMaxTabs },
     );
     return {
@@ -550,6 +551,7 @@ async function openChatgptLoginSession(
         existingPort,
         logger,
         targetUrl,
+        undefined,
         { maxTabs: config.remoteChromeMaxTabs },
       );
       return {
@@ -572,7 +574,7 @@ async function openChatgptLoginSession(
   if (chrome.pid) {
     await writeChromePid(profileDir, chrome.pid);
   }
-  const connection = await connectToRemoteChrome(host, chrome.port, logger, targetUrl, {
+  const connection = await connectToRemoteChrome(host, chrome.port, logger, targetUrl, undefined, {
     maxTabs: config.remoteChromeMaxTabs,
   });
   return {
@@ -687,10 +689,10 @@ async function convertWindowsPathToWsl(windowsPath: string): Promise<string> {
 }
 
 function isWsl(): boolean {
-  return (
-    process.platform === "linux" &&
-    Boolean(process.env.WSL_DISTRO_NAME || os.release().toLowerCase().includes("microsoft"))
-  );
+  if (process.env.WSL_DISTRO_NAME) {
+    return true;
+  }
+  return process.platform === "linux" && os.release().toLowerCase().includes("microsoft");
 }
 
 async function ensureSavedLoginDevtoolsReachable(

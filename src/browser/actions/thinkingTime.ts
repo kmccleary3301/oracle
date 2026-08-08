@@ -1,5 +1,6 @@
 import type { ChromeClient, BrowserLogger } from "../types.js";
 import type { ThinkingTimeLevel } from "../../oracle/types.js";
+import { normalizeThinkingTimeLevel } from "../../oracle/thinkingTime.js";
 import {
   MENU_CONTAINER_SELECTOR,
   MENU_ITEM_SELECTOR,
@@ -161,7 +162,7 @@ export async function ensureThinkingTimeIfAvailable(
   logger: BrowserLogger,
   desiredModel?: string | null,
 ): Promise<ThinkingTimeSelectionResult> {
-  const normalizedLevel = normalizeThinkingTimeLevel(level);
+  const normalizedLevel = normalizeThinkingTimeLevel(level) ?? level;
   try {
     const result = await evaluateThinkingTimeSelection(Runtime, level, desiredModel);
     const capitalizedLevel = level.charAt(0).toUpperCase() + level.slice(1);
@@ -196,7 +197,9 @@ export async function ensureThinkingTimeIfAvailable(
           status: "unavailable",
           fallbackUsed: true,
           reason: result.status,
-          diagnostics: result.diagnostics,
+          diagnostics: await inspectThinkingControls(Runtime, level).catch(() =>
+            normalizeThinkingControlsDiagnostics(undefined, level),
+          ),
         };
       case "option-not-found":
       case "selection-unverified":
@@ -214,7 +217,9 @@ export async function ensureThinkingTimeIfAvailable(
           status: "option-not-found",
           fallbackUsed: true,
           reason: result.status,
-          diagnostics: result.diagnostics,
+          diagnostics: await inspectThinkingControls(Runtime, level).catch(() =>
+            normalizeThinkingControlsDiagnostics(undefined, level),
+          ),
         };
       default:
         if (logger.verbose) {
@@ -286,7 +291,6 @@ function buildThinkingTimeExpression(
 
   return `(async () => {
     ${buildClickDispatcher()}
-    ${buildThinkingControlsHelpers()}
 
     const MENU_CONTAINER_SELECTOR = ${menuContainerLiteral};
     const MENU_ITEM_SELECTOR = ${menuItemLiteral};
@@ -1116,6 +1120,72 @@ function buildThinkingTimeExpression(
   })()`;
 }
 
+function buildThinkingControlsInspectionExpression(level?: ThinkingTimeLevel): string {
+  const requestedLevelLiteral = JSON.stringify(level ?? null);
+  const menuItemLiteral = JSON.stringify(MENU_ITEM_SELECTOR);
+  return `(() => {
+    const requestedLevel = ${requestedLevelLiteral};
+    const normalize = (value) => String(value ?? '')
+      .toLowerCase()
+      .replace(/[^a-z0-9\\u4e00-\\u9fa5]+/g, ' ')
+      .replace(/\\s+/g, ' ')
+      .trim();
+    const describe = (node) => {
+      const label = String(
+        node?.innerText || node?.textContent || node?.getAttribute?.('aria-label') || '',
+      ).trim();
+      const state = normalize(node?.getAttribute?.('data-state'));
+      return {
+        label,
+        selected:
+          node?.getAttribute?.('aria-checked') === 'true' ||
+          node?.getAttribute?.('aria-selected') === 'true' ||
+          ['checked', 'selected', 'on'].includes(state),
+        role: node?.getAttribute?.('role') || null,
+        testId: node?.getAttribute?.('data-testid') || null,
+        ariaLabel: node?.getAttribute?.('aria-label') || null,
+      };
+    };
+    const unique = (nodes) => {
+      const seen = new Set();
+      const controls = [];
+      for (const node of nodes) {
+        const info = describe(node);
+        const key = [info.label, info.ariaLabel, info.testId, info.role]
+          .map(normalize)
+          .join('::');
+        if (!key.replace(/:/g, '') || seen.has(key)) continue;
+        seen.add(key);
+        controls.push(info);
+      }
+      return controls;
+    };
+    const chipNodes = Array.from(document.querySelectorAll([
+      '[data-testid="composer-footer-actions"] button',
+      '[data-testid*="model-switcher"]',
+      '[data-model-picker-thinking-effort-action="true"]',
+      'button.__composer-pill',
+      '[role="button"][aria-haspopup="menu"]',
+    ].join(',')));
+    const chipCandidates = unique(chipNodes).filter((info) => {
+      const text = normalize([info.label, info.ariaLabel, info.testId].filter(Boolean).join(' '));
+      return ['thinking', 'reasoning', 'pro', 'intelligence', 'effort'].some((token) =>
+        text.includes(token),
+      );
+    });
+    const menuControls = unique(Array.from(document.querySelectorAll(${menuItemLiteral})));
+    return {
+      requestedThinkingTime: requestedLevel || undefined,
+      normalizedThinkingTime: requestedLevel || undefined,
+      chipCandidates,
+      menuControls,
+      availableOptions: Array.from(
+        new Set(menuControls.map((item) => item.label).filter(Boolean)),
+      ),
+    };
+  })()`;
+}
+
 export function buildThinkingTimeExpressionForTest(
   level: ThinkingTimeLevel = "extended",
   desiredModel?: string | null,
@@ -1143,4 +1213,19 @@ export function inferThinkingTargetModelKindForTest(
   desiredModel?: string | null,
 ): "pro" | "thinking" | "instant" | null {
   return inferThinkingTargetModelKind(desiredModel);
+}
+
+function normalizeThinkingControlsDiagnostics(
+  value: Partial<ThinkingControlsDiagnostics> | undefined,
+  level?: ThinkingTimeLevel,
+): ThinkingControlsDiagnostics {
+  return {
+    requestedThinkingTime: level,
+    normalizedThinkingTime: level ? (normalizeThinkingTimeLevel(level) ?? level) : undefined,
+    chipCandidates: Array.isArray(value?.chipCandidates) ? value.chipCandidates : [],
+    menuControls: Array.isArray(value?.menuControls) ? value.menuControls : [],
+    availableOptions: Array.isArray(value?.availableOptions)
+      ? value.availableOptions.filter((item): item is string => typeof item === "string")
+      : [],
+  };
 }

@@ -176,6 +176,8 @@ export function matchesThinkingStatusLabelForTest(text: string): boolean {
 
 export function buildActiveThinkingStatusPredicateJsForTest(fnName: string): string {
   return buildActiveThinkingStatusPredicateJs(fnName);
+}
+
 function hasGeneratedImages(
   snapshot: Pick<AssistantSnapshot, "generatedImageFileIds"> | null | undefined,
 ): boolean {

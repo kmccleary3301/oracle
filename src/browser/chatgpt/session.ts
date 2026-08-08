@@ -9,6 +9,7 @@ import type {
   BrowserAttachment,
   BrowserAutomationConfig,
   BrowserRunOptions,
+  BrowserRunResult,
   BrowserLogger,
   ChromeClient,
 } from "../types.js";
@@ -107,6 +108,7 @@ export async function readChatgptBrowserStatus(
     remoteChrome.port,
     logger,
     targetUrl,
+    undefined,
     { maxTabs: config.remoteChromeMaxTabs },
   );
   const client = connection.client;
@@ -180,6 +182,7 @@ export async function probeChatgptAttachments(
     remoteChrome.port,
     logger,
     config.chatgptUrl ?? config.url ?? CHATGPT_URL,
+    undefined,
     { maxTabs: config.remoteChromeMaxTabs },
   );
   const client = connection.client;
@@ -264,6 +267,7 @@ export async function inspectThinkingControlsForChatgptConversation(
     remoteChrome.port,
     logger,
     options.conversationUrl,
+    undefined,
     { maxTabs: config.remoteChromeMaxTabs },
   );
   const client = connection.client;
@@ -316,6 +320,7 @@ export async function readChatgptConversationSnapshot(
     remoteChrome.port,
     logger,
     options.conversationUrl,
+    undefined,
     { maxTabs: config.remoteChromeMaxTabs },
   );
   const client = connection.client;
@@ -357,6 +362,7 @@ export async function refreshChatgptConversation(
     remoteChrome.port,
     logger,
     options.conversationUrl,
+    undefined,
     { maxTabs: config.remoteChromeMaxTabs },
   );
   const client = connection.client;
@@ -456,7 +462,7 @@ export async function sendChatgptTurn(options: ChatgptSendTurnOptions): Promise<
       ),
     downloadedSandboxArtifacts: result.downloadedSandboxArtifacts ?? [],
     thinkingTimeSelection: result.thinkingTimeSelection,
-    warnings: result.warnings ?? [],
+    warnings: formatBrowserRunWarnings(result.warnings),
   };
 }
 
@@ -510,7 +516,7 @@ export async function createChatgptSession(
     newSandboxArtifacts: result.newSandboxArtifacts ?? result.sandboxArtifacts ?? [],
     downloadedSandboxArtifacts: result.downloadedSandboxArtifacts ?? [],
     thinkingTimeSelection: result.thinkingTimeSelection,
-    warnings: result.warnings ?? [],
+    warnings: formatBrowserRunWarnings(result.warnings),
   };
 }
 
@@ -525,7 +531,7 @@ function serializeSubmittedTurnResult(result: {
   chromeTargetId?: string;
   tabUrl?: string;
   thinkingTimeSelection?: ChatgptTurnResult["thinkingTimeSelection"];
-  warnings?: string[];
+  warnings?: BrowserRunResult["warnings"];
 }): ChatgptTurnResult {
   const submittedAt = new Date().toISOString();
   const recommendedRecoveryDelayMs = resolveSubmittedRecoveryDelayMs(result.thinkingTimeSelection);
@@ -553,8 +559,12 @@ function serializeSubmittedTurnResult(result: {
     newSandboxArtifacts: [],
     downloadedSandboxArtifacts: [],
     thinkingTimeSelection: result.thinkingTimeSelection,
-    warnings: result.warnings ?? [],
+    warnings: formatBrowserRunWarnings(result.warnings),
   };
+}
+
+function formatBrowserRunWarnings(warnings: BrowserRunResult["warnings"]): string[] {
+  return (warnings ?? []).map((warning) => warning.message);
 }
 
 function resolveSubmittedRecoveryDelayMs(

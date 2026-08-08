@@ -49,6 +49,7 @@ export async function extractChatgptSandboxArtifactsFromConfiguredBrowser(
     remoteChrome.port,
     logger,
     options.conversationUrl,
+    undefined,
     { maxTabs: config.remoteChromeMaxTabs },
   );
   const client = connection.client;
