@@ -555,19 +555,19 @@ in current status notes.
 
 ### Progress Ledger
 
-| Area                                |  Weight | Status      |
-| ----------------------------------- | ------: | ----------- |
-| Product/API shape                   |       8 | 8/8         |
-| Durable job store                   |      14 | 14/14       |
-| Daemon HTTP service and queue       |      16 | 16/16       |
-| Browser job adapters                |      14 | 14/14       |
-| MCP integration                     |      14 | 14/14       |
-| CLI integration                     |      10 | 10/10       |
-| Browser lifecycle hardening         |       8 | 8/8         |
-| Reliability, recovery, and security |       6 | 6/6         |
-| Tests and live validation           |       6 | 6/6         |
-| Documentation and agent recipes     |       4 | 4/4         |
-| **Total**                           | **100** | **100/100** |
+| Area                                |  Weight | Status     |
+| ----------------------------------- | ------: | ---------- |
+| Product/API shape                   |       8 | 8/8        |
+| Durable job store                   |      14 | 13/14      |
+| Daemon HTTP service and queue       |      16 | 16/16      |
+| Browser job adapters                |      14 | 14/14      |
+| MCP integration                     |      14 | 14/14      |
+| CLI integration                     |      10 | 10/10      |
+| Browser lifecycle hardening         |       8 | 8/8        |
+| Reliability, recovery, and security |       6 | 6/6        |
+| Tests and live validation           |       6 | 6/6        |
+| Documentation and agent recipes     |       4 | 4/4        |
+| **Total**                           | **100** | **99/100** |
 
 Current verified progress notes:
 
@@ -662,8 +662,9 @@ insufficient.
 - [x] **1 point** Implement `writeResult` and `readResult`.
   - Acceptance: result path is linked from `job.json` only after the result file
     is durable.
-- [x] **1 point** Implement retention/pruning.
-  - Respect separate completed, failed, and all-job retention windows.
+- [ ] **1 point** Implement retention/pruning.
+  - Current implementation uses one `jobRetentionMs` window for every terminal status and never
+    deletes active jobs. Separate completed, failed, and all-job windows remain unimplemented.
   - Acceptance: pruning never deletes active jobs.
 - [x] **1 point** Implement startup reconciliation helpers.
   - Active jobs left by a dead daemon become `failed` or `requires_action` with
@@ -923,7 +924,7 @@ which command/tool to use, how to recover, and what failure states mean.
 Required points: at least 25, including:
 
 - Product/API shape complete.
-- Durable job store complete.
+- Durable job-store core complete; status-specific retention windows remain tracked separately.
 - Fake daemon job can be submitted, polled, tailed, and completed from separate
   local client calls.
 

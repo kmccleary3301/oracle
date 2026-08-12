@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { resetCoordinatorRuntimeCache } from "../../src/browser/coordinatorRuntime.js";
+import {
+  getCoordinatorRuntime,
+  resetCoordinatorRuntimeCache,
+} from "../../src/browser/coordinatorRuntime.js";
+import { BrowserCoordinatorStore } from "../../src/browser/coordinatorStore.js";
 
 const cdpNewMock = vi.fn();
 const cdpCloseMock = vi.fn();
@@ -15,6 +19,39 @@ const cdpMock = Object.assign(vi.fn(), {
   // biome-ignore lint/style/useNamingConvention: CDP API uses capitalized members.
   List: cdpListMock,
 });
+
+function occupyCoordinatorTarget(databasePath: string, profileId: string, targetId: string): void {
+  const store = new BrowserCoordinatorStore({ databasePath, profileId });
+  try {
+    const claim = store.claimProfileGeneration({
+      ownerPid: 909,
+      ownerStartToken: `${profileId}-owner`,
+    });
+    expect(
+      store.admitTarget({
+        targetId,
+        generation: claim.generation,
+        role: "mutation",
+        state: "active",
+      }).admitted,
+    ).toBe(true);
+  } finally {
+    store.close();
+  }
+}
+
+function expectNoActiveCoordinatorTargets(databasePath: string, profileId: string): void {
+  const store = new BrowserCoordinatorStore({ databasePath, profileId });
+  try {
+    expect(
+      store
+        .listTargets()
+        .filter(({ state }) => state === "admitted" || state === "active" || state === "closing"),
+    ).toEqual([]);
+  } finally {
+    store.close();
+  }
+}
 
 vi.mock("chrome-remote-interface", () => ({ default: cdpMock }));
 
@@ -221,6 +258,7 @@ describe("connectWithNewTab", () => {
     cdpNewMock.mockResolvedValue({ id: "target-1" });
     cdpMock.mockRejectedValueOnce(new Error("attach fail")).mockResolvedValueOnce({});
     cdpCloseMock.mockResolvedValue(undefined);
+    cdpListMock.mockResolvedValue([]);
 
     const { connectWithNewTab } = await import("../../src/browser/chromeLifecycle.js");
     const logger = vi.fn();
@@ -234,6 +272,86 @@ describe("connectWithNewTab", () => {
     expect(logger).toHaveBeenCalledWith(
       expect.stringContaining("Failed to attach to isolated browser tab"),
     );
+  });
+
+  test("fails closed when a created tab cannot be confirmed closed", async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "oracle-close-confirmation-"));
+    const databasePath = path.join(tmpDir, "coordinator.sqlite");
+    const targetId = "target-close-unconfirmed";
+    cdpNewMock.mockResolvedValue({ id: targetId });
+    cdpMock.mockRejectedValue(new Error("attach fail"));
+    cdpCloseMock.mockRejectedValue(new Error("close unavailable"));
+    cdpListMock.mockResolvedValue([{ id: targetId, type: "page" }]);
+    const { connectWithNewTab } = await import("../../src/browser/chromeLifecycle.js");
+    const coordinator = {
+      databasePath,
+      profileId: "close-confirmation",
+      ownerStartToken: "close-confirmation-owner",
+    };
+
+    try {
+      await expect(
+        connectWithNewTab(9222, vi.fn<(message: string) => void>(), undefined, undefined, {
+          coordinator,
+        }),
+      ).rejects.toMatchObject({
+        details: expect.objectContaining({
+          code: "target-cleanup-failed",
+          closeConfirmed: false,
+        }),
+      });
+      expect(cdpCloseMock).toHaveBeenCalledTimes(3);
+      expectNoActiveCoordinatorTargets(databasePath, coordinator.profileId);
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("closes the created tab when coordinator binding loses a race", async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "oracle-bind-race-"));
+    const databasePath = path.join(tmpDir, "coordinator.sqlite");
+    const targetId = "target-bind-race";
+    cdpNewMock.mockImplementationOnce(async () => {
+      occupyCoordinatorTarget(databasePath, "competing-profile", targetId);
+      return { id: targetId };
+    });
+    cdpCloseMock.mockResolvedValue(undefined);
+    cdpListMock.mockResolvedValue([]);
+
+    const { connectWithNewTab } = await import("../../src/browser/chromeLifecycle.js");
+    const coordinator = {
+      databasePath,
+      profileId: "bind-race-primary",
+      ownerStartToken: "primary-owner",
+    };
+    const runtime = getCoordinatorRuntime({ host: "127.0.0.1", port: 9222 }, coordinator);
+    const updateTarget = runtime.store.updateTarget.bind(runtime.store);
+    const updateSpy = vi
+      .spyOn(runtime.store, "updateTarget")
+      .mockImplementationOnce(() => {
+        throw new Error("transient release failure");
+      })
+      .mockImplementation(updateTarget);
+
+    try {
+      await expect(
+        connectWithNewTab(9222, vi.fn<(message: string) => void>(), undefined, undefined, {
+          fallbackToDefault: false,
+          coordinator,
+        }),
+      ).rejects.toMatchObject({
+        details: expect.objectContaining({ code: "target-bind-failed", releaseFailed: true }),
+      });
+      expect(cdpCloseMock).toHaveBeenCalledWith({
+        host: "127.0.0.1",
+        port: 9222,
+        id: targetId,
+      });
+      expect(updateSpy).toHaveBeenCalledTimes(2);
+      expectNoActiveCoordinatorTargets(databasePath, coordinator.profileId);
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
   });
 
   test("throws when strict mode disallows fallback", async () => {
@@ -593,6 +711,7 @@ describe("closeBlankChromeTabs", () => {
 describe("ensureChromePageTargetAfterClose", () => {
   beforeEach(() => {
     cdpNewMock.mockReset();
+    cdpCloseMock.mockReset();
     cdpListMock.mockReset();
   });
 
@@ -634,6 +753,42 @@ describe("ensureChromePageTargetAfterClose", () => {
       port: 9222,
       url: "about:blank",
     });
+  });
+
+  test("closes a replacement tab when coordinator binding loses a race", async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "oracle-replacement-bind-race-"));
+    const databasePath = path.join(tmpDir, "coordinator.sqlite");
+    const targetId = "replacement-bind-race";
+    cdpNewMock.mockImplementationOnce(async () => {
+      occupyCoordinatorTarget(databasePath, "replacement-competing-profile", targetId);
+      return { id: targetId };
+    });
+    cdpCloseMock.mockResolvedValue(undefined);
+    cdpListMock.mockResolvedValue([]);
+    const { createChromePageTarget } = await import("../../src/browser/chromeLifecycle.js");
+    const coordinator = {
+      databasePath,
+      profileId: "replacement-primary",
+      ownerStartToken: "replacement-primary-owner",
+    };
+
+    try {
+      await expect(
+        createChromePageTarget(9222, vi.fn<(message: string) => void>(), "127.0.0.1", {
+          coordinator,
+        }),
+      ).rejects.toMatchObject({
+        details: expect.objectContaining({ code: "target-bind-failed" }),
+      });
+      expect(cdpCloseMock).toHaveBeenCalledWith({
+        host: "127.0.0.1",
+        port: 9222,
+        id: targetId,
+      });
+      expectNoActiveCoordinatorTargets(databasePath, coordinator.profileId);
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
   });
 
   test("reuses a replacement created by an earlier serialized cleanup", async () => {

@@ -104,7 +104,6 @@ function soakRun(runNumber: number): Record<string, unknown> {
     status: "claimed",
     qualified: true,
     generatedAt: new Date(NOW).toISOString(),
-    observedDurationMs: DEFAULT_REQUIRED_SOAK_DURATION_MS,
     provenance: {
       repository: EXPECTED.expectedRepository,
       workflow: EXPECTED.expectedWorkflow,
@@ -237,6 +236,30 @@ describe("release promotion evidence gate", () => {
     soak.sha256 = hashReleaseEvidence(soak);
     const result = evaluateReleasePromotionGate(input, gateOptions());
     expect(result.reasonCodes).toContain("soak_runs_not_consecutive");
+    expect(result.passed).toBe(false);
+  });
+
+  it("derives soak chronology and duration from authenticated platform manifests", () => {
+    const input = evidence();
+    const soak = (input.manifests as Record<string, unknown>).soak as Record<string, unknown>;
+    const runs = soak.runs as Array<Record<string, unknown>>;
+    const altered = runs[1];
+    altered.runNumber = 104;
+    altered.sequence = 104;
+    altered.observedDurationMs = DEFAULT_REQUIRED_SOAK_DURATION_MS * 2;
+    (altered.provenance as Record<string, unknown>).runNumber = 104;
+    soak.sha256 = hashReleaseEvidence(soak);
+
+    const result = evaluateReleasePromotionGate(input, gateOptions());
+
+    expect(result.reasonCodes).toEqual(
+      expect.arrayContaining([
+        "soak_run_2_run_number_mismatch",
+        "soak_run_2_sequence_mismatch",
+        "soak_run_2_duration_mismatch",
+        "soak_run_2_provenance_run_number_mismatch",
+      ]),
+    );
     expect(result.passed).toBe(false);
   });
   it("does not count a soak run without generatedAt provenance", () => {

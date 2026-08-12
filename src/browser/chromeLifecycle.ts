@@ -757,6 +757,65 @@ function formatApprovalWait(waitMs: number): string {
   return `${waitMs}ms`;
 }
 
+async function discardCreatedChromeTarget(
+  host: string,
+  port: number,
+  targetId: string,
+  lease: CoordinatorTargetLease,
+  logger: BrowserLogger,
+  closeFailed: (targetId: string, message: string) => string,
+): Promise<void> {
+  let closeError: unknown;
+  let closeConfirmed = false;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await CDP.Close({ host, port, id: targetId });
+      closeError = undefined;
+    } catch (error) {
+      closeError = error;
+    }
+    closeConfirmed = await remoteTargetIsAbsent(host, port, targetId);
+    if (closeConfirmed) break;
+    if (attempt < 2) await delay(50 * (attempt + 1));
+  }
+
+  let leaseError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      if (closeConfirmed) await lease.release({ confirmed: true });
+      else await lease.markLost();
+      leaseError = undefined;
+      break;
+    } catch (error) {
+      leaseError = error;
+      if (attempt < 2) await delay(50 * (attempt + 1));
+    }
+  }
+  if (closeConfirmed && !leaseError) return;
+
+  const closeMessage = closeConfirmed
+    ? "Chrome target closure was confirmed"
+    : closeError instanceof Error
+      ? closeError.message
+      : "Chrome target remained present after three close attempts";
+  const leaseMessage = leaseError
+    ? `; coordinator release failed: ${leaseError instanceof Error ? leaseError.message : String(leaseError)}`
+    : "";
+  const message = `${closeMessage}${leaseMessage}`;
+  logger(closeFailed(targetId, message));
+  throw new BrowserAutomationError(
+    `Failed to discard Chrome target ${targetId}: ${message}`,
+    {
+      stage: "browser-coordinator",
+      code: "target-cleanup-failed",
+      targetId,
+      closeConfirmed,
+      leaseReleased: !leaseError,
+    },
+    leaseError ?? closeError,
+  );
+}
+
 async function connectToNewTarget(
   host: string,
   port: number,
@@ -776,9 +835,11 @@ async function connectToNewTarget(
     role: messages.role,
     url,
   });
+  let targetId: string | undefined;
+  let discardAttempted = false;
   try {
     const target = await CDP.New({ host, port, url });
-    const targetId = target.id;
+    targetId = target.id;
     if (!targetId) {
       await lease.release();
       logger(messages.openFailed("Chrome returned no target id"));
@@ -799,17 +860,16 @@ async function connectToNewTarget(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logger(messages.attachFailed(targetId, message));
-      await lease.markLost();
-      try {
-        await CDP.Close({ host, port, id: targetId });
-      } catch (closeError) {
-        const closeMessage = closeError instanceof Error ? closeError.message : String(closeError);
-        logger(messages.closeFailed(targetId, closeMessage));
-      }
+      discardAttempted = true;
+      await discardCreatedChromeTarget(host, port, targetId, lease, logger, messages.closeFailed);
     }
   } catch (error) {
+    if (targetId && !discardAttempted) {
+      await discardCreatedChromeTarget(host, port, targetId, lease, logger, messages.closeFailed);
+    } else if (!targetId) {
+      await lease.release();
+    }
     if (error instanceof BrowserAutomationError) throw error;
-    await lease.release();
     const message = error instanceof Error ? error.message : String(error);
     logger(messages.openFailed(message));
   }
@@ -994,13 +1054,14 @@ export async function createChromePageTarget(
     role: options?.role,
     url: "about:blank",
   });
+  let createdTargetId: string | undefined;
   try {
     const created = (await CDP.New({
       host: effectiveHost,
       port,
       url: "about:blank",
     })) as { id?: string; targetId?: string };
-    const createdTargetId = created.targetId ?? created.id;
+    createdTargetId = created.targetId ?? created.id;
     if (!createdTargetId) {
       await lease.release();
       logger("Failed to create a replacement Chrome tab.");
@@ -1010,8 +1071,19 @@ export async function createChromePageTarget(
     logger(`Opened replacement Chrome tab (target=${createdTargetId})`);
     return createdTargetId;
   } catch (error) {
+    if (createdTargetId) {
+      await discardCreatedChromeTarget(
+        effectiveHost,
+        port,
+        createdTargetId,
+        lease,
+        logger,
+        (targetId, message) => `Failed to close replacement Chrome tab ${targetId}: ${message}`,
+      );
+    } else {
+      await lease.release();
+    }
     if (error instanceof BrowserAutomationError) throw error;
-    await lease.release();
     const message = error instanceof Error ? error.message : String(error);
     logger(`Failed to create a replacement Chrome tab: ${message}`);
     return undefined;

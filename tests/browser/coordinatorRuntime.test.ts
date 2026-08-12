@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { BrowserAutomationError } from "../../src/oracle/errors.js";
 import {
   clearCoordinatorResourceObservation,
@@ -104,6 +104,37 @@ describe("CoordinatorRuntime", () => {
     const next = await replacement.reserve();
     await next.markLost();
     expect(replacement.reservationCount).toBe(0);
+  });
+
+  test("keeps a lease retryable when durable release fails", async () => {
+    const databasePath = await dbPath();
+    const runtime = open(databasePath, {
+      ownerPid: 101,
+      ownerStartToken: "release-retry",
+      targetCeilings: { total: 1 },
+    });
+    const lease = await runtime.reserve();
+    const updateTarget = runtime.store.updateTarget.bind(runtime.store);
+    const updateSpy = vi
+      .spyOn(runtime.store, "updateTarget")
+      .mockImplementationOnce(() => {
+        throw new Error("transient database failure");
+      })
+      .mockImplementation(updateTarget);
+
+    await expect(lease.markLost()).rejects.toThrow("transient database failure");
+    expect(runtime.reservationCount).toBe(1);
+    expect(runtime.store.listTargets()).toMatchObject([{ state: "admitted" }]);
+
+    await lease.markLost();
+    expect(updateSpy).toHaveBeenCalledTimes(2);
+    expect(runtime.reservationCount).toBe(0);
+    const verifier = new BrowserCoordinatorStore({
+      profileId: "127.0.0.1:19222",
+      databasePath,
+    });
+    stores.push(verifier);
+    expect(verifier.listTargets()).toMatchObject([{ state: "lost" }]);
   });
 
   test("takes over a stale controller generation", async () => {

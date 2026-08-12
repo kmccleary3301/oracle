@@ -512,7 +512,12 @@ export class CoordinatorRuntime {
       url,
     });
     if (!binding.bound) {
-      await this.#release(lease, false);
+      let releaseError: unknown;
+      try {
+        await this.#release(lease, false);
+      } catch (error) {
+        releaseError = error;
+      }
       throw new BrowserAutomationError(
         `Browser coordinator could not bind reservation ${lease.reservationId} to Chrome target ${targetId}.`,
         {
@@ -521,7 +526,9 @@ export class CoordinatorRuntime {
           code: "target-bind-failed",
           profileId: this.profileId,
           targetId,
+          releaseFailed: Boolean(releaseError),
         },
+        releaseError,
       );
     }
     lease.targetId = targetId;
@@ -529,13 +536,13 @@ export class CoordinatorRuntime {
 
   async #release(lease: RuntimeLeaseState, confirmed: boolean): Promise<void> {
     if (lease.released) return;
-    lease.released = true;
     const targetId = lease.targetId ?? lease.reservationId;
     this.store.updateTarget({
       targetId,
       generation: lease.generation,
       state: confirmed ? "closed" : "lost",
     });
+    lease.released = true;
     this.#leases.delete(lease.reservationId);
     this.#stopIfIdle();
   }

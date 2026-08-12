@@ -560,11 +560,18 @@ function qualifiesPlatform(
   if (!valid) reasons.push(`${prefix}_chrome_soak_unqualified`);
   return valid;
 }
+type AuthenticatedPlatformRun = {
+  runId: string;
+  runNumber: number;
+  commitSha: string;
+  durationMs: number;
+};
 function qualifiedSoakRun(
   value: unknown,
   options: Required<ReleasePromotionGateOptions>,
   reasons: string[],
   index: number,
+  authenticatedRun: AuthenticatedPlatformRun | undefined,
 ): boolean {
   const prefix = `soak_run_${index + 1}`;
   if (!isRecord(value)) {
@@ -576,24 +583,68 @@ function qualifiedSoakRun(
   const runNumber = numberValue(value.runNumber);
   const sequence = numberValue(value.sequence);
   const generated = generatedAt(value);
-  const duration = numberValue(value.observedDurationMs ?? value.durationMs ?? value.elapsedMs);
+  const declaredDuration = numberValue(
+    value.observedDurationMs ?? value.durationMs ?? value.elapsedMs,
+  );
   const qualified = value.qualified === true || value.passed === true;
   let valid = true;
   if (!runId || runNumber === null || sequence === null || generated === null || !provenance) {
     reasons.push(`${prefix}_provenance_missing`);
     valid = false;
   }
-  if (
-    provenance &&
-    options.expectedCommitSha &&
-    stringValue(provenance.commitSha) !== options.expectedCommitSha
-  ) {
-    reasons.push(`${prefix}_commit_mismatch`);
+  if (!authenticatedRun) {
+    reasons.push(`${prefix}_platform_run_missing`);
     valid = false;
+  } else {
+    if (runNumber !== authenticatedRun.runNumber) {
+      reasons.push(`${prefix}_run_number_mismatch`);
+      valid = false;
+    }
+    if (sequence !== authenticatedRun.runNumber) {
+      reasons.push(`${prefix}_sequence_mismatch`);
+      valid = false;
+    }
+    if (declaredDuration !== null && declaredDuration !== authenticatedRun.durationMs) {
+      reasons.push(`${prefix}_duration_mismatch`);
+      valid = false;
+    }
+    if (authenticatedRun.durationMs < options.requiredSoakDurationMs) {
+      reasons.push(`${prefix}_duration_short`);
+      valid = false;
+    }
   }
-  if (provenance && stringValue(provenance.runId) !== runId) {
-    reasons.push(`${prefix}_run_mismatch`);
-    valid = false;
+  if (provenance) {
+    const expectedCommit = authenticatedRun?.commitSha ?? options.expectedCommitSha;
+    if (expectedCommit && stringValue(provenance.commitSha) !== expectedCommit) {
+      reasons.push(`${prefix}_commit_mismatch`);
+      valid = false;
+    }
+    if (stringValue(provenance.runId) !== runId) {
+      reasons.push(`${prefix}_run_mismatch`);
+      valid = false;
+    }
+    if (authenticatedRun && numberValue(provenance.runNumber) !== authenticatedRun.runNumber) {
+      reasons.push(`${prefix}_provenance_run_number_mismatch`);
+      valid = false;
+    }
+    if (
+      options.expectedRepository &&
+      stringValue(provenance.repository) !== options.expectedRepository
+    ) {
+      reasons.push(`${prefix}_repository_mismatch`);
+      valid = false;
+    }
+    if (options.expectedWorkflow && stringValue(provenance.workflow) !== options.expectedWorkflow) {
+      reasons.push(`${prefix}_workflow_mismatch`);
+      valid = false;
+    }
+    if (
+      options.expectedSourceRef &&
+      stringValue(provenance.sourceRef) !== options.expectedSourceRef
+    ) {
+      reasons.push(`${prefix}_source_ref_mismatch`);
+      valid = false;
+    }
   }
   if (!isClaimed(value)) {
     reasons.push(`${prefix}_unclaimed`);
@@ -601,10 +652,6 @@ function qualifiedSoakRun(
   }
   if (!qualified) {
     reasons.push(`${prefix}_not_qualified`);
-    valid = false;
-  }
-  if (duration === null || duration < options.requiredSoakDurationMs) {
-    reasons.push(`${prefix}_duration_short`);
     valid = false;
   }
   return valid;
@@ -722,7 +769,7 @@ export function evaluateReleasePromotionGate(
       reasons.push(`unexpected_platform_${platform}`);
   const runs = platformRuns(input, manifests);
   const runMetadata = new Map<string, PlatformRun>();
-  const qualifiedRunIds = new Set<string>();
+  const authenticatedRuns = new Map<string, AuthenticatedPlatformRun>();
   for (const [index, run] of runs.entries()) {
     const runLabel = run.runId ?? `index-${index + 1}`;
     if (
@@ -744,6 +791,9 @@ export function evaluateReleasePromotionGate(
     if (options.expectedCommitSha && run.commitSha !== options.expectedCommitSha)
       reasons.push(`platform_run_${runLabel}_commit_mismatch`);
     let runQualified = true;
+    let authenticatedRunNumber: number | null = null;
+    let authenticatedCommitSha: string | null = null;
+    let authenticatedDurationMs: number | null = null;
     for (const platform of run.platforms.keys())
       if (!(REQUIRED_PLATFORMS as readonly string[]).includes(platform))
         reasons.push(`platform_run_${runLabel}_unexpected_${platform}`);
@@ -771,16 +821,73 @@ export function evaluateReleasePromotionGate(
       )
         runQualified = false;
       const provenance = provenanceValue(entry);
+      const provenanceRunNumber = numberValue(provenance?.runNumber);
+      const provenanceCommitSha = stringValue(provenance?.commitSha);
+      const entryDuration = isRecord(entry) ? durationOf(entry) : null;
       if (
         !provenance ||
         stringValue(provenance.runId) !== run.runId ||
-        stringValue(provenance.commitSha) !== run.commitSha
+        provenanceCommitSha !== run.commitSha
       ) {
         reasons.push(`platform_${runLabel}_${platform}_run_provenance_mismatch`);
         runQualified = false;
       }
+      if (
+        provenanceRunNumber === null ||
+        !Number.isInteger(provenanceRunNumber) ||
+        provenanceRunNumber <= 0
+      ) {
+        reasons.push(`platform_${runLabel}_${platform}_run_number_invalid`);
+        runQualified = false;
+      } else if (
+        authenticatedRunNumber !== null &&
+        provenanceRunNumber !== authenticatedRunNumber
+      ) {
+        reasons.push(`platform_${runLabel}_${platform}_run_number_mismatch`);
+        runQualified = false;
+      } else {
+        authenticatedRunNumber = provenanceRunNumber;
+      }
+      if (!provenanceCommitSha) {
+        runQualified = false;
+      } else if (
+        authenticatedCommitSha !== null &&
+        provenanceCommitSha !== authenticatedCommitSha
+      ) {
+        reasons.push(`platform_${runLabel}_${platform}_commit_mismatch`);
+        runQualified = false;
+      } else {
+        authenticatedCommitSha = provenanceCommitSha;
+      }
+      if (entryDuration === null) {
+        runQualified = false;
+      } else {
+        authenticatedDurationMs =
+          authenticatedDurationMs === null
+            ? entryDuration
+            : Math.min(authenticatedDurationMs, entryDuration);
+      }
     }
-    if (runQualified) qualifiedRunIds.add(run.runId);
+    if (
+      authenticatedRunNumber !== null &&
+      (run.runNumber !== authenticatedRunNumber || run.sequence !== authenticatedRunNumber)
+    ) {
+      reasons.push(`platform_run_${runLabel}_run_number_mismatch`);
+      runQualified = false;
+    }
+    if (
+      runQualified &&
+      authenticatedRunNumber !== null &&
+      authenticatedCommitSha !== null &&
+      authenticatedDurationMs !== null
+    ) {
+      authenticatedRuns.set(run.runId, {
+        runId: run.runId,
+        runNumber: authenticatedRunNumber,
+        commitSha: authenticatedCommitSha,
+        durationMs: authenticatedDurationMs,
+      });
+    }
   }
   if (runs.length === 0) {
     reasons.push("missing_platform_runs");
@@ -794,25 +901,30 @@ export function evaluateReleasePromotionGate(
     hasValidEnvelope(soak, "soak", reasons, options, "all", externalAttestations?.all, false, true);
     if (!isClaimed(soak)) reasons.push("soak_unclaimed");
     const soakRuns = Array.isArray(soak.runs) ? soak.runs : [];
-    const qualifying = soakRuns.map((run, index) => qualifiedSoakRun(run, options, reasons, index));
-    const sorted = soakRuns
-      .map((run, index) => ({ run, index }))
+    const candidates = soakRuns.map((run, index) => {
+      const runId = isRecord(run) ? stringValue(run.runId) : null;
+      const authenticatedRun = runId ? authenticatedRuns.get(runId) : undefined;
+      return {
+        run,
+        index,
+        authenticatedRun,
+        qualifies: qualifiedSoakRun(run, options, reasons, index, authenticatedRun),
+      };
+    });
+    const sorted = candidates
       .filter(
-        ({ run, index }) =>
-          qualifying[index] && isRecord(run) && qualifiedRunIds.has(stringValue(run.runId) ?? ""),
+        (
+          candidate,
+        ): candidate is typeof candidate & { authenticatedRun: AuthenticatedPlatformRun } =>
+          candidate.qualifies && Boolean(candidate.authenticatedRun),
       )
-      .sort(
-        (left, right) =>
-          Number((left.run as JsonRecord).runNumber) - Number((right.run as JsonRecord).runNumber),
-      );
+      .sort((left, right) => left.authenticatedRun.runNumber - right.authenticatedRun.runNumber);
     let streak = 0;
     let previousNumber: number | null = null;
     let previousId: string | null = null;
-    for (const { run } of sorted) {
-      const record = run as JsonRecord;
-      const currentNumber = numberValue(record.runNumber);
-      const currentId = stringValue(record.runId);
-      if (currentNumber === null || currentId === null) continue;
+    for (const { authenticatedRun } of sorted) {
+      const currentNumber = authenticatedRun.runNumber;
+      const currentId = authenticatedRun.runId;
       if (
         previousNumber !== null &&
         (currentNumber !== previousNumber + 1 || currentId === previousId)
