@@ -4,7 +4,10 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
+  DEFAULT_MAX_PROMOTION_RSS_SLOPE_BYTES_PER_SECOND,
   hashReleaseEvidence,
+  PROMOTION_RSS_NOISE_METHOD,
+  PROMOTION_RSS_SLOPE_METHOD,
   releaseEvidenceSigningPayload,
   RELEASE_EVIDENCE_SCHEMA_VERSION,
 } from "./release-promotion-gate.js";
@@ -97,12 +100,7 @@ async function signed(value: JsonRecord, args: readonly string[]): Promise<JsonR
 async function writeOutput(outputPath: string, value: unknown): Promise<void> {
   await writeFile(path.resolve(outputPath), `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
-function soakQualifies(
-  soak: unknown,
-  lane: string,
-  observedDurationMs: number,
-  requiredDurationMs: number,
-): boolean {
+function cleanRealProcessSoak(soak: unknown): boolean {
   if (!isRecord(soak)) return false;
   const chrome = isRecord(soak.chrome) ? soak.chrome : null;
   const cleanup = isRecord(soak.cleanup) ? soak.cleanup : null;
@@ -110,7 +108,6 @@ function soakQualifies(
   const samples = Array.isArray(soak.samples) ? soak.samples : [];
   const cycles = orphans && Array.isArray(orphans.cycles) ? orphans.cycles : [];
   return (
-    lane === "promotion" &&
     soak.realProcessSampling === true &&
     chrome?.isolated === true &&
     chrome.headless === true &&
@@ -130,17 +127,87 @@ function soakQualifies(
         sample.rootFound === true &&
         Number(sample.processCount) > 0 &&
         Number(sample.rssBytes) > 0,
-    ) &&
-    observedDurationMs >= requiredDurationMs
+    )
   );
 }
+
+function continuousRealProcessSoak(soak: unknown, requiredDurationMs: number): boolean {
+  if (!isRecord(soak)) return false;
+  const cleanup = isRecord(soak.cleanup) ? soak.cleanup : null;
+  const orphans = isRecord(soak.orphans) ? soak.orphans : null;
+  const cycles = orphans && Array.isArray(orphans.cycles) ? orphans.cycles : [];
+  const samples = Array.isArray(soak.samples) ? soak.samples : [];
+  const durationMs = Number(soak.durationMs);
+  const requestedDurationMs = Number(soak.requestedDurationMs);
+  const gateDurationMs = isRecord(soak.promotionGate)
+    ? Number(soak.promotionGate.observedDurationMs)
+    : Number.NaN;
+  const rootPid = Number(soak.rootPid);
+  if (
+    !Number.isFinite(durationMs) ||
+    !Number.isFinite(requestedDurationMs) ||
+    !Number.isFinite(gateDurationMs) ||
+    !Number.isInteger(rootPid) ||
+    rootPid <= 0 ||
+    durationMs < requiredDurationMs ||
+    requestedDurationMs < requiredDurationMs ||
+    gateDurationMs !== durationMs ||
+    samples.length < 2 ||
+    cycles.length !== samples.length ||
+    Number(cleanup?.rootPid) !== rootPid
+  )
+    return false;
+  const sampledAt = samples.map((sample) =>
+    isRecord(sample) ? Number(sample.sampledAtMs) : Number.NaN,
+  );
+  if (
+    sampledAt.some((sampledAtMs) => !Number.isFinite(sampledAtMs)) ||
+    samples.some((sample) => !isRecord(sample) || Number(sample.rootPid) !== rootPid)
+  )
+    return false;
+  const rss = isRecord(soak.rss) ? soak.rss : null;
+  const promotionGate = isRecord(soak.promotionGate) ? soak.promotionGate : null;
+  const rssSlope =
+    promotionGate && isRecord(promotionGate.rssSlope) ? promotionGate.rssSlope : null;
+  const observedSlope = Number(rss?.slopeBytesPerSecond);
+  const recordedSlope = Number(rssSlope?.observedBytesPerSecond);
+  const noiseBytes = Number(rss?.noiseBytes);
+  if (
+    rssSlope?.method !== PROMOTION_RSS_SLOPE_METHOD ||
+    rssSlope.noiseMethod !== PROMOTION_RSS_NOISE_METHOD ||
+    !Number.isFinite(observedSlope) ||
+    recordedSlope !== observedSlope ||
+    Number(rssSlope.maxBytesPerSecond) !== DEFAULT_MAX_PROMOTION_RSS_SLOPE_BYTES_PER_SECOND ||
+    observedSlope > DEFAULT_MAX_PROMOTION_RSS_SLOPE_BYTES_PER_SECOND ||
+    !Number.isFinite(noiseBytes) ||
+    noiseBytes < 0 ||
+    Number(rssSlope.noiseBytes) !== noiseBytes
+  )
+    return false;
+  const maximumGapMs = 15_000;
+  for (let index = 1; index < sampledAt.length; index += 1) {
+    const gap = sampledAt[index] - sampledAt[index - 1];
+    if (gap <= 0 || gap > maximumGapMs) return false;
+  }
+  return sampledAt.at(-1)! - sampledAt[0] >= requiredDurationMs - maximumGapMs;
+}
+
+export function platformEvidenceQualifies(soak: unknown, observedDurationMs: number): boolean {
+  return cleanRealProcessSoak(soak) && observedDurationMs > 0;
+}
+
 export function platformSoakQualifies(
   soak: unknown,
   lane: string,
   observedDurationMs: number,
   requiredDurationMs = 8 * 60 * 60 * 1_000,
 ): boolean {
-  return soakQualifies(soak, lane, observedDurationMs, requiredDurationMs);
+  return (
+    lane === "promotion" &&
+    cleanRealProcessSoak(soak) &&
+    continuousRealProcessSoak(soak, requiredDurationMs) &&
+    observedDurationMs >= requiredDurationMs
+  );
 }
 async function runPlatform(args: readonly string[]): Promise<void> {
   const platform = requiredOption(args, "--platform");
@@ -150,13 +217,12 @@ async function runPlatform(args: readonly string[]): Promise<void> {
   const resourceBaseline = await json(resourcePath);
   const soak = await json(requiredOption(args, "--soak"));
   const faultChaos = await json(requiredOption(args, "--fault"));
-  const lane = option(args, "--lane") ?? "smoke";
-  const requiredDurationMs = Number(option(args, "--required-duration-ms") ?? 8 * 60 * 60 * 1_000);
+  const lane = option(args, "--lane") ?? "matrix";
   const observedDurationMs =
     isRecord(soak) && isRecord(soak.promotionGate)
       ? Number(soak.promotionGate.observedDurationMs ?? 0)
       : 0;
-  const qualifies = platformSoakQualifies(soak, lane, observedDurationMs, requiredDurationMs);
+  const qualifies = lane === "matrix" && platformEvidenceQualifies(soak, observedDurationMs);
   const artifactDigest = (
     option(args, "--artifact-digest") ??
     process.env.RELEASE_ARTIFACT_DIGEST?.trim() ??
@@ -180,6 +246,48 @@ async function runPlatform(args: readonly string[]): Promise<void> {
         soak,
         faultChaos,
         lane,
+        observedDurationMs,
+      },
+      args,
+    ),
+  );
+}
+
+async function runSoak(args: readonly string[]): Promise<void> {
+  const platform = requiredOption(args, "--platform");
+  if (!["macos", "linux", "windows"].includes(platform))
+    throw new Error("--platform must be macos, linux, or windows");
+  const soakPath = requiredOption(args, "--soak");
+  const soak = await json(soakPath);
+  const lane = option(args, "--lane") ?? "smoke";
+  const requiredDurationMs = Number(option(args, "--required-duration-ms") ?? 8 * 60 * 60 * 1_000);
+  const observedDurationMs =
+    isRecord(soak) && isRecord(soak.promotionGate)
+      ? Number(soak.promotionGate.observedDurationMs ?? 0)
+      : 0;
+  const qualifies =
+    platform === "macos" &&
+    platformSoakQualifies(soak, lane, observedDurationMs, requiredDurationMs);
+  const artifactDigest = (
+    option(args, "--artifact-digest") ??
+    process.env.RELEASE_ARTIFACT_DIGEST?.trim() ??
+    (await sha256File(soakPath))
+  ).replace(/^sha256:/i, "");
+  const source = sourceFor(platform, artifactDigest, soakPath, args);
+  await writeOutput(
+    requiredOption(args, "--output"),
+    await signed(
+      {
+        schemaVersion: RELEASE_EVIDENCE_SCHEMA_VERSION,
+        kind: "release-soak-evidence",
+        platform,
+        status: qualifies ? "claimed" : "unclaimed",
+        qualified: qualifies,
+        generatedAt: new Date().toISOString(),
+        source,
+        provenance: { ...source },
+        soak,
+        lane,
         requiredDurationMs,
         observedDurationMs,
       },
@@ -187,9 +295,30 @@ async function runPlatform(args: readonly string[]): Promise<void> {
     ),
   );
 }
+export function countConsecutiveQualifiedRuns(
+  runs: readonly Readonly<Record<string, unknown>>[],
+): number {
+  let longestStreak = 0;
+  let currentStreak = 0;
+  let previousRunNumber: number | null = null;
+  for (const run of runs) {
+    const runNumber = Number(run.runNumber);
+    if (run.qualified !== true || !Number.isInteger(runNumber) || runNumber <= 0) {
+      currentStreak = 0;
+      previousRunNumber = null;
+      continue;
+    }
+    currentStreak =
+      previousRunNumber !== null && runNumber === previousRunNumber + 1 ? currentStreak + 1 : 1;
+    previousRunNumber = runNumber;
+    longestStreak = Math.max(longestStreak, currentStreak);
+  }
+  return longestStreak;
+}
+
 async function runAggregate(args: readonly string[]): Promise<void> {
   const paths = options(args, "--manifest");
-  if (paths.length === 0) throw new Error("--manifest requires at least one platform manifest");
+  if (paths.length === 0) throw new Error("--manifest requires evidence manifests");
   const loaded = await Promise.all(paths.map((manifestPath) => json(manifestPath)));
   const groups = new Map<string, JsonRecord>();
   for (const value of loaded) {
@@ -206,14 +335,22 @@ async function runAggregate(args: readonly string[]): Promise<void> {
       provenance: { ...provenance, platform: "all" },
       platforms: {},
     };
-    (group.platforms as JsonRecord)[String(value.platform ?? provenance.platform)] = value;
+    if (value.kind === "release-platform-evidence") {
+      const platform = String(value.platform ?? provenance.platform);
+      if ((group.platforms as JsonRecord)[platform] !== undefined)
+        throw new Error(`duplicate platform manifest for run ${runId} and ${platform}`);
+      (group.platforms as JsonRecord)[platform] = value;
+    } else if (value.kind === "release-soak-evidence") {
+      if (group.soak !== undefined) throw new Error(`duplicate soak manifest for run ${runId}`);
+      group.soak = value;
+    }
     groups.set(runId, group);
   }
   const runs = [...groups.values()]
     .sort((left, right) => Number(left.runNumber) - Number(right.runNumber))
     .map((run) => {
       const platforms = isRecord(run.platforms) ? run.platforms : {};
-      const qualified = ["macos", "linux", "windows"].every((platform) => {
+      const platformQualified = ["macos", "linux", "windows"].every((platform) => {
         const manifest = platforms[platform];
         if (!isRecord(manifest)) return false;
         const soak = manifest.soak;
@@ -226,25 +363,42 @@ async function runAggregate(args: readonly string[]): Promise<void> {
         return (
           manifest.status === "claimed" &&
           manifest.qualified === true &&
-          platformSoakQualifies(soak, "promotion", observed)
+          manifest.lane === "matrix" &&
+          platformEvidenceQualifies(soak, observed)
         );
       });
-      return { ...run, status: qualified ? "claimed" : "unclaimed", qualified };
+      const soakManifest = isRecord(run.soak) ? run.soak : null;
+      const soakArtifact = soakManifest?.soak;
+      const observedDurationMs = Number(soakManifest?.observedDurationMs ?? 0);
+      const soakQualified =
+        soakManifest?.platform === "macos" &&
+        soakManifest.status === "claimed" &&
+        soakManifest.qualified === true &&
+        platformSoakQualifies(soakArtifact, String(soakManifest.lane ?? ""), observedDurationMs);
+      const qualified = platformQualified && soakQualified;
+      return {
+        ...run,
+        status: qualified ? "claimed" : "unclaimed",
+        qualified,
+        observedDurationMs,
+        durationMs: observedDurationMs,
+      };
     });
+  const consecutiveQualifiedRuns = countConsecutiveQualifiedRuns(runs);
   const artifactDigest = createHash("sha256").update(JSON.stringify(runs)).digest("hex");
-  const source = sourceFor("all", artifactDigest, "platform-runs.aggregate.json", args);
-  const provenance = { ...source };
+  const source = sourceFor("all", artifactDigest, "release-runs.aggregate.json", args);
   await writeOutput(
     requiredOption(args, "--output"),
     await signed(
       {
         schemaVersion: RELEASE_EVIDENCE_SCHEMA_VERSION,
         kind: "resource-soak-promotion-evidence",
-        status: runs.filter((run) => run.qualified).length >= 3 ? "claimed" : "unclaimed",
-        qualified: runs.filter((run) => run.qualified).length >= 3,
+        status: consecutiveQualifiedRuns >= 3 ? "claimed" : "unclaimed",
+        qualified: consecutiveQualifiedRuns >= 3,
+        consecutiveQualifiedRuns,
         generatedAt: new Date().toISOString(),
         source,
-        provenance,
+        provenance: { ...source },
         runs,
       },
       args,
@@ -287,6 +441,7 @@ async function runWrapper(
 async function main(args = process.argv.slice(2)): Promise<number> {
   const command = args[0] ?? "platform";
   if (command === "platform") await runPlatform(args.slice(1));
+  else if (command === "soak") await runSoak(args.slice(1));
   else if (command === "aggregate") await runAggregate(args.slice(1));
   else if (command === "capability" || command === "review" || command === "rollback")
     await runWrapper(command, args.slice(1));

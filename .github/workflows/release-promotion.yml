@@ -11,11 +11,6 @@ on:
         description: "Completed nightly evidence workflow run to consume."
         required: true
         type: string
-      required_soak_runs:
-        description: "Consecutive qualified soak runs required by the gate."
-        required: true
-        default: "3"
-        type: string
       supplemental_evidence_run_id:
         description: "Optional successful same-commit run carrying signed capability/review/rollback evidence."
         required: false
@@ -34,7 +29,6 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       EVIDENCE_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.evidence_run_id || github.event.workflow_run.id }}
       SUPPLEMENTAL_EVIDENCE_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.supplemental_evidence_run_id || '' }}
-      REQUIRED_SOAK_RUNS: ${{ github.event_name == 'workflow_dispatch' && inputs.required_soak_runs || '3' }}
       EVIDENCE_REPOSITORY: ${{ github.repository }}
       EVIDENCE_WORKFLOW: ${{ github.repository }}/.github/workflows/nightly-release-evidence.yml
       RELEASE_EVIDENCE_PUBLIC_KEY: ${{ secrets.RELEASE_EVIDENCE_PUBLIC_KEY }}
@@ -67,9 +61,10 @@ jobs:
           node-version: "24"
       - uses: pnpm/action-setup@v6
       - run: pnpm install --frozen-lockfile
-      - name: Gather current and prior same-commit Nightly runs
+      - name: Gather complete same-commit evidence runs
         shell: bash
         run: |
+          set -euo pipefail
           rm -rf .release-evidence
           mkdir -p .release-evidence/runs
           if [[ -n "$SUPPLEMENTAL_EVIDENCE_RUN_ID" ]]; then
@@ -82,14 +77,34 @@ jobs:
           while IFS= read -r run; do
             run_id="$(jq -r '.databaseId' <<<"$run")"
             run_number="$(jq -r '.number' <<<"$run")"
+            artifacts="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts" --paginate)"
+            required=(
+              "release-platform-evidence-macos-$run_id"
+              "release-platform-evidence-linux-$run_id"
+              "release-platform-evidence-windows-$run_id"
+              "release-soak-evidence-$run_id"
+            )
+            complete=true
+            for artifact in "${required[@]}"; do
+              if ! jq -e --arg name "$artifact" '.artifacts | any(.name == $name and .expired == false)' <<<"$artifacts" >/dev/null; then
+                complete=false
+                break
+              fi
+            done
+            if [[ "$complete" != true ]]; then
+              continue
+            fi
             run_dir=".release-evidence/runs/run-$run_id"
             mkdir -p "$run_dir"
             for platform in macos linux windows; do
-              gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name "release-evidence-$platform-$run_id" --dir "$run_dir"
+              gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name "release-platform-evidence-$platform-$run_id" --dir "$run_dir"
             done
+            gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name "release-soak-evidence-$run_id" --dir "$run_dir"
             jq -n --arg runId "$run_id" --argjson runNumber "$run_number" --arg commit "$EVIDENCE_COMMIT" --arg sourceRef "$EVIDENCE_SOURCE_REF" --arg workflow "$EVIDENCE_WORKFLOW" --arg repository "$EVIDENCE_REPOSITORY" --arg generatedAt "$(jq -r '.createdAt' <<<"$run")" '{runId:$runId,runNumber:$runNumber,commitSha:$commit,sourceRef:$sourceRef,workflow:$workflow,repository:$repository,sequence:$runNumber,generatedAt:$generatedAt}' > "$run_dir/run-metadata.json"
           done < .release-evidence/run-list.json
-      - name: Verify every platform manifest subject with pinned GitHub attestation
+          find .release-evidence/runs -type f -name 'soak-evidence.json' -print -quit | grep -q .
+          test -f ".release-evidence/runs/run-$EVIDENCE_RUN_ID/run-metadata.json"
+      - name: Verify every evidence manifest with pinned GitHub attestation
         shell: bash
         run: |
           set -euo pipefail
@@ -101,11 +116,17 @@ jobs:
             verification="$(gh attestation verify "$manifest" --repo "$EVIDENCE_REPOSITORY" --format json --signer-workflow "$EVIDENCE_WORKFLOW" --source-ref "$EVIDENCE_SOURCE_REF" --source-digest "$EVIDENCE_COMMIT")"
             jq -n --argjson verification "$verification" --arg subjectPath "platform-$platform.json" --arg subjectDigest "$subject_digest" --arg repository "$EVIDENCE_REPOSITORY" --arg signerWorkflow "$EVIDENCE_WORKFLOW" --arg sourceRef "$EVIDENCE_SOURCE_REF" --arg sourceCommit "$EVIDENCE_COMMIT" --arg runId "$(jq -r '.runId' "$run_dir/run-metadata.json")" '{verified:true,verification:$verification,subjectPath:$subjectPath,subjectDigest:$subjectDigest,pinned:{repository:$repository,signerWorkflow:$signerWorkflow,sourceRef:$sourceRef,sourceCommit:$sourceCommit,runId:$runId}}' > "$run_dir/attestation-platform-$platform.json"
           done < <(find .release-evidence/runs -type f -name 'platform-*.json' -print)
+          while IFS= read -r manifest; do
+            run_dir="$(dirname "$manifest")"
+            subject_digest="sha256:$(sha256sum "$manifest" | cut -d' ' -f1)"
+            verification="$(gh attestation verify "$manifest" --repo "$EVIDENCE_REPOSITORY" --format json --signer-workflow "$EVIDENCE_WORKFLOW" --source-ref "$EVIDENCE_SOURCE_REF" --source-digest "$EVIDENCE_COMMIT")"
+            jq -n --argjson verification "$verification" --arg subjectPath "soak-evidence.json" --arg subjectDigest "$subject_digest" --arg repository "$EVIDENCE_REPOSITORY" --arg signerWorkflow "$EVIDENCE_WORKFLOW" --arg sourceRef "$EVIDENCE_SOURCE_REF" --arg sourceCommit "$EVIDENCE_COMMIT" --arg runId "$(jq -r '.runId' "$run_dir/run-metadata.json")" '{verified:true,verification:$verification,subjectPath:$subjectPath,subjectDigest:$subjectDigest,pinned:{repository:$repository,signerWorkflow:$signerWorkflow,sourceRef:$sourceRef,sourceCommit:$sourceCommit,runId:$runId}}' > "$run_dir/attestation-soak.json"
+          done < <(find .release-evidence/runs -type f -name 'soak-evidence.json' -print)
       - name: Aggregate distinct consecutive run evidence
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -d '' manifests < <(find .release-evidence/runs -type f -name 'platform-*.json' -print0)
+          mapfile -d '' manifests < <(find .release-evidence/runs -type f \( -name 'platform-*.json' -o -name 'soak-evidence.json' \) -print0)
           test "${#manifests[@]}" -gt 0
           aggregate_args=(aggregate --output .release-evidence/soak.json --repository "$EVIDENCE_REPOSITORY" --workflow "$EVIDENCE_WORKFLOW" --run-id "$EVIDENCE_RUN_ID" --run-number "$EVIDENCE_RUN_NUMBER" --source-ref "$EVIDENCE_SOURCE_REF" --commit "$EVIDENCE_COMMIT")
           for manifest in "${manifests[@]}"; do aggregate_args+=(--manifest "$manifest"); done
@@ -113,7 +134,7 @@ jobs:
       - name: Run fail-closed promotion gate
         run: |
           set -euo pipefail
-          gate_args=(release:promotion-gate --evidence-dir .release-evidence --required-soak-runs "$REQUIRED_SOAK_RUNS" --required-soak-duration-ms 28800000 --max-age-ms 172800000 --commit "$EVIDENCE_COMMIT" --repository "$EVIDENCE_REPOSITORY" --workflow "$EVIDENCE_WORKFLOW" --run-id "$EVIDENCE_RUN_ID" --source-ref "$EVIDENCE_SOURCE_REF" --output .release-evidence/promotion-gate.json)
+          gate_args=(release:promotion-gate --evidence-dir .release-evidence --required-soak-runs 3 --required-soak-duration-ms 28800000 --max-age-ms 172800000 --commit "$EVIDENCE_COMMIT" --repository "$EVIDENCE_REPOSITORY" --workflow "$EVIDENCE_WORKFLOW" --run-id "$EVIDENCE_RUN_ID" --source-ref "$EVIDENCE_SOURCE_REF" --output .release-evidence/promotion-gate.json)
           if [[ -n "$SUPPLEMENTAL_EVIDENCE_RUN_ID" ]]; then
             gate_args+=(--supplemental-run-id "$SUPPLEMENTAL_EVIDENCE_RUN_ID")
           fi

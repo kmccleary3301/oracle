@@ -18,7 +18,7 @@ The CLI should therefore guarantee its own behavior:
 5. Recover automatically when recovery is unambiguous; otherwise stop in a precise `requires_action` or `*_unknown` state.
 6. Keep the public API semantic and stable. Do not expose raw Playwright selectors or arbitrary browser scripting as the product interface.
 
-At plan inception, the fork was a useful prototype rather than this bounded system. Upstream supplied selector and lifecycle fixes but no hidden resource governor or process-memory solution; the local fork was already ahead in browser control and remote-tab hygiene. The implementation tranches below are now complete locally. The authenticated personal/project matrix passed on 2026-08-12 against the current ChatGPT web app. Promotion remains evidence-gated on a Windows resource baseline, three qualified eight-hour soak runs, and signed macOS/Linux/Windows release artifacts.
+At plan inception, the fork was a useful prototype rather than this bounded system. Upstream supplied selector and lifecycle fixes but no hidden resource governor or process-memory solution; the local fork was already ahead in browser control and remote-tab hygiene. The implementation tranches below are now complete locally. The authenticated personal/project matrix passed on 2026-08-12 against the current ChatGPT web app. Promotion remains evidence-gated on three qualified eight-hour soak runs and a signed macOS/Linux/Windows release matrix from the exact release commit.
 
 ### Claim policy
 
@@ -461,7 +461,7 @@ Each tranche is independently reviewable and promoted only after its gate passes
 
 - Target count never exceeds the configured hard maximum under concurrent clients.
 - After 200 submit/evict/poll cycles, settled process-tree RSS is within a calibrated fixed envelope of the warm baseline.
-- Eight-hour soak has no orphan processes and a measured RSS slope below the promoted threshold; threshold and noise method are recorded.
+- Eight-hour soak has no orphan processes and an endpoint RSS slope at or below 64 MiB/hour; the artifact records the exact `endpoint-delta-over-sample-span` slope method and `sample-range` noise method.
 - A maximum-size supported upload stays under the Node heap budget and never exists as a whole-file base64 string.
 - Hard-watermark injection yields `resource_exhausted`/`*_unknown` with evidence, never a host OOM.
 
@@ -540,6 +540,8 @@ Each tranche is independently reviewable and promoted only after its gate passes
 - Three consecutive qualified 8-hour soak runs and the full macOS/Linux/Windows platform matrix are green on the exact release commit.
 - Independent review finds no stale selector fixtures, schema/CLI/MCP drift, orphan process, unbounded input path, or unsupported capability claim.
 - Rollback and profile recovery are tested from the packaged CLI, not only source execution.
+
+The promotion workflow keeps those proofs distinct: GitHub-hosted runners execute the real-Chrome lifecycle matrix on each operating system, while a trusted self-hosted runner executes the uninterrupted eight-hour soak. A promotion run is complete only when all three platform manifests and its separately attested soak manifest exist. The gate then requires three complete runs with consecutive workflow run numbers, identical commit provenance, and valid GitHub OIDC attestations.
 
 ## Verification matrix
 

@@ -33,6 +33,9 @@ const CLEANUP_ATTEMPTS = 50;
 const CLEANUP_DELAY_MS = 100;
 const MAX_CYCLE_TARGETS = 1;
 const MiB = 1024 ** 2;
+const MAX_PROMOTION_RSS_SLOPE_BYTES_PER_SECOND = (64 * MiB) / (60 * 60);
+const PROMOTION_RSS_SLOPE_METHOD = "endpoint-delta-over-sample-span";
+const PROMOTION_RSS_NOISE_METHOD = "sample-range";
 
 export interface ResourceSoakOptions {
   durationMs: number;
@@ -522,6 +525,13 @@ export async function runResourceSoak(
       status: "unclaimed",
       requiredDurationMs: EIGHT_HOURS_MS,
       observedDurationMs,
+      rssSlope: {
+        method: PROMOTION_RSS_SLOPE_METHOD,
+        noiseMethod: PROMOTION_RSS_NOISE_METHOD,
+        observedBytesPerSecond: trends.rssBytes.slopePerSecond,
+        maxBytesPerSecond: MAX_PROMOTION_RSS_SLOPE_BYTES_PER_SECOND,
+        noiseBytes: Math.max(...rssValues) - Math.min(...rssValues),
+      },
     },
   });
   await mkdir(path.dirname(options.outputPath), { recursive: true });

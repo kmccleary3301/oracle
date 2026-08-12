@@ -43,6 +43,10 @@ export interface ReleasePromotionGateResult {
     capabilityDriftPassed: boolean;
   };
 }
+export const DEFAULT_MAX_PROMOTION_RSS_SLOPE_BYTES_PER_SECOND = (64 * 1024 * 1024) / (60 * 60);
+export const PROMOTION_RSS_SLOPE_METHOD = "endpoint-delta-over-sample-span";
+export const PROMOTION_RSS_NOISE_METHOD = "sample-range";
+
 function isRecord(value: unknown): value is JsonRecord {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -215,6 +219,22 @@ function normalizedSha256(value: unknown): string | null {
   if (!digest) return null;
   return digest.startsWith("sha256:") ? digest : `sha256:${digest}`;
 }
+
+function normalizedWorkflowIdentity(value: unknown): string | null {
+  const workflow = stringValue(value);
+  if (!workflow) return null;
+  return workflow.replace(/^https:\/\/github\.com\//, "").split("@", 1)[0] || null;
+}
+
+function normalizedRepositoryIdentity(value: unknown): string | null {
+  const repository = stringValue(value);
+  if (!repository) return null;
+  return repository.replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "") || null;
+}
+function runIdFromInvocation(value: unknown): string | null {
+  const invocation = stringValue(value);
+  return invocation?.match(/\/actions\/runs\/(\d+)(?:\/|$)/)?.[1] ?? null;
+}
 function attestationFacts(attestation: JsonRecord): JsonRecord | null {
   const verification = attestation.verification ?? attestation.rawVerification ?? attestation.raw;
   if (!verification || (isRecord(verification) && Object.keys(verification).length === 0))
@@ -223,46 +243,60 @@ function attestationFacts(attestation: JsonRecord): JsonRecord | null {
   if (result) {
     const signature = isRecord(result.signature) ? result.signature : null;
     const certificate = signature && isRecord(signature.certificate) ? signature.certificate : null;
-    const extensions =
-      certificate && isRecord(certificate.extensions) ? certificate.extensions : null;
+    const claims =
+      certificate && isRecord(certificate.extensions) ? certificate.extensions : certificate;
     const statement = isRecord(result.statement) ? result.statement : null;
     const subjects = statement && Array.isArray(statement.subject) ? statement.subject : [];
     const subject = subjects.find(isRecord) ?? null;
     const digest = subject && isRecord(subject.digest) ? subject.digest : null;
     return {
       repository:
-        stringValue(extensions?.sourceRepositoryIdentifier) ??
-        stringValue(extensions?.sourceRepository),
-      workflow:
-        stringValue(extensions?.buildSignerURI) ?? stringValue(extensions?.githubWorkflowRef),
+        normalizedRepositoryIdentity(
+          claims?.sourceRepositoryURI ?? claims?.githubWorkflowRepository,
+        ) ??
+        (/^\d+$/.test(String(claims?.sourceRepositoryIdentifier ?? ""))
+          ? null
+          : normalizedRepositoryIdentity(claims?.sourceRepositoryIdentifier)),
+      workflow: normalizedWorkflowIdentity(claims?.buildSignerURI ?? claims?.githubWorkflowRef),
       runId:
-        stringValue(extensions?.githubWorkflowRunID) ??
-        (typeof extensions?.githubWorkflowRunID === "number"
-          ? String(extensions.githubWorkflowRunID)
-          : null),
-      commitSha: stringValue(extensions?.sourceRepositoryDigest),
-      sourceRef: stringValue(extensions?.sourceRepositoryRef),
+        stringValue(claims?.githubWorkflowRunID) ??
+        (typeof claims?.githubWorkflowRunID === "number"
+          ? String(claims.githubWorkflowRunID)
+          : null) ??
+        runIdFromInvocation(claims?.runInvocationURI),
+      commitSha: stringValue(claims?.sourceRepositoryDigest),
+      sourceRef: stringValue(claims?.sourceRepositoryRef),
       subjectPath: stringValue(subject?.name),
       artifactDigest: normalizedSha256(digest?.sha256),
-      issuer: stringValue(extensions?.oidcIssuer),
+      issuer:
+        stringValue(claims?.oidcIssuer) ??
+        stringValue(claims?.issuer) ??
+        stringValue(claims?.certificateIssuer),
     };
   }
   return {
-    repository: nestedClaim(verification, [
-      "sourceRepositoryIdentifier",
-      "sourceRepository",
-      "repository",
-      "repo",
-    ]),
-    workflow: nestedClaim(verification, [
-      "buildSignerURI",
-      "githubWorkflowRef",
-      "signerWorkflow",
-      "workflow",
-      "workflowName",
-      "workflowRef",
-    ]),
-    runId: nestedClaim(verification, ["githubWorkflowRunID", "runId", "run_id", "workflowRunId"]),
+    repository: normalizedRepositoryIdentity(
+      nestedClaim(verification, [
+        "sourceRepositoryURI",
+        "githubWorkflowRepository",
+        "sourceRepository",
+        "repository",
+        "repo",
+      ]),
+    ),
+    workflow: normalizedWorkflowIdentity(
+      nestedClaim(verification, [
+        "buildSignerURI",
+        "githubWorkflowRef",
+        "signerWorkflow",
+        "workflow",
+        "workflowName",
+        "workflowRef",
+      ]),
+    ),
+    runId:
+      nestedClaim(verification, ["githubWorkflowRunID", "runId", "run_id", "workflowRunId"]) ??
+      runIdFromInvocation(nestedClaim(verification, ["runInvocationURI"])),
     commitSha: nestedClaim(verification, [
       "sourceRepositoryDigest",
       "commitSha",
@@ -274,7 +308,7 @@ function attestationFacts(attestation: JsonRecord): JsonRecord | null {
     artifactDigest: normalizedSha256(
       nestedClaim(verification, ["artifactDigest", "subjectDigest", "digest", "sha256"]),
     ),
-    issuer: nestedClaim(verification, ["issuer", "certificateIssuer", "issuerUrl"]),
+    issuer: nestedClaim(verification, ["oidcIssuer", "issuer", "certificateIssuer", "issuerUrl"]),
   };
 }
 function validAttestation(
@@ -295,13 +329,27 @@ function validAttestation(
     return false;
   }
   const pinned = isRecord(attestation.pinned) ? attestation.pinned : null;
-  const actualRepository = claim(pinned ?? {}, "repository") ?? stringValue(facts.repository);
-  const actualWorkflow =
-    claim(pinned ?? {}, "signerWorkflow", "workflow") ?? stringValue(facts.workflow);
-  const actualRunId = claim(pinned ?? {}, "runId") ?? stringValue(facts.runId);
-  const actualCommit =
-    claim(pinned ?? {}, "sourceCommit", "commitSha") ?? stringValue(facts.commitSha);
-  const actualSourceRef = claim(pinned ?? {}, "sourceRef") ?? stringValue(facts.sourceRef);
+  const actualRepository = stringValue(facts.repository);
+  const actualWorkflow = normalizedWorkflowIdentity(facts.workflow);
+  const actualRunId = stringValue(facts.runId);
+  const actualCommit = stringValue(facts.commitSha);
+  const actualSourceRef = stringValue(facts.sourceRef);
+  if (pinned) {
+    const pinnedClaims: Array<[string, string | null, string | null]> = [
+      ["repository", claim(pinned, "repository"), actualRepository],
+      [
+        "workflow",
+        normalizedWorkflowIdentity(claim(pinned, "signerWorkflow", "workflow")),
+        actualWorkflow,
+      ],
+      ["run_id", claim(pinned, "runId"), actualRunId],
+      ["commit", claim(pinned, "sourceCommit", "commitSha"), actualCommit],
+      ["source_ref", claim(pinned, "sourceRef"), actualSourceRef],
+    ];
+    for (const [name, pinnedValue, actual] of pinnedClaims)
+      if (!pinnedValue || !actual || pinnedValue !== actual)
+        reasons.push(`${reasonPrefix}_attestation_pinned_${name}_mismatch`);
+  }
   const expected: Array<[string, string | null, string | null]> = [
     ["repository", stringValue(provenance.repository), actualRepository],
     ["workflow", stringValue(provenance.workflow), actualWorkflow],
@@ -339,7 +387,7 @@ function validAttestation(
     reasons.push(`${reasonPrefix}_attestation_subject_digest_missing`);
   else if (wrapperDigest !== rawDigest)
     reasons.push(`${reasonPrefix}_attestation_subject_digest_mismatch`);
-  if (facts.issuer && facts.issuer !== "https://token.actions.githubusercontent.com")
+  if (facts.issuer !== "https://token.actions.githubusercontent.com")
     reasons.push(`${reasonPrefix}_attestation_issuer_invalid`);
   return reasons.length === before;
 }
@@ -519,22 +567,13 @@ function cleanCycles(value: unknown): boolean {
     cycles.every((cycle) => isRecord(cycle) && cycle.baselineRestored === true)
   );
 }
-function qualifiesPlatform(
-  value: JsonRecord,
-  options: Required<ReleasePromotionGateOptions>,
-  reasons: string[],
-  prefix: string,
-): boolean {
+function validLiveProcessSoak(value: JsonRecord): boolean {
   const soak = isRecord(value.soak) ? value.soak : null;
   const chrome = soak && isRecord(soak.chrome) ? soak.chrome : null;
   const cleanup = soak && isRecord(soak.cleanup) ? soak.cleanup : null;
   const orphans = soak && isRecord(soak.orphans) ? soak.orphans : null;
   const samples = soak && Array.isArray(soak.samples) ? soak.samples : [];
-  const duration = durationOf(value);
-  const valid =
-    value.qualified === true &&
-    isClaimed(value) &&
-    value.lane === "promotion" &&
+  return (
     soak?.realProcessSampling === true &&
     Boolean(chrome) &&
     chrome?.isolated === true &&
@@ -554,12 +593,105 @@ function qualifiesPlatform(
         sample.rootFound === true &&
         Number(sample.processCount) > 0 &&
         Number(sample.rssBytes) > 0,
-    ) &&
-    duration !== null &&
-    duration >= options.requiredSoakDurationMs;
-  if (!valid) reasons.push(`${prefix}_chrome_soak_unqualified`);
+    )
+  );
+}
+
+function validSoakContinuity(value: JsonRecord, requiredDurationMs: number): boolean {
+  const soak = isRecord(value.soak) ? value.soak : null;
+  const cleanup = soak && isRecord(soak.cleanup) ? soak.cleanup : null;
+  const samples = soak && Array.isArray(soak.samples) ? soak.samples : [];
+  const orphans = soak && isRecord(soak.orphans) ? soak.orphans : null;
+  const cycles = orphans && Array.isArray(orphans.cycles) ? orphans.cycles : [];
+  const durationMs = numberValue(soak?.durationMs);
+  const requestedDurationMs = numberValue(soak?.requestedDurationMs);
+  const gate = soak && isRecord(soak.promotionGate) ? soak.promotionGate : null;
+  const gateDurationMs = numberValue(gate?.observedDurationMs);
+  const rootPid = numberValue(soak?.rootPid);
+  if (
+    durationMs === null ||
+    requestedDurationMs === null ||
+    gateDurationMs === null ||
+    rootPid === null ||
+    !Number.isInteger(rootPid) ||
+    rootPid <= 0 ||
+    durationMs < requiredDurationMs ||
+    requestedDurationMs < requiredDurationMs ||
+    gateDurationMs !== durationMs ||
+    samples.length < 2 ||
+    cycles.length !== samples.length ||
+    numberValue(cleanup?.rootPid) !== rootPid
+  )
+    return false;
+  const sampledAt = samples.map((sample) =>
+    isRecord(sample) && numberValue(sample.sampledAtMs) !== null
+      ? Number(sample.sampledAtMs)
+      : Number.NaN,
+  );
+  if (
+    sampledAt.some((sampledAtMs) => !Number.isFinite(sampledAtMs)) ||
+    samples.some((sample) => !isRecord(sample) || numberValue(sample.rootPid) !== rootPid)
+  )
+    return false;
+  const rss = soak && isRecord(soak.rss) ? soak.rss : null;
+  const rssSlope = gate && isRecord(gate.rssSlope) ? gate.rssSlope : null;
+  const observedSlope = numberValue(rss?.slopeBytesPerSecond);
+  const recordedSlope = numberValue(rssSlope?.observedBytesPerSecond);
+  const maximumSlope = numberValue(rssSlope?.maxBytesPerSecond);
+  const noiseBytes = numberValue(rss?.noiseBytes);
+  const recordedNoiseBytes = numberValue(rssSlope?.noiseBytes);
+  if (
+    rssSlope?.method !== PROMOTION_RSS_SLOPE_METHOD ||
+    rssSlope.noiseMethod !== PROMOTION_RSS_NOISE_METHOD ||
+    observedSlope === null ||
+    recordedSlope === null ||
+    recordedSlope !== observedSlope ||
+    maximumSlope !== DEFAULT_MAX_PROMOTION_RSS_SLOPE_BYTES_PER_SECOND ||
+    observedSlope > DEFAULT_MAX_PROMOTION_RSS_SLOPE_BYTES_PER_SECOND ||
+    noiseBytes === null ||
+    noiseBytes < 0 ||
+    recordedNoiseBytes !== noiseBytes
+  )
+    return false;
+  const maximumGapMs = 15_000;
+  for (let index = 1; index < sampledAt.length; index += 1) {
+    const gap = sampledAt[index] - sampledAt[index - 1];
+    if (gap <= 0 || gap > maximumGapMs) return false;
+  }
+  return sampledAt.at(-1)! - sampledAt[0] >= requiredDurationMs - maximumGapMs;
+}
+
+function qualifiesPlatform(value: JsonRecord, reasons: string[], prefix: string): boolean {
+  const valid =
+    value.qualified === true &&
+    isClaimed(value) &&
+    value.lane === "matrix" &&
+    validLiveProcessSoak(value) &&
+    (durationOf(value) ?? 0) > 0;
+  if (!valid) reasons.push(`${prefix}_matrix_unqualified`);
   return valid;
 }
+
+function qualifiesSoakEvidence(
+  value: JsonRecord,
+  options: Required<ReleasePromotionGateOptions>,
+  reasons: string[],
+  prefix: string,
+): boolean {
+  const duration = durationOf(value);
+  const valid =
+    value.platform === "macos" &&
+    value.qualified === true &&
+    isClaimed(value) &&
+    value.lane === "promotion" &&
+    validLiveProcessSoak(value) &&
+    validSoakContinuity(value, options.requiredSoakDurationMs) &&
+    duration !== null &&
+    duration >= options.requiredSoakDurationMs;
+  if (!valid) reasons.push(`${prefix}_unqualified`);
+  return valid;
+}
+
 type AuthenticatedPlatformRun = {
   runId: string;
   runNumber: number;
@@ -663,6 +795,7 @@ type PlatformRun = {
   generatedAt: string | number | null;
   sequence: number | null;
   platforms: Map<string, unknown>;
+  soak: unknown;
   attestations: JsonRecord;
 };
 function platformRuns(input: JsonRecord, manifests: JsonRecord): PlatformRun[] {
@@ -691,6 +824,7 @@ function platformRuns(input: JsonRecord, manifests: JsonRecord): PlatformRun[] {
         null,
       sequence: numberValue(record.sequence),
       platforms,
+      soak: record.soak,
       attestations: isRecord(record.attestations) ? record.attestations : {},
     };
   });
@@ -702,9 +836,14 @@ export function evaluateReleasePromotionGate(
   const options: Required<ReleasePromotionGateOptions> = {
     nowMs: suppliedOptions.nowMs ?? Date.now(),
     maxAgeMs: suppliedOptions.maxAgeMs ?? DEFAULT_MAX_AGE_MS,
-    requiredSoakRuns: suppliedOptions.requiredSoakRuns ?? DEFAULT_REQUIRED_SOAK_RUNS,
-    requiredSoakDurationMs:
+    requiredSoakRuns: Math.max(
+      DEFAULT_REQUIRED_SOAK_RUNS,
+      suppliedOptions.requiredSoakRuns ?? DEFAULT_REQUIRED_SOAK_RUNS,
+    ),
+    requiredSoakDurationMs: Math.max(
+      DEFAULT_REQUIRED_SOAK_DURATION_MS,
       suppliedOptions.requiredSoakDurationMs ?? DEFAULT_REQUIRED_SOAK_DURATION_MS,
+    ),
     expectedRepository: suppliedOptions.expectedRepository ?? "",
     expectedWorkflow: suppliedOptions.expectedWorkflow ?? "",
     expectedRunId: suppliedOptions.expectedRunId ?? "",
@@ -793,7 +932,6 @@ export function evaluateReleasePromotionGate(
     let runQualified = true;
     let authenticatedRunNumber: number | null = null;
     let authenticatedCommitSha: string | null = null;
-    let authenticatedDurationMs: number | null = null;
     for (const platform of run.platforms.keys())
       if (!(REQUIRED_PLATFORMS as readonly string[]).includes(platform))
         reasons.push(`platform_run_${runLabel}_unexpected_${platform}`);
@@ -817,13 +955,12 @@ export function evaluateReleasePromotionGate(
         !isRecord(entry) ||
         !isClaimed(entry) ||
         !valid ||
-        !qualifiesPlatform(entry, options, reasons, `platform_${runLabel}_${platform}`)
+        !qualifiesPlatform(entry, reasons, `platform_${runLabel}_${platform}`)
       )
         runQualified = false;
       const provenance = provenanceValue(entry);
       const provenanceRunNumber = numberValue(provenance?.runNumber);
       const provenanceCommitSha = stringValue(provenance?.commitSha);
-      const entryDuration = isRecord(entry) ? durationOf(entry) : null;
       if (
         !provenance ||
         stringValue(provenance.runId) !== run.runId ||
@@ -859,13 +996,37 @@ export function evaluateReleasePromotionGate(
       } else {
         authenticatedCommitSha = provenanceCommitSha;
       }
-      if (entryDuration === null) {
+    }
+    const soakEntry = run.soak;
+    let authenticatedDurationMs: number | null = null;
+    if (!isRecord(soakEntry)) {
+      reasons.push(`soak_${runLabel}_manifest_invalid`);
+      runQualified = false;
+    } else {
+      const soakPlatform = stringValue(soakEntry.platform);
+      const soakOptions = { ...options, expectedRunId: run.runId };
+      const valid =
+        Boolean(soakPlatform) &&
+        hasValidEnvelope(
+          soakEntry,
+          `soak_${runLabel}`,
+          reasons,
+          soakOptions,
+          soakPlatform ?? undefined,
+          run.attestations.soak ?? externalAttestations?.[`${run.runId}:soak`],
+        );
+      const qualifies = qualifiesSoakEvidence(soakEntry, options, reasons, `soak_${runLabel}`);
+      if (!valid || !isClaimed(soakEntry) || !qualifies) runQualified = false;
+      const provenance = provenanceValue(soakEntry);
+      authenticatedDurationMs = durationOf(soakEntry);
+      if (
+        !provenance ||
+        stringValue(provenance.runId) !== run.runId ||
+        numberValue(provenance.runNumber) !== authenticatedRunNumber ||
+        stringValue(provenance.commitSha) !== authenticatedCommitSha
+      ) {
+        reasons.push(`soak_${runLabel}_run_provenance_mismatch`);
         runQualified = false;
-      } else {
-        authenticatedDurationMs =
-          authenticatedDurationMs === null
-            ? entryDuration
-            : Math.min(authenticatedDurationMs, entryDuration);
       }
     }
     if (
@@ -1000,12 +1161,7 @@ async function allJsonFiles(directory: string): Promise<string[]> {
 }
 function basenamePlatform(name: string): RequiredPlatform | null {
   for (const platform of REQUIRED_PLATFORMS)
-    if (
-      name === `platform-${platform}.json` ||
-      name === `${platform}.json` ||
-      name === `resource-${platform}.json`
-    )
-      return platform;
+    if (name === `platform-${platform}.json`) return platform;
   return null;
 }
 export async function loadReleaseEvidenceDirectory(directory: string): Promise<JsonRecord> {
@@ -1035,12 +1191,38 @@ export async function loadReleaseEvidenceDirectory(directory: string): Promise<J
       platforms: {},
       attestations: {},
     };
+    if ((group.platforms as JsonRecord)[platform] !== undefined)
+      throw new Error(`duplicate platform manifest for run ${runId} and ${platform}`);
     (group.platforms as JsonRecord)[platform] = value;
     const attestationPath = path.join(path.dirname(file), `attestation-platform-${platform}.json`);
     if (byName.has(attestationPath))
       (group.attestations as JsonRecord)[platform] = await readJson(attestationPath);
     groups.set(runId, group);
     (manifests.platforms as JsonRecord)[platform] = value;
+  }
+  for (const file of files) {
+    if (path.basename(file) !== "soak-evidence.json") continue;
+    const value = await readJson(file);
+    const provenance = provenanceValue(value);
+    const runId =
+      stringValue(provenance?.runId) ??
+      path.basename(path.dirname(file)).match(/(?:run-|nightly-)?(\d+)/)?.[1] ??
+      "";
+    const group = groups.get(runId) ?? {
+      runId,
+      runNumber: provenance?.runNumber,
+      commitSha: provenance?.commitSha,
+      generatedAt: provenance?.generatedAt,
+      sequence: provenance?.runNumber,
+      platforms: {},
+      attestations: {},
+    };
+    if (group.soak !== undefined) throw new Error(`duplicate soak manifest for run ${runId}`);
+    group.soak = value;
+    const attestationPath = path.join(path.dirname(file), "attestation-soak.json");
+    if (byName.has(attestationPath))
+      (group.attestations as JsonRecord).soak = await readJson(attestationPath);
+    groups.set(runId, group);
   }
   for (const file of files) {
     const name = path.basename(file);
@@ -1071,6 +1253,7 @@ export async function loadReleaseEvidenceDirectory(directory: string): Promise<J
       ...group,
       ...metadata,
       platforms: group.platforms,
+      soak: group.soak,
       attestations: group.attestations,
     });
   }
