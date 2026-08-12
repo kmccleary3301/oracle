@@ -990,7 +990,7 @@ export async function createChromePageTarget(
 ): Promise<string | undefined> {
   const effectiveHost = host ?? "127.0.0.1";
   const lease = await reserveCoordinatorTarget(effectiveHost, port, {
-    ...(options?.coordinator ?? {}),
+    ...(options?.coordinator ?? { ownerStartToken: `controller:${process.pid}` }),
     role: options?.role,
     url: "about:blank",
   });
