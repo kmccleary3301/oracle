@@ -1,368 +1,80 @@
 import { mkdirSync } from "node:fs";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
-import { getOracleHomeDir } from "../oracleHome.js";
+import {
+  DEFAULT_COORDINATOR_BUSY_TIMEOUT_MS,
+  DEFAULT_COORDINATOR_MAX_RESOURCE_SAMPLES,
+  DEFAULT_COORDINATOR_STALE_OWNER_MS,
+  DEFAULT_COORDINATOR_TARGET_CEILING,
+  defaultCoordinatorDatabasePath,
+  defaultCoordinatorProfilePath,
+  type AddArtifactInput,
+  type AddAttachmentInput,
+  type AdmitTargetInput,
+  type AppendJobEventInput,
+  type AppendResourceSampleInput,
+  type BindTargetReservationInput,
+  type BrowserCoordinatorArtifact,
+  type BrowserCoordinatorAttachment,
+  type BrowserCoordinatorGenerationClaim,
+  type BrowserCoordinatorJob,
+  type BrowserCoordinatorJobEvent,
+  type BrowserCoordinatorProfile,
+  type BrowserCoordinatorRateLimit,
+  type BrowserCoordinatorResourceGate,
+  type BrowserCoordinatorResourceSample,
+  type BrowserCoordinatorStoreOptions,
+  type BrowserCoordinatorTarget,
+  type BrowserCoordinatorTargetAdmission,
+  type BrowserCoordinatorTargetBinding,
+  type BrowserCoordinatorTargetCeilings,
+  type BrowserCoordinatorTargetRole,
+  type ClaimProfileGenerationInput,
+  type CreateJobInput,
+  type HeartbeatProfileInput,
+  type ProfileGenerationClaimReason,
+  type TargetAdmissionReason,
+  type TransitionJobInput,
+  type UpdateTargetInput,
+  type UpsertRateLimitInput,
+  type UpsertResourceGateInput,
+} from "./coordinatorTypes.js";
+import { initializeCoordinatorSchema } from "./coordinatorSchema.js";
+import {
+  artifactFromRow,
+  assertOwner,
+  countActiveCoordinatorTargets,
+  insertCoordinatorJobEvent,
+  attachmentFromRow,
+  eventFromRow,
+  finiteTimestamp,
+  jobFromRow,
+  normalizeTargetCeilings,
+  positiveInteger,
+  rateLimitFromRow,
+  readCoordinatorJob,
+  readCoordinatorProfile,
+  readCoordinatorResourceGate,
+  readCoordinatorTarget,
+  requireCoordinatorArtifact,
+  requireCoordinatorAttachment,
+  requireCoordinatorJob,
+  requireCoordinatorProfile,
+  requireCoordinatorRateLimit,
+  requireCoordinatorResourceGate,
+  requireCoordinatorResourceSample,
+  resourceSampleFromRow,
+  targetFromRow,
+  validateAttempt,
+  validateGeneration,
+  validateMetadata,
+  validateOptionalMetadata,
+  validateSize,
+  validateTargetInput,
+} from "./coordinatorValidation.js";
 
-/**
- * The coordinator database is intentionally metadata-only. Requests, prompts, response
- * bodies, and artifact contents belong on disk and are represented here only by hashes and
- * paths.
- */
-export const COORDINATOR_SCHEMA_VERSION = 2;
-export const DEFAULT_COORDINATOR_BUSY_TIMEOUT_MS = 5_000;
-export const DEFAULT_COORDINATOR_STALE_OWNER_MS = 30_000;
-export const DEFAULT_COORDINATOR_MAX_RESOURCE_SAMPLES = 256;
-export const DEFAULT_COORDINATOR_TARGET_CEILING = 3;
-export const MAX_COORDINATOR_METADATA_TEXT_BYTES = 8 * 1024;
-
-export type BrowserCoordinatorProfileState = "running" | "stopped";
-export type BrowserCoordinatorTargetState = "admitted" | "active" | "closing" | "closed" | "lost";
-export type BrowserCoordinatorTargetRole =
-  | "mutation"
-  | "polling"
-  | "recovery"
-  | "auth"
-  | "auxiliary"
-  | (string & {});
-export type BrowserCoordinatorJobState = string & {};
-
-/** Stable outcome labels used by the coordinator when a turn cannot be treated as success/failure. */
-export type BrowserCoordinatorJobOutcome =
-  | "success"
-  | "failure"
-  | "cancel"
-  | "unknown"
-  | "conflict"
-  | "requires_action";
-
-export type BrowserCoordinatorResourceGatePhase = "normal" | "soft" | "hard" | "unknown";
-
-export const BROWSER_COORDINATOR_TERMINAL_OUTCOMES = [
-  "success",
-  "failure",
-  "cancel",
-  "unknown",
-  "conflict",
-  "requires_action",
-] as const satisfies readonly BrowserCoordinatorJobOutcome[];
-
-export interface BrowserCoordinatorTargetCeilings {
-  total?: number;
-  roles?: Partial<Record<BrowserCoordinatorTargetRole, number>>;
-  [role: string]: number | Partial<Record<BrowserCoordinatorTargetRole, number>> | undefined;
-}
-
-export interface BrowserCoordinatorStoreOptions {
-  profileId: string;
-  profilePath?: string;
-  databasePath?: string;
-  resolveDatabasePath?: (profileId: string, profilePath?: string) => string;
-  busyTimeoutMs?: number;
-  staleOwnerMs?: number;
-  targetCeilings?: BrowserCoordinatorTargetCeilings;
-  maxResourceSamples?: number;
-  now?: () => number;
-}
-
-export interface BrowserCoordinatorResourceGate {
-  profileId: string;
-  generation: number | null;
-  phase: BrowserCoordinatorResourceGatePhase;
-  reason: string;
-  processTreeRssBytes: number | null;
-  rssSoftBytes: number;
-  rssHardBytes: number;
-  rssResumeBytes: number;
-  sampledAt: number;
-}
-
-export interface UpsertResourceGateInput {
-  generation?: number | null;
-  phase: BrowserCoordinatorResourceGatePhase;
-  reason: string;
-  processTreeRssBytes?: number | null;
-  rssSoftBytes: number;
-  rssHardBytes: number;
-  rssResumeBytes: number;
-  sampledAt?: number;
-}
-
-export interface BrowserCoordinatorProfile {
-  profileId: string;
-  path: string | null;
-  generation: number;
-  ownerPid: number | null;
-  ownerStartToken: string | null;
-  browserPid: number | null;
-  devtoolsEndpoint: string | null;
-  state: BrowserCoordinatorProfileState;
-  heartbeatAt: number | null;
-}
-
-export interface ClaimProfileGenerationInput {
-  ownerPid: number;
-  ownerStartToken: string;
-  now?: number;
-  staleOwnerMs?: number;
-  takeover?: boolean;
-  browserPid?: number | null;
-  devtoolsEndpoint?: string | null;
-}
-
-export type ProfileGenerationClaimReason =
-  | "claimed"
-  | "already_owner"
-  | "owner_active"
-  | "takeover_required";
-
-export interface BrowserCoordinatorGenerationClaim {
-  claimed: boolean;
-  generation: number;
-  takeover: boolean;
-  reason: ProfileGenerationClaimReason;
-  profile: BrowserCoordinatorProfile;
-}
-
-export interface HeartbeatProfileInput {
-  generation: number;
-  ownerPid: number;
-  ownerStartToken: string;
-  now?: number;
-  browserPid?: number | null;
-  devtoolsEndpoint?: string | null;
-}
-
-export interface BrowserCoordinatorTarget {
-  targetId: string;
-  reservationId: string;
-  profileId: string;
-  generation: number;
-  role: BrowserCoordinatorTargetRole;
-  ownerJobId: string | null;
-  state: BrowserCoordinatorTargetState;
-  url: string | null;
-  createdAt: number;
-  lastSeenAt: number;
-}
-
-export interface AdmitTargetInput {
-  targetId?: string;
-  reservationId?: string;
-  generation: number;
-  role: BrowserCoordinatorTargetRole;
-  ownerJobId?: string | null;
-  state?: BrowserCoordinatorTargetState;
-  url?: string | null;
-  now?: number;
-}
-
-export type TargetAdmissionReason =
-  | "admitted"
-  | "target_exists"
-  | "reservation_exists"
-  | "generation_mismatch"
-  | "resource_soft"
-  | "resource_hard"
-  | "resource_unknown"
-  | "total_ceiling"
-  | "role_ceiling";
-
-export interface BrowserCoordinatorTargetAdmission {
-  admitted: boolean;
-  reason: TargetAdmissionReason;
-  reservationId: string | null;
-  target: BrowserCoordinatorTarget | null;
-  activeTargetCount: number;
-  activeRoleCount: number;
-}
-
-export interface BindTargetReservationInput {
-  reservationId: string;
-  targetId: string;
-  generation: number;
-  url?: string | null;
-  now?: number;
-}
-
-export type TargetBindingReason =
-  | "bound"
-  | "already_bound"
-  | "reservation_missing"
-  | "generation_mismatch"
-  | "target_exists";
-
-export interface BrowserCoordinatorTargetBinding {
-  bound: boolean;
-  reason: TargetBindingReason;
-  target: BrowserCoordinatorTarget | null;
-}
-
-export interface UpdateTargetInput {
-  targetId: string;
-  generation: number;
-  state?: BrowserCoordinatorTargetState;
-  url?: string | null;
-  now?: number;
-}
-
-export interface BrowserCoordinatorJob {
-  jobId: string;
-  profileId: string | null;
-  operation: string;
-  state: BrowserCoordinatorJobState;
-  reasonCode: string | null;
-  requestHash: string | null;
-  conversationId: string | null;
-  expectedHead: string | null;
-  ownerGeneration: number | null;
-  ownerLeaseId: string | null;
-  idempotencyKey: string | null;
-  attempt: number;
-  createdAt: number;
-  updatedAt: number;
-  retryPolicy: string | null;
-}
-
-export interface CreateJobInput {
-  jobId?: string;
-  operation: string;
-  state?: BrowserCoordinatorJobState;
-  reasonCode?: string | null;
-  requestHash?: string | null;
-  conversationId?: string | null;
-  expectedHead?: string | null;
-  ownerGeneration?: number | null;
-  ownerLeaseId?: string | null;
-  idempotencyKey?: string | null;
-  attempt?: number;
-  retryPolicy?: string | null;
-  now?: number;
-}
-
-export interface TransitionJobInput {
-  jobId: string;
-  expectedState: BrowserCoordinatorJobState;
-  nextState: BrowserCoordinatorJobState;
-  expectedOwnerGeneration?: number | null;
-  ownerGeneration?: number | null;
-  expectedOwnerLeaseId?: string | null;
-  ownerLeaseId?: string | null;
-  attempt?: number;
-  reasonCode?: string | null;
-  evidencePath?: string | null;
-  now?: number;
-}
-
-export interface BrowserCoordinatorJobEvent {
-  jobId: string;
-  sequence: number;
-  state: BrowserCoordinatorJobState;
-  reasonCode: string | null;
-  evidencePath: string | null;
-  timestamp: number;
-}
-
-export interface AppendJobEventInput {
-  jobId: string;
-  state: BrowserCoordinatorJobState;
-  reasonCode?: string | null;
-  evidencePath?: string | null;
-  timestamp?: number;
-}
-
-export interface BrowserCoordinatorAttachment {
-  attachmentId: string;
-  jobId: string;
-  path: string;
-  size: number;
-  mediaType: string | null;
-  sha256: string | null;
-  remoteFileId: string | null;
-  observedState: string | null;
-}
-
-export interface AddAttachmentInput {
-  attachmentId?: string;
-  jobId: string;
-  path: string;
-  size: number;
-  mediaType?: string | null;
-  sha256?: string | null;
-  remoteFileId?: string | null;
-  observedState?: string | null;
-}
-
-export interface BrowserCoordinatorArtifact {
-  artifactId: string;
-  jobId: string;
-  kind: string;
-  sourceUrl: string | null;
-  path: string | null;
-  size: number | null;
-  sha256: string | null;
-  turnId: string | null;
-}
-
-export interface AddArtifactInput {
-  artifactId?: string;
-  jobId: string;
-  kind: string;
-  sourceUrl?: string | null;
-  path?: string | null;
-  size?: number | null;
-  sha256?: string | null;
-  turnId?: string | null;
-}
-
-export interface BrowserCoordinatorRateLimit {
-  key: string;
-  limit: number | null;
-  remaining: number | null;
-  resetAt: number | null;
-  retryAfter: number | null;
-  updatedAt: number;
-}
-
-export interface UpsertRateLimitInput {
-  key: string;
-  limit?: number | null;
-  remaining?: number | null;
-  resetAt?: number | null;
-  retryAfter?: number | null;
-  now?: number;
-}
-
-export interface BrowserCoordinatorResourceSample {
-  sampleId: number;
-  profileId: string;
-  generation: number | null;
-  sampledAt: number;
-  processTreeRssBytes: number;
-  processTreeCpuTimeMs: number | null;
-  chromePid: number | null;
-  processCount: number | null;
-}
-
-export interface AppendResourceSampleInput {
-  generation?: number | null;
-  sampledAt?: number;
-  processTreeRssBytes: number;
-  processTreeCpuTimeMs?: number | null;
-  chromePid?: number | null;
-  processCount?: number | null;
-}
-
-export function defaultCoordinatorDatabasePath(profilePath: string): string {
-  return path.join(profilePath, "coordinator.sqlite");
-}
-
-export function defaultCoordinatorProfilePath(profileId: string): string {
-  const slug = createHash("sha256").update(profileId).digest("hex").slice(0, 24);
-  return path.join(getOracleHomeDir(), "browser-coordinator", slug);
-}
-
-const ACTIVE_TARGET_STATES = ["admitted", "active", "closing"] as const;
+export * from "./coordinatorTypes.js";
 
 export class BrowserCoordinatorStore {
   readonly profileId: string;
@@ -405,7 +117,9 @@ export class BrowserCoordinatorStore {
     try {
       this.#db.exec(`PRAGMA busy_timeout = ${this.busyTimeoutMs};`);
       this.#db.exec("PRAGMA journal_mode = WAL;");
-      this.#initializeSchema();
+      initializeCoordinatorSchema(this.#db, this.#clock(), (callback) =>
+        this.#transaction(callback),
+      );
     } catch (error) {
       this.#db.close();
       throw error;
@@ -424,7 +138,7 @@ export class BrowserCoordinatorStore {
 
   getProfile(): BrowserCoordinatorProfile | null {
     this.#assertOpen();
-    return this.#readProfile();
+    return readCoordinatorProfile(this.#db, this.profileId);
   }
 
   claimProfileGeneration(input: ClaimProfileGenerationInput): BrowserCoordinatorGenerationClaim {
@@ -433,7 +147,7 @@ export class BrowserCoordinatorStore {
     const now = finiteTimestamp(input.now ?? this.#clock());
     const staleOwnerMs = positiveInteger(input.staleOwnerMs ?? this.#staleOwnerMs, "staleOwnerMs");
     return this.#transaction(() => {
-      const existing = this.#readProfile();
+      const existing = readCoordinatorProfile(this.#db, this.profileId);
       if (!existing) {
         this.#db
           .prepare(
@@ -451,7 +165,11 @@ export class BrowserCoordinatorStore {
             input.devtoolsEndpoint ?? null,
             now,
           );
-        return this.#claimResult("claimed", false, this.#readProfileOrThrow());
+        return this.#claimResult(
+          "claimed",
+          false,
+          requireCoordinatorProfile(this.#db, this.profileId),
+        );
       }
 
       if (existing.state === "stopped") {
@@ -473,7 +191,11 @@ export class BrowserCoordinatorStore {
             this.profileId,
             existing.generation,
           );
-        return this.#claimResult("claimed", true, this.#readProfileOrThrow());
+        return this.#claimResult(
+          "claimed",
+          true,
+          requireCoordinatorProfile(this.#db, this.profileId),
+        );
       }
 
       const sameOwner =
@@ -493,7 +215,11 @@ export class BrowserCoordinatorStore {
             input.ownerPid,
             input.ownerStartToken,
           );
-        return this.#claimResult("already_owner", false, this.#readProfileOrThrow());
+        return this.#claimResult(
+          "already_owner",
+          false,
+          requireCoordinatorProfile(this.#db, this.profileId),
+        );
       }
 
       const stale = existing.heartbeatAt === null || now - existing.heartbeatAt >= staleOwnerMs;
@@ -520,7 +246,11 @@ export class BrowserCoordinatorStore {
           existing.ownerPid,
           existing.ownerStartToken,
         );
-      return this.#claimResult("claimed", true, this.#readProfileOrThrow());
+      return this.#claimResult(
+        "claimed",
+        true,
+        requireCoordinatorProfile(this.#db, this.profileId),
+      );
     });
   }
 
@@ -577,18 +307,28 @@ export class BrowserCoordinatorStore {
     const state = input.state ?? "admitted";
     validateTargetInput(targetId, input.role, state, input.url);
     return this.#transaction(() => {
-      const profile = this.#readProfileOrThrow();
+      const profile = requireCoordinatorProfile(this.#db, this.profileId);
       if (profile.generation !== input.generation) {
         return {
           admitted: false,
           reason: "generation_mismatch",
           reservationId,
           target: null,
-          activeTargetCount: this.#countActiveTargets(undefined, profile.generation),
-          activeRoleCount: this.#countActiveTargets(input.role, profile.generation),
+          activeTargetCount: countActiveCoordinatorTargets(
+            this.#db,
+            this.profileId,
+            undefined,
+            profile.generation,
+          ),
+          activeRoleCount: countActiveCoordinatorTargets(
+            this.#db,
+            this.profileId,
+            input.role,
+            profile.generation,
+          ),
         };
       }
-      const resourceGate = this.#readResourceGate();
+      const resourceGate = readCoordinatorResourceGate(this.#db, this.profileId);
       if (
         resourceGate &&
         (resourceGate.generation === null || resourceGate.generation === profile.generation) &&
@@ -600,8 +340,18 @@ export class BrowserCoordinatorStore {
           reason: `resource_${resourceGate.phase}` as TargetAdmissionReason,
           reservationId,
           target: null,
-          activeTargetCount: this.#countActiveTargets(undefined, profile.generation),
-          activeRoleCount: this.#countActiveTargets(input.role, profile.generation),
+          activeTargetCount: countActiveCoordinatorTargets(
+            this.#db,
+            this.profileId,
+            undefined,
+            profile.generation,
+          ),
+          activeRoleCount: countActiveCoordinatorTargets(
+            this.#db,
+            this.profileId,
+            input.role,
+            profile.generation,
+          ),
         };
       }
       const duplicateTarget = this.#db
@@ -613,8 +363,18 @@ export class BrowserCoordinatorStore {
           reason: "target_exists",
           reservationId,
           target: null,
-          activeTargetCount: this.#countActiveTargets(undefined, profile.generation),
-          activeRoleCount: this.#countActiveTargets(input.role, profile.generation),
+          activeTargetCount: countActiveCoordinatorTargets(
+            this.#db,
+            this.profileId,
+            undefined,
+            profile.generation,
+          ),
+          activeRoleCount: countActiveCoordinatorTargets(
+            this.#db,
+            this.profileId,
+            input.role,
+            profile.generation,
+          ),
         };
       }
       const duplicateReservation = this.#db
@@ -626,12 +386,32 @@ export class BrowserCoordinatorStore {
           reason: "reservation_exists",
           reservationId,
           target: null,
-          activeTargetCount: this.#countActiveTargets(undefined, profile.generation),
-          activeRoleCount: this.#countActiveTargets(input.role, profile.generation),
+          activeTargetCount: countActiveCoordinatorTargets(
+            this.#db,
+            this.profileId,
+            undefined,
+            profile.generation,
+          ),
+          activeRoleCount: countActiveCoordinatorTargets(
+            this.#db,
+            this.profileId,
+            input.role,
+            profile.generation,
+          ),
         };
       }
-      const activeTargetCount = this.#countActiveTargets(undefined, profile.generation);
-      const activeRoleCount = this.#countActiveTargets(input.role, profile.generation);
+      const activeTargetCount = countActiveCoordinatorTargets(
+        this.#db,
+        this.profileId,
+        undefined,
+        profile.generation,
+      );
+      const activeRoleCount = countActiveCoordinatorTargets(
+        this.#db,
+        this.profileId,
+        input.role,
+        profile.generation,
+      );
       const roleCeiling = this.#roleCeiling(input.role);
       if (activeTargetCount >= this.#totalCeiling()) {
         return {
@@ -671,7 +451,7 @@ export class BrowserCoordinatorStore {
           now,
           now,
         );
-      const target = this.#readTarget(targetId);
+      const target = readCoordinatorTarget(this.#db, targetId);
       return {
         admitted: true,
         reason: "admitted",
@@ -711,7 +491,7 @@ export class BrowserCoordinatorStore {
         return {
           bound: false,
           reason: "already_bound",
-          target: this.#readTarget(currentTargetId),
+          target: readCoordinatorTarget(this.#db, currentTargetId),
         };
       }
       if (existingTarget && input.targetId !== currentTargetId) {
@@ -735,7 +515,7 @@ export class BrowserCoordinatorStore {
       return {
         bound: true,
         reason: "bound",
-        target: this.#readTarget(input.targetId),
+        target: readCoordinatorTarget(this.#db, input.targetId),
       };
     });
   }
@@ -759,7 +539,7 @@ export class BrowserCoordinatorStore {
           this.profileId,
           input.generation,
         );
-      return Number(result.changes) === 1 ? this.#readTarget(input.targetId) : null;
+      return Number(result.changes) === 1 ? readCoordinatorTarget(this.#db, input.targetId) : null;
     });
   }
 
@@ -819,14 +599,14 @@ export class BrowserCoordinatorStore {
           now,
           input.retryPolicy ?? null,
         );
-      this.#insertEvent(jobId, state, input.reasonCode ?? null, null, now);
-      return this.#readJobOrThrow(jobId);
+      insertCoordinatorJobEvent(this.#db, jobId, state, input.reasonCode ?? null, null, now);
+      return requireCoordinatorJob(this.#db, jobId);
     });
   }
 
   getJob(jobId: string): BrowserCoordinatorJob | null {
     this.#assertOpen();
-    return this.#readJob(jobId);
+    return readCoordinatorJob(this.#db, jobId);
   }
 
   getJobByIdempotencyKey(idempotencyKey: string): BrowserCoordinatorJob | null {
@@ -861,7 +641,7 @@ export class BrowserCoordinatorStore {
       validateGeneration(input.ownerGeneration, "ownerGeneration");
     }
     return this.#transaction(() => {
-      const current = this.#readJob(input.jobId);
+      const current = readCoordinatorJob(this.#db, input.jobId);
       if (!current || current.state !== input.expectedState) return null;
       if (
         input.expectedOwnerGeneration !== undefined &&
@@ -908,14 +688,15 @@ export class BrowserCoordinatorStore {
         )
         .run(...parameters);
       if (Number(result.changes) !== 1) return null;
-      this.#insertEvent(
+      insertCoordinatorJobEvent(
+        this.#db,
         input.jobId,
         input.nextState,
         input.reasonCode !== undefined ? input.reasonCode : current.reasonCode,
         input.evidencePath ?? null,
         Math.max(now, current.updatedAt),
       );
-      return this.#readJobOrThrow(input.jobId);
+      return requireCoordinatorJob(this.#db, input.jobId);
     });
   }
 
@@ -927,7 +708,8 @@ export class BrowserCoordinatorStore {
     validateOptionalMetadata(input.evidencePath, "evidencePath");
     const timestamp = finiteTimestamp(input.timestamp ?? this.#clock());
     return this.#transaction(() =>
-      this.#insertEvent(
+      insertCoordinatorJobEvent(
+        this.#db,
         input.jobId,
         input.state,
         input.reasonCode ?? null,
@@ -976,7 +758,7 @@ export class BrowserCoordinatorStore {
           input.remoteFileId ?? null,
           input.observedState ?? null,
         );
-      return this.#readAttachmentOrThrow(attachmentId);
+      return requireCoordinatorAttachment(this.#db, attachmentId);
     });
   }
 
@@ -1019,7 +801,7 @@ export class BrowserCoordinatorStore {
           input.sha256 ?? null,
           input.turnId ?? null,
         );
-      return this.#readArtifactOrThrow(artifactId);
+      return requireCoordinatorArtifact(this.#db, artifactId);
     });
   }
 
@@ -1066,7 +848,7 @@ export class BrowserCoordinatorStore {
           input.retryAfter ?? null,
           now,
         );
-      return this.#readRateLimitOrThrow(input.key);
+      return requireCoordinatorRateLimit(this.#db, this.profileId, input.key);
     });
   }
 
@@ -1123,7 +905,7 @@ export class BrowserCoordinatorStore {
         )
         .run(this.profileId, this.profileId, this.maxResourceSamples);
       const sampleId = Number(result.lastInsertRowid);
-      return this.#readResourceSampleOrThrow(sampleId);
+      return requireCoordinatorResourceSample(this.#db, sampleId);
     });
   }
 
@@ -1184,204 +966,13 @@ export class BrowserCoordinatorStore {
           input.rssResumeBytes,
           sampledAt,
         );
-      return this.#readResourceGateOrThrow();
+      return requireCoordinatorResourceGate(this.#db, this.profileId);
     });
   }
 
   getResourceGate(): BrowserCoordinatorResourceGate | null {
     this.#assertOpen();
-    return this.#readResourceGate();
-  }
-
-  #initializeSchema(): void {
-    const version = Number(
-      (this.#db.prepare("PRAGMA user_version").get() as { user_version?: unknown })?.user_version ??
-        0,
-    );
-    if (version > COORDINATOR_SCHEMA_VERSION) {
-      throw new Error(
-        `Coordinator database schema ${version} is newer than supported version ${COORDINATOR_SCHEMA_VERSION}.`,
-      );
-    }
-    if (version === 0) {
-      const existingTables = this.#db
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
-        .all()
-        .map((row) => String((row as { name: unknown }).name));
-      if (existingTables.length > 0) {
-        throw new Error("Coordinator database has an incomplete or unsupported schema.");
-      }
-      this.#transaction(() => {
-        this.#db.exec(`
-          CREATE TABLE schema_meta (
-            version INTEGER PRIMARY KEY,
-            initialized_at INTEGER NOT NULL
-          );
-          CREATE TABLE profiles (
-            profile_id TEXT PRIMARY KEY,
-            path TEXT,
-            generation INTEGER NOT NULL CHECK (generation > 0),
-            owner_pid INTEGER,
-            owner_start_token TEXT,
-            browser_pid INTEGER,
-            devtools_endpoint TEXT,
-            state TEXT NOT NULL CHECK (state IN ('running', 'stopped')),
-            heartbeat_at INTEGER
-          );
-          CREATE TABLE targets (
-            target_id TEXT PRIMARY KEY,
-            reservation_id TEXT NOT NULL UNIQUE,
-            profile_id TEXT NOT NULL REFERENCES profiles(profile_id) ON DELETE CASCADE,
-            generation INTEGER NOT NULL CHECK (generation > 0),
-            role TEXT NOT NULL,
-            owner_job_id TEXT,
-            state TEXT NOT NULL CHECK (state IN ('admitted', 'active', 'closing', 'closed', 'lost')),
-            url TEXT,
-            created_at INTEGER NOT NULL,
-            last_seen_at INTEGER NOT NULL
-          );
-          CREATE INDEX targets_profile_active_idx
-            ON targets(profile_id, generation, state, role);
-          CREATE TABLE jobs (
-            job_id TEXT PRIMARY KEY,
-            profile_id TEXT REFERENCES profiles(profile_id) ON DELETE SET NULL,
-            operation TEXT NOT NULL,
-            state TEXT NOT NULL,
-            reason_code TEXT,
-            request_hash TEXT,
-            conversation_id TEXT,
-            expected_head TEXT,
-            owner_generation INTEGER,
-            owner_lease_id TEXT,
-            idempotency_key TEXT,
-            attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0),
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL,
-            retry_policy TEXT
-          );
-          CREATE INDEX jobs_profile_state_idx ON jobs(profile_id, state, updated_at);
-          CREATE UNIQUE INDEX jobs_profile_idempotency_idx
-            ON jobs(profile_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
-          CREATE TABLE job_events (
-            job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
-            sequence INTEGER NOT NULL CHECK (sequence > 0),
-            state TEXT NOT NULL,
-            reason_code TEXT,
-            evidence_path TEXT,
-            timestamp INTEGER NOT NULL,
-            PRIMARY KEY (job_id, sequence)
-          );
-          CREATE TABLE attachments (
-            attachment_id TEXT PRIMARY KEY,
-            job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
-            path TEXT NOT NULL,
-            size INTEGER NOT NULL CHECK (size >= 0),
-            media_type TEXT,
-            sha256 TEXT,
-            remote_file_id TEXT,
-            observed_state TEXT
-          );
-          CREATE TABLE artifacts (
-            artifact_id TEXT PRIMARY KEY,
-            job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
-            kind TEXT NOT NULL,
-            source_url TEXT,
-            path TEXT,
-            size INTEGER CHECK (size IS NULL OR size >= 0),
-            sha256 TEXT,
-            turn_id TEXT
-          );
-          CREATE TABLE rate_limits (
-            profile_id TEXT NOT NULL REFERENCES profiles(profile_id) ON DELETE CASCADE,
-            key TEXT NOT NULL,
-            limit_value REAL,
-            remaining REAL,
-            reset_at INTEGER,
-            retry_after REAL,
-            updated_at INTEGER NOT NULL,
-            PRIMARY KEY (profile_id, key)
-          );
-          CREATE TABLE resource_samples (
-            sample_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            profile_id TEXT NOT NULL REFERENCES profiles(profile_id) ON DELETE CASCADE,
-            generation INTEGER,
-            sampled_at INTEGER NOT NULL,
-            process_tree_rss_bytes INTEGER NOT NULL CHECK (process_tree_rss_bytes >= 0),
-            process_tree_cpu_time_ms REAL,
-            chrome_pid INTEGER,
-            process_count INTEGER
-          );
-          CREATE INDEX resource_samples_profile_idx
-            ON resource_samples(profile_id, sampled_at DESC, sample_id DESC);
-          CREATE TABLE resource_gate (
-            profile_id TEXT PRIMARY KEY REFERENCES profiles(profile_id) ON DELETE CASCADE,
-            generation INTEGER,
-            phase TEXT NOT NULL CHECK (phase IN ('normal', 'soft', 'hard', 'unknown')),
-            reason TEXT NOT NULL,
-            process_tree_rss_bytes INTEGER,
-            rss_soft_bytes INTEGER NOT NULL CHECK (rss_soft_bytes > 0),
-            rss_hard_bytes INTEGER NOT NULL CHECK (rss_hard_bytes > 0),
-            rss_resume_bytes INTEGER NOT NULL CHECK (rss_resume_bytes > 0),
-            sampled_at INTEGER NOT NULL
-          );
-          INSERT INTO schema_meta(version, initialized_at) VALUES (2, ${Math.trunc(this.#clock())});
-          PRAGMA user_version = 2;
-        `);
-      });
-      return;
-    }
-    if (version === 1) {
-      this.#transaction(() => {
-        this.#db.exec(`
-          CREATE TABLE resource_gate (
-            profile_id TEXT PRIMARY KEY REFERENCES profiles(profile_id) ON DELETE CASCADE,
-            generation INTEGER,
-            phase TEXT NOT NULL CHECK (phase IN ('normal', 'soft', 'hard', 'unknown')),
-            reason TEXT NOT NULL,
-            process_tree_rss_bytes INTEGER,
-            rss_soft_bytes INTEGER NOT NULL CHECK (rss_soft_bytes > 0),
-            rss_hard_bytes INTEGER NOT NULL CHECK (rss_hard_bytes > 0),
-            rss_resume_bytes INTEGER NOT NULL CHECK (rss_resume_bytes > 0),
-            sampled_at INTEGER NOT NULL
-          );
-          UPDATE schema_meta SET version = 2;
-          PRAGMA user_version = 2;
-        `);
-      });
-    }
-    this.#validateSchema();
-  }
-
-  #validateSchema(): void {
-    const required = [
-      "schema_meta",
-      "profiles",
-      "targets",
-      "jobs",
-      "job_events",
-      "attachments",
-      "artifacts",
-      "rate_limits",
-      "resource_samples",
-      "resource_gate",
-    ];
-    const rows = this.#db
-      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
-      .all()
-      .map((row) => String((row as { name: unknown }).name));
-    for (const name of required) {
-      if (!rows.includes(name)) throw new Error(`Coordinator database is missing table ${name}.`);
-    }
-    const schemaVersion = Number(
-      (
-        this.#db.prepare("SELECT MAX(version) AS version FROM schema_meta").get() as {
-          version?: unknown;
-        }
-      )?.version ?? 0,
-    );
-    if (schemaVersion !== COORDINATOR_SCHEMA_VERSION) {
-      throw new Error(`Coordinator database metadata version ${schemaVersion} is unsupported.`);
-    }
+    return readCoordinatorResourceGate(this.#db, this.profileId);
   }
 
   #transaction<T>(callback: () => T): T {
@@ -1399,46 +990,6 @@ export class BrowserCoordinatorStore {
       }
       throw error;
     }
-  }
-
-  #insertEvent(
-    jobId: string,
-    state: BrowserCoordinatorJobState,
-    reasonCode: string | null,
-    evidencePath: string | null,
-    timestamp: number,
-  ): BrowserCoordinatorJobEvent {
-    const previous = this.#db
-      .prepare(
-        "SELECT COALESCE(MAX(sequence), 0) AS sequence, COALESCE(MAX(timestamp), 0) AS timestamp FROM job_events WHERE job_id = ?",
-      )
-      .get(jobId) as { sequence?: unknown; timestamp?: unknown } | undefined;
-    const sequence = Number(previous?.sequence ?? 0) + 1;
-    const monotonicTimestamp = Math.max(timestamp, Number(previous?.timestamp ?? 0));
-    this.#db
-      .prepare(
-        `INSERT INTO job_events (job_id, sequence, state, reason_code, evidence_path, timestamp)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .run(jobId, sequence, state, reasonCode, evidencePath, monotonicTimestamp);
-    return {
-      jobId,
-      sequence,
-      state,
-      reasonCode,
-      evidencePath,
-      timestamp: monotonicTimestamp,
-    };
-  }
-
-  #countActiveTargets(role: BrowserCoordinatorTargetRole | undefined, generation: number): number {
-    const query = role
-      ? "SELECT COUNT(*) AS count FROM targets WHERE profile_id = ? AND generation = ? AND role = ? AND state IN ('admitted', 'active', 'closing')"
-      : "SELECT COUNT(*) AS count FROM targets WHERE profile_id = ? AND generation = ? AND state IN ('admitted', 'active', 'closing')";
-    const row = role
-      ? this.#db.prepare(query).get(this.profileId, generation, role)
-      : this.#db.prepare(query).get(this.profileId, generation);
-    return Number((row as { count?: unknown } | undefined)?.count ?? 0);
   }
 
   #totalCeiling(): number {
@@ -1468,113 +1019,6 @@ export class BrowserCoordinatorStore {
     return this.#profilePathValue;
   }
 
-  #readProfile(): BrowserCoordinatorProfile | null {
-    const row = this.#db
-      .prepare(
-        `SELECT profile_id, path, generation, owner_pid, owner_start_token, browser_pid,
-                devtools_endpoint, state, heartbeat_at
-         FROM profiles WHERE profile_id = ?`,
-      )
-      .get(this.profileId);
-    return row ? profileFromRow(row) : null;
-  }
-
-  #readProfileOrThrow(): BrowserCoordinatorProfile {
-    const profile = this.#readProfile();
-    if (!profile) throw new Error(`Coordinator profile ${this.profileId} is not initialized.`);
-    return profile;
-  }
-
-  #readTarget(targetId: string): BrowserCoordinatorTarget | null {
-    const row = this.#db
-      .prepare(
-        `SELECT target_id, reservation_id, profile_id, generation, role, owner_job_id, state, url, created_at, last_seen_at
-         FROM targets WHERE target_id = ?`,
-      )
-      .get(targetId);
-    return row ? targetFromRow(row) : null;
-  }
-
-  #readJob(jobId: string): BrowserCoordinatorJob | null {
-    const row = this.#db
-      .prepare(
-        `SELECT job_id, profile_id, operation, state, reason_code, request_hash, conversation_id,
-                expected_head, owner_generation, owner_lease_id, idempotency_key, attempt,
-                created_at, updated_at, retry_policy
-         FROM jobs WHERE job_id = ?`,
-      )
-      .get(jobId);
-    return row ? jobFromRow(row) : null;
-  }
-
-  #readJobOrThrow(jobId: string): BrowserCoordinatorJob {
-    const job = this.#readJob(jobId);
-    if (!job) throw new Error(`Coordinator job ${jobId} was not found.`);
-    return job;
-  }
-
-  #readAttachmentOrThrow(attachmentId: string): BrowserCoordinatorAttachment {
-    const row = this.#db
-      .prepare(
-        `SELECT attachment_id, job_id, path, size, media_type, sha256, remote_file_id, observed_state
-         FROM attachments WHERE attachment_id = ?`,
-      )
-      .get(attachmentId);
-    if (!row) throw new Error(`Coordinator attachment ${attachmentId} was not created.`);
-    return attachmentFromRow(row);
-  }
-
-  #readArtifactOrThrow(artifactId: string): BrowserCoordinatorArtifact {
-    const row = this.#db
-      .prepare(
-        `SELECT artifact_id, job_id, kind, source_url, path, size, sha256, turn_id
-         FROM artifacts WHERE artifact_id = ?`,
-      )
-      .get(artifactId);
-    if (!row) throw new Error(`Coordinator artifact ${artifactId} was not created.`);
-    return artifactFromRow(row);
-  }
-
-  #readRateLimitOrThrow(key: string): BrowserCoordinatorRateLimit {
-    const row = this.#db
-      .prepare(
-        `SELECT key, limit_value, remaining, reset_at, retry_after, updated_at
-         FROM rate_limits WHERE profile_id = ? AND key = ?`,
-      )
-      .get(this.profileId, key);
-    if (!row) throw new Error(`Coordinator rate-limit row ${key} was not created.`);
-    return rateLimitFromRow(row);
-  }
-
-  #readResourceSampleOrThrow(sampleId: number): BrowserCoordinatorResourceSample {
-    const row = this.#db
-      .prepare(
-        `SELECT sample_id, profile_id, generation, sampled_at, process_tree_rss_bytes,
-                process_tree_cpu_time_ms, chrome_pid, process_count
-         FROM resource_samples WHERE sample_id = ?`,
-      )
-      .get(sampleId);
-    if (!row) throw new Error(`Coordinator resource sample ${sampleId} was not created.`);
-    return resourceSampleFromRow(row);
-  }
-
-  #readResourceGate(): BrowserCoordinatorResourceGate | null {
-    const row = this.#db
-      .prepare(
-        `SELECT profile_id, generation, phase, reason, process_tree_rss_bytes,
-                rss_soft_bytes, rss_hard_bytes, rss_resume_bytes, sampled_at
-         FROM resource_gate WHERE profile_id = ?`,
-      )
-      .get(this.profileId);
-    return row ? resourceGateFromRow(row) : null;
-  }
-
-  #readResourceGateOrThrow(): BrowserCoordinatorResourceGate {
-    const gate = this.#readResourceGate();
-    if (!gate) throw new Error(`Coordinator resource gate ${this.profileId} was not created.`);
-    return gate;
-  }
-
   #assertOpen(): void {
     if (this.#closed) throw new Error("BrowserCoordinatorStore is closed.");
   }
@@ -1584,231 +1028,4 @@ export function openBrowserCoordinatorStore(
   options: BrowserCoordinatorStoreOptions,
 ): BrowserCoordinatorStore {
   return new BrowserCoordinatorStore(options);
-}
-
-function normalizeTargetCeilings(
-  ceilings: BrowserCoordinatorTargetCeilings | undefined,
-): BrowserCoordinatorTargetCeilings {
-  const normalized: BrowserCoordinatorTargetCeilings = { roles: {} };
-  if (!ceilings) return normalized;
-  const total = ceilings.total;
-  if (total !== undefined) normalized.total = positiveInteger(total, "targetCeilings.total");
-  for (const [role, value] of Object.entries(ceilings)) {
-    if (role === "total" || role === "roles") continue;
-    if (typeof value === "number")
-      (normalized.roles as Record<string, number>)[role] = positiveInteger(
-        value,
-        `target ceiling ${role}`,
-      );
-  }
-  if (ceilings.roles) {
-    for (const [role, value] of Object.entries(ceilings.roles)) {
-      if (value !== undefined)
-        (normalized.roles as Record<string, number>)[role] = positiveInteger(
-          value,
-          `target ceiling ${role}`,
-        );
-    }
-  }
-  return normalized;
-}
-
-function positiveInteger(value: number, name: string): number {
-  if (!Number.isSafeInteger(value) || value <= 0)
-    throw new Error(`${name} must be a positive safe integer.`);
-  return value;
-}
-
-function finiteTimestamp(value: number): number {
-  if (!Number.isFinite(value) || value < 0)
-    throw new Error("Timestamp must be a non-negative finite number.");
-  return Math.trunc(value);
-}
-
-function validateSize(value: number, name: string): void {
-  if (!Number.isSafeInteger(value) || value < 0)
-    throw new Error(`${name} must be a non-negative safe integer.`);
-}
-
-function validateAttempt(value: number): void {
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new Error("attempt must be a non-negative safe integer.");
-  }
-}
-
-function validateGeneration(value: number, name: string): void {
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new Error(`${name} must be a positive safe integer.`);
-  }
-}
-
-function assertOwner(ownerPid: number, ownerStartToken: string): void {
-  if (!Number.isSafeInteger(ownerPid) || ownerPid <= 0)
-    throw new Error("ownerPid must be a positive safe integer.");
-  validateMetadata(ownerStartToken, "ownerStartToken");
-}
-
-function validateMetadata(value: string, name: string): void {
-  if (!value.trim()) throw new Error(`${name} must not be empty.`);
-  validateOptionalMetadata(value, name);
-}
-
-function validateOptionalMetadata(value: string | null | undefined, name: string): void {
-  if (
-    value !== null &&
-    value !== undefined &&
-    Buffer.byteLength(value, "utf8") > MAX_COORDINATOR_METADATA_TEXT_BYTES
-  ) {
-    throw new Error(`${name} exceeds the coordinator metadata limit.`);
-  }
-}
-
-function validateTargetInput(
-  targetId: string,
-  role: BrowserCoordinatorTargetRole,
-  state: BrowserCoordinatorTargetState,
-  url: string | null | undefined,
-): void {
-  validateMetadata(targetId, "targetId");
-  validateMetadata(role, "role");
-  if (
-    !ACTIVE_TARGET_STATES.includes(state as (typeof ACTIVE_TARGET_STATES)[number]) &&
-    state !== "closed" &&
-    state !== "lost"
-  ) {
-    throw new Error(`Unknown target state ${state}.`);
-  }
-  validateOptionalMetadata(url, "url");
-}
-
-function profileFromRow(row: Record<string, unknown>): BrowserCoordinatorProfile {
-  return {
-    profileId: String(row.profile_id),
-    path: nullableString(row.path),
-    generation: Number(row.generation),
-    ownerPid: nullableNumber(row.owner_pid),
-    ownerStartToken: nullableString(row.owner_start_token),
-    browserPid: nullableNumber(row.browser_pid),
-    devtoolsEndpoint: nullableString(row.devtools_endpoint),
-    state: String(row.state) as BrowserCoordinatorProfileState,
-    heartbeatAt: nullableNumber(row.heartbeat_at),
-  };
-}
-
-function targetFromRow(row: Record<string, unknown>): BrowserCoordinatorTarget {
-  return {
-    targetId: String(row.target_id),
-    reservationId: String(row.reservation_id),
-    profileId: String(row.profile_id),
-    generation: Number(row.generation),
-    role: String(row.role) as BrowserCoordinatorTargetRole,
-    ownerJobId: nullableString(row.owner_job_id),
-    state: String(row.state) as BrowserCoordinatorTargetState,
-    url: nullableString(row.url),
-    createdAt: Number(row.created_at),
-    lastSeenAt: Number(row.last_seen_at),
-  };
-}
-
-function jobFromRow(row: Record<string, unknown>): BrowserCoordinatorJob {
-  return {
-    jobId: String(row.job_id),
-    profileId: nullableString(row.profile_id),
-    operation: String(row.operation),
-    state: String(row.state) as BrowserCoordinatorJobState,
-    reasonCode: nullableString(row.reason_code),
-    requestHash: nullableString(row.request_hash),
-    conversationId: nullableString(row.conversation_id),
-    expectedHead: nullableString(row.expected_head),
-    ownerGeneration: nullableNumber(row.owner_generation),
-    ownerLeaseId: nullableString(row.owner_lease_id),
-    idempotencyKey: nullableString(row.idempotency_key),
-    attempt: Number(row.attempt),
-    createdAt: Number(row.created_at),
-    updatedAt: Number(row.updated_at),
-    retryPolicy: nullableString(row.retry_policy),
-  };
-}
-
-function eventFromRow(row: Record<string, unknown>): BrowserCoordinatorJobEvent {
-  return {
-    jobId: String(row.job_id),
-    sequence: Number(row.sequence),
-    state: String(row.state),
-    reasonCode: nullableString(row.reason_code),
-    evidencePath: nullableString(row.evidence_path),
-    timestamp: Number(row.timestamp),
-  };
-}
-
-function attachmentFromRow(row: Record<string, unknown>): BrowserCoordinatorAttachment {
-  return {
-    attachmentId: String(row.attachment_id),
-    jobId: String(row.job_id),
-    path: String(row.path),
-    size: Number(row.size),
-    mediaType: nullableString(row.media_type),
-    sha256: nullableString(row.sha256),
-    remoteFileId: nullableString(row.remote_file_id),
-    observedState: nullableString(row.observed_state),
-  };
-}
-
-function artifactFromRow(row: Record<string, unknown>): BrowserCoordinatorArtifact {
-  return {
-    artifactId: String(row.artifact_id),
-    jobId: String(row.job_id),
-    kind: String(row.kind),
-    sourceUrl: nullableString(row.source_url),
-    path: nullableString(row.path),
-    size: nullableNumber(row.size),
-    sha256: nullableString(row.sha256),
-    turnId: nullableString(row.turn_id),
-  };
-}
-
-function rateLimitFromRow(row: Record<string, unknown>): BrowserCoordinatorRateLimit {
-  return {
-    key: String(row.key),
-    limit: nullableNumber(row.limit_value),
-    remaining: nullableNumber(row.remaining),
-    resetAt: nullableNumber(row.reset_at),
-    retryAfter: nullableNumber(row.retry_after),
-    updatedAt: Number(row.updated_at),
-  };
-}
-
-function resourceSampleFromRow(row: Record<string, unknown>): BrowserCoordinatorResourceSample {
-  return {
-    sampleId: Number(row.sample_id),
-    profileId: String(row.profile_id),
-    generation: nullableNumber(row.generation),
-    sampledAt: Number(row.sampled_at),
-    processTreeRssBytes: Number(row.process_tree_rss_bytes),
-    processTreeCpuTimeMs: nullableNumber(row.process_tree_cpu_time_ms),
-    chromePid: nullableNumber(row.chrome_pid),
-    processCount: nullableNumber(row.process_count),
-  };
-}
-
-function resourceGateFromRow(row: Record<string, unknown>): BrowserCoordinatorResourceGate {
-  return {
-    profileId: String(row.profile_id),
-    generation: nullableNumber(row.generation),
-    phase: String(row.phase) as BrowserCoordinatorResourceGatePhase,
-    reason: String(row.reason),
-    processTreeRssBytes: nullableNumber(row.process_tree_rss_bytes),
-    rssSoftBytes: Number(row.rss_soft_bytes),
-    rssHardBytes: Number(row.rss_hard_bytes),
-    rssResumeBytes: Number(row.rss_resume_bytes),
-    sampledAt: Number(row.sampled_at),
-  };
-}
-
-function nullableString(value: unknown): string | null {
-  return value === null || value === undefined ? null : String(value);
-}
-
-function nullableNumber(value: unknown): number | null {
-  return value === null || value === undefined ? null : Number(value);
 }

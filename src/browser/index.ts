@@ -1930,8 +1930,6 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       }
     }
     await raceWithDisconnect(verifyRequestedModelAndThinkingBeforeSubmit(Runtime, config, logger));
-    const acquireProfileLockIfNeeded = async () => {};
-    const releaseProfileLockIfHeld = async () => {};
     const submitOnce = async (prompt: string, submissionAttachments: BrowserAttachment[]) => {
       const baselineSnapshot = await readAssistantSnapshot(Runtime).catch(() => null);
       const baselineSandboxArtifacts = await extractSandboxArtifactRefsFromRuntime(Runtime).catch(
@@ -2086,29 +2084,24 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     let baselineSandboxArtifacts: ChatgptSandboxArtifactRef[] = [];
     let deepResearchTargetKeys: string[] = [];
     let deepResearchTargetBaselineCaptured = false;
-    await acquireProfileLockIfNeeded();
-    try {
-      const submission = await runSubmissionWithRecovery({
-        prompt: promptText,
-        attachments,
-        fallbackSubmission,
-        submit: (submissionPrompt, submissionAttachments) =>
-          raceWithDisconnect(submitOnce(submissionPrompt, submissionAttachments)),
-        reloadPromptComposer,
-        prepareFallbackSubmission: async () => {
-          await raceWithDisconnect(clearPromptComposer(Runtime, logger));
-          await raceWithDisconnect(ensurePromptReady(Runtime, config.inputTimeoutMs, logger));
-        },
-        logger,
-      });
-      baselineTurns = submission.baselineTurns;
-      baselineAssistantText = submission.baselineAssistantText;
-      baselineSandboxArtifacts = submission.baselineSandboxArtifacts ?? [];
-      deepResearchTargetKeys = submission.deepResearchTargetKeys ?? [];
-      deepResearchTargetBaselineCaptured = submission.deepResearchTargetBaselineCaptured ?? false;
-    } finally {
-      await releaseProfileLockIfHeld();
-    }
+    const submission = await runSubmissionWithRecovery({
+      prompt: promptText,
+      attachments,
+      fallbackSubmission,
+      submit: (submissionPrompt, submissionAttachments) =>
+        raceWithDisconnect(submitOnce(submissionPrompt, submissionAttachments)),
+      reloadPromptComposer,
+      prepareFallbackSubmission: async () => {
+        await raceWithDisconnect(clearPromptComposer(Runtime, logger));
+        await raceWithDisconnect(ensurePromptReady(Runtime, config.inputTimeoutMs, logger));
+      },
+      logger,
+    });
+    baselineTurns = submission.baselineTurns;
+    baselineAssistantText = submission.baselineAssistantText;
+    baselineSandboxArtifacts = submission.baselineSandboxArtifacts ?? [];
+    deepResearchTargetKeys = submission.deepResearchTargetKeys ?? [];
+    deepResearchTargetBaselineCaptured = submission.deepResearchTargetBaselineCaptured ?? false;
     if (options.returnAfterSubmit) {
       await updateConversationHint("submitted", 15_000).catch(() => false);
       await captureRuntimeSnapshot().catch(() => undefined);
@@ -2608,27 +2601,22 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     for (let index = 0; index < followUpPrompts.length; index += 1) {
       const followUpPrompt = followUpPrompts[index];
       logger(`[browser] Sending follow-up ${index + 1}/${followUpPrompts.length}`);
-      await acquireProfileLockIfNeeded();
-      try {
-        await raceWithDisconnect(clearPromptComposer(Runtime, logger));
-        await raceWithDisconnect(ensurePromptReady(Runtime, config.inputTimeoutMs, logger));
-        const submission = await runSubmissionWithRecovery({
-          prompt: followUpPrompt,
-          attachments: [],
-          submit: (submissionPrompt, submissionAttachments) =>
-            raceWithDisconnect(submitOnce(submissionPrompt, submissionAttachments)),
-          reloadPromptComposer,
-          prepareFallbackSubmission: async () => {
-            await raceWithDisconnect(clearPromptComposer(Runtime, logger));
-            await raceWithDisconnect(ensurePromptReady(Runtime, config.inputTimeoutMs, logger));
-          },
-          logger,
-        });
-        baselineTurns = submission.baselineTurns;
-        baselineAssistantText = submission.baselineAssistantText;
-      } finally {
-        await releaseProfileLockIfHeld();
-      }
+      await raceWithDisconnect(clearPromptComposer(Runtime, logger));
+      await raceWithDisconnect(ensurePromptReady(Runtime, config.inputTimeoutMs, logger));
+      const submission = await runSubmissionWithRecovery({
+        prompt: followUpPrompt,
+        attachments: [],
+        submit: (submissionPrompt, submissionAttachments) =>
+          raceWithDisconnect(submitOnce(submissionPrompt, submissionAttachments)),
+        reloadPromptComposer,
+        prepareFallbackSubmission: async () => {
+          await raceWithDisconnect(clearPromptComposer(Runtime, logger));
+          await raceWithDisconnect(ensurePromptReady(Runtime, config.inputTimeoutMs, logger));
+        },
+        logger,
+      });
+      baselineTurns = submission.baselineTurns;
+      baselineAssistantText = submission.baselineAssistantText;
       const turn = await captureAssistantTurn(followUpPrompt, `Follow-up ${index + 1}`, index + 1);
       turns.push({ ...turn, prompt: followUpPrompt });
       answerText = turn.answerText;

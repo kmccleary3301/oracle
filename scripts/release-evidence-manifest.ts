@@ -4,18 +4,20 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
-  DEFAULT_MAX_PROMOTION_RSS_SLOPE_BYTES_PER_SECOND,
   hashReleaseEvidence,
-  PROMOTION_RSS_NOISE_METHOD,
-  PROMOTION_RSS_SLOPE_METHOD,
+  isRecord,
   releaseEvidenceSigningPayload,
   RELEASE_EVIDENCE_SCHEMA_VERSION,
-} from "./release-promotion-gate.js";
+  type JsonRecord,
+} from "./release-evidence-core.js";
+import {
+  countConsecutiveQualifiedRuns,
+  platformEvidenceQualifies,
+  platformSoakQualifies,
+} from "./release-evidence-soak.js";
 
-type JsonRecord = Record<string, unknown>;
-function isRecord(value: unknown): value is JsonRecord {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
+export { countConsecutiveQualifiedRuns, platformEvidenceQualifies, platformSoakQualifies };
+
 function option(args: readonly string[], name: string): string | undefined {
   const index = args.indexOf(name);
   const value = index < 0 ? undefined : args[index + 1];
@@ -99,115 +101,6 @@ async function signed(value: JsonRecord, args: readonly string[]): Promise<JsonR
 }
 async function writeOutput(outputPath: string, value: unknown): Promise<void> {
   await writeFile(path.resolve(outputPath), `${JSON.stringify(value, null, 2)}\n`, "utf8");
-}
-function cleanRealProcessSoak(soak: unknown): boolean {
-  if (!isRecord(soak)) return false;
-  const chrome = isRecord(soak.chrome) ? soak.chrome : null;
-  const cleanup = isRecord(soak.cleanup) ? soak.cleanup : null;
-  const orphans = isRecord(soak.orphans) ? soak.orphans : null;
-  const samples = Array.isArray(soak.samples) ? soak.samples : [];
-  const cycles = orphans && Array.isArray(orphans.cycles) ? orphans.cycles : [];
-  return (
-    soak.realProcessSampling === true &&
-    chrome?.isolated === true &&
-    chrome.headless === true &&
-    Number(chrome.rootFoundSamples) > 0 &&
-    Number(chrome.nonzeroProcessSamples) > 0 &&
-    chrome.cleanupConfirmed === true &&
-    cleanup?.rootFound === false &&
-    cleanup.processCount === 0 &&
-    orphans?.samplesWithActiveTargets === 0 &&
-    orphans.maxActiveTargetsAfterRelease === 0 &&
-    cycles.length > 0 &&
-    cycles.every((cycle) => isRecord(cycle) && cycle.baselineRestored === true) &&
-    samples.length > 0 &&
-    samples.every(
-      (sample) =>
-        isRecord(sample) &&
-        sample.rootFound === true &&
-        Number(sample.processCount) > 0 &&
-        Number(sample.rssBytes) > 0,
-    )
-  );
-}
-
-function continuousRealProcessSoak(soak: unknown, requiredDurationMs: number): boolean {
-  if (!isRecord(soak)) return false;
-  const cleanup = isRecord(soak.cleanup) ? soak.cleanup : null;
-  const orphans = isRecord(soak.orphans) ? soak.orphans : null;
-  const cycles = orphans && Array.isArray(orphans.cycles) ? orphans.cycles : [];
-  const samples = Array.isArray(soak.samples) ? soak.samples : [];
-  const durationMs = Number(soak.durationMs);
-  const requestedDurationMs = Number(soak.requestedDurationMs);
-  const gateDurationMs = isRecord(soak.promotionGate)
-    ? Number(soak.promotionGate.observedDurationMs)
-    : Number.NaN;
-  const rootPid = Number(soak.rootPid);
-  if (
-    !Number.isFinite(durationMs) ||
-    !Number.isFinite(requestedDurationMs) ||
-    !Number.isFinite(gateDurationMs) ||
-    !Number.isInteger(rootPid) ||
-    rootPid <= 0 ||
-    durationMs < requiredDurationMs ||
-    requestedDurationMs < requiredDurationMs ||
-    gateDurationMs !== durationMs ||
-    samples.length < 2 ||
-    cycles.length !== samples.length ||
-    Number(cleanup?.rootPid) !== rootPid
-  )
-    return false;
-  const sampledAt = samples.map((sample) =>
-    isRecord(sample) ? Number(sample.sampledAtMs) : Number.NaN,
-  );
-  if (
-    sampledAt.some((sampledAtMs) => !Number.isFinite(sampledAtMs)) ||
-    samples.some((sample) => !isRecord(sample) || Number(sample.rootPid) !== rootPid)
-  )
-    return false;
-  const rss = isRecord(soak.rss) ? soak.rss : null;
-  const promotionGate = isRecord(soak.promotionGate) ? soak.promotionGate : null;
-  const rssSlope =
-    promotionGate && isRecord(promotionGate.rssSlope) ? promotionGate.rssSlope : null;
-  const observedSlope = Number(rss?.slopeBytesPerSecond);
-  const recordedSlope = Number(rssSlope?.observedBytesPerSecond);
-  const noiseBytes = Number(rss?.noiseBytes);
-  if (
-    rssSlope?.method !== PROMOTION_RSS_SLOPE_METHOD ||
-    rssSlope.noiseMethod !== PROMOTION_RSS_NOISE_METHOD ||
-    !Number.isFinite(observedSlope) ||
-    recordedSlope !== observedSlope ||
-    Number(rssSlope.maxBytesPerSecond) !== DEFAULT_MAX_PROMOTION_RSS_SLOPE_BYTES_PER_SECOND ||
-    observedSlope > DEFAULT_MAX_PROMOTION_RSS_SLOPE_BYTES_PER_SECOND ||
-    !Number.isFinite(noiseBytes) ||
-    noiseBytes < 0 ||
-    Number(rssSlope.noiseBytes) !== noiseBytes
-  )
-    return false;
-  const maximumGapMs = 15_000;
-  for (let index = 1; index < sampledAt.length; index += 1) {
-    const gap = sampledAt[index] - sampledAt[index - 1];
-    if (gap <= 0 || gap > maximumGapMs) return false;
-  }
-  return sampledAt.at(-1)! - sampledAt[0] >= requiredDurationMs - maximumGapMs;
-}
-
-export function platformEvidenceQualifies(soak: unknown, observedDurationMs: number): boolean {
-  return cleanRealProcessSoak(soak) && observedDurationMs > 0;
-}
-
-export function platformSoakQualifies(
-  soak: unknown,
-  lane: string,
-  observedDurationMs: number,
-  requiredDurationMs = 8 * 60 * 60 * 1_000,
-): boolean {
-  return (
-    lane === "promotion" &&
-    cleanRealProcessSoak(soak) &&
-    continuousRealProcessSoak(soak, requiredDurationMs) &&
-    observedDurationMs >= requiredDurationMs
-  );
 }
 async function runPlatform(args: readonly string[]): Promise<void> {
   const platform = requiredOption(args, "--platform");
@@ -295,27 +188,6 @@ async function runSoak(args: readonly string[]): Promise<void> {
     ),
   );
 }
-export function countConsecutiveQualifiedRuns(
-  runs: readonly Readonly<Record<string, unknown>>[],
-): number {
-  let longestStreak = 0;
-  let currentStreak = 0;
-  let previousRunNumber: number | null = null;
-  for (const run of runs) {
-    const runNumber = Number(run.runNumber);
-    if (run.qualified !== true || !Number.isInteger(runNumber) || runNumber <= 0) {
-      currentStreak = 0;
-      previousRunNumber = null;
-      continue;
-    }
-    currentStreak =
-      previousRunNumber !== null && runNumber === previousRunNumber + 1 ? currentStreak + 1 : 1;
-    previousRunNumber = runNumber;
-    longestStreak = Math.max(longestStreak, currentStreak);
-  }
-  return longestStreak;
-}
-
 async function runAggregate(args: readonly string[]): Promise<void> {
   const paths = options(args, "--manifest");
   if (paths.length === 0) throw new Error("--manifest requires evidence manifests");

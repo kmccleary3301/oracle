@@ -23,6 +23,11 @@ import {
   type ProcessTreeSample,
 } from "../src/browser/resourceTelemetry.js";
 import { redactBenchmarkArtifact } from "../src/benchmark/workloadHarness.js";
+import {
+  DEFAULT_MAX_PROMOTION_RSS_SLOPE_BYTES_PER_SECOND,
+  PROMOTION_RSS_NOISE_METHOD,
+  PROMOTION_RSS_SLOPE_METHOD,
+} from "./release-evidence-core.js";
 
 const EIGHT_HOURS_MS = 8 * 60 * 60 * 1_000;
 const DEFAULT_DURATION_MS = 5_000;
@@ -33,9 +38,6 @@ const CLEANUP_ATTEMPTS = 50;
 const CLEANUP_DELAY_MS = 100;
 const MAX_CYCLE_TARGETS = 1;
 const MiB = 1024 ** 2;
-const MAX_PROMOTION_RSS_SLOPE_BYTES_PER_SECOND = (64 * MiB) / (60 * 60);
-const PROMOTION_RSS_SLOPE_METHOD = "endpoint-delta-over-sample-span";
-const PROMOTION_RSS_NOISE_METHOD = "sample-range";
 
 export interface ResourceSoakOptions {
   durationMs: number;
@@ -529,7 +531,7 @@ export async function runResourceSoak(
         method: PROMOTION_RSS_SLOPE_METHOD,
         noiseMethod: PROMOTION_RSS_NOISE_METHOD,
         observedBytesPerSecond: trends.rssBytes.slopePerSecond,
-        maxBytesPerSecond: MAX_PROMOTION_RSS_SLOPE_BYTES_PER_SECOND,
+        maxBytesPerSecond: DEFAULT_MAX_PROMOTION_RSS_SLOPE_BYTES_PER_SECOND,
         noiseBytes: Math.max(...rssValues) - Math.min(...rssValues),
       },
     },
