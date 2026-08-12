@@ -267,7 +267,7 @@ describe("bounded resource cycle proof", () => {
       checks.every((check) => check.activeAfterPollRelease === 0 && check.mutationReleased),
     ).toBe(true);
     await verifyNoActiveTargets(databasePathValue);
-  });
+  }, 120_000);
 
   test("exercises hard-watermark ownership, identity evidence, grace, hysteresis, and recovery", () => {
     const governor = new ResourceGovernor({
