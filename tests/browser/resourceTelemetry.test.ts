@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  createPlatformProcessProvider,
   isProcessTerminationEligible,
   parsePosixProcessList,
   parseWindowsProcessJson,
@@ -58,6 +59,20 @@ describe("resource telemetry", () => {
       cpuTimeMs: 2000,
       processType: "renderer",
     });
+  });
+
+  test("allows bounded Windows process inventory latency by default", async () => {
+    let timeout: number | undefined;
+    const provider = createPlatformProcessProvider({
+      platform: "win32",
+      execFile: async (_file, _args, options) => {
+        timeout = options.timeout;
+        return { stdout: "[]", stderr: "" };
+      },
+    });
+
+    await expect(provider.listProcesses()).resolves.toEqual([]);
+    expect(timeout).toBe(30_000);
   });
 
   test("rejects PID reuse and start-token mismatch before termination", () => {

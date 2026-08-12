@@ -286,7 +286,10 @@ export function createPlatformProcessProvider(
   options: PlatformProcessProviderOptions = {},
 ): ProcessSnapshotProvider {
   const platform = options.platform ?? process.platform;
-  const timeoutMs = Math.max(100, Math.min(30_000, Math.trunc(options.timeoutMs ?? 3_000)));
+  const timeoutMs = Math.max(
+    100,
+    Math.min(30_000, Math.trunc(options.timeoutMs ?? (platform === "win32" ? 30_000 : 3_000))),
+  );
   const maxBuffer = Math.max(
     64 * 1024,
     Math.min(8 * 1024 * 1024, Math.trunc(options.maxBufferBytes ?? 2 * 1024 * 1024)),
