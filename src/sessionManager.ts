@@ -59,6 +59,14 @@ export interface BrowserSessionConfig {
   autoReattachIntervalMs?: number;
   /** Time budget for each auto-reattach attempt. */
   autoReattachTimeoutMs?: number;
+  /** Interval between OS process-tree memory samples for locally owned Chrome. */
+  resourceMonitorIntervalMs?: number;
+  /** Pause threshold for locally owned Chrome process-tree RSS. */
+  resourceRssSoftLimitBytes?: number;
+  /** Mandatory shutdown threshold for locally owned Chrome process-tree RSS. */
+  resourceRssHardLimitBytes?: number;
+  /** Hysteresis threshold below which memory admission resumes. */
+  resourceRssResumeLimitBytes?: number;
   cookieSync?: boolean;
   cookieNames?: string[] | null;
   cookieSyncWaitMs?: number;

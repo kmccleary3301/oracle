@@ -1,9 +1,7 @@
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { delay } from "./utils.js";
 
 export type ProfileStateLogger = (message: string) => void;
 
@@ -14,8 +12,53 @@ const DEVTOOLS_ACTIVE_PORT_RELATIVE_PATHS = [
 ] as const;
 
 const CHROME_PID_FILENAME = "chrome.pid";
-const ORACLE_PROFILE_LOCK_FILENAME = "oracle-automation.lock";
+const profileLaunchLocks = new Map<string, Promise<void>>();
 
+export async function withProfileLaunchLock<T>(
+  userDataDir: string,
+  timeoutMs: number,
+  callback: () => Promise<T>,
+  logger?: ProfileStateLogger,
+): Promise<T> {
+  const key = path.resolve(userDataDir);
+  const prior = profileLaunchLocks.get(key);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  profileLaunchLocks.set(key, gate);
+  if (prior) {
+    const timeout = Math.max(1, timeoutMs);
+    let timer: ReturnType<typeof setTimeout>;
+    try {
+      await Promise.race([
+        prior,
+        new Promise<void>((_, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(
+                new Error(`Timed out waiting for manual-login profile lock after ${timeout}ms`),
+              ),
+            timeout,
+          );
+        }),
+      ]);
+    } catch (error) {
+      release();
+      if (profileLaunchLocks.get(key) === gate) profileLaunchLocks.delete(key);
+      throw error;
+    } finally {
+      clearTimeout(timer!);
+    }
+    logger?.(`Acquired manual-login profile launch lock for ${key}`);
+  }
+  try {
+    return await callback();
+  } finally {
+    release();
+    if (profileLaunchLocks.get(key) === gate) profileLaunchLocks.delete(key);
+  }
+}
 const execFileAsync = promisify(execFile);
 
 export function getDevToolsActivePortPaths(userDataDir: string): string[] {
@@ -120,33 +163,10 @@ function findChromeDebugTargetForProfileFromProcessList(
 
 export function findChromeDebugTargetForProfileFromProcessListForTest(
   processList: string,
+
   userDataDir: string,
 ): RunningChromeDebugTarget | null {
   return findChromeDebugTargetForProfileFromProcessList(processList, userDataDir);
-}
-
-export async function terminateRecordedChromeForProfile(
-  userDataDir: string,
-  logger?: ProfileStateLogger,
-): Promise<boolean> {
-  const pid = await readChromePid(userDataDir);
-  if (!pid || !isProcessAlive(pid)) {
-    return false;
-  }
-  const command = await readProcessCommand(pid);
-  if (!isChromeCommandForUserDataDir(command, userDataDir)) {
-    logger?.(`Recorded Chrome pid ${pid} does not match ${userDataDir}; skipping termination`);
-    return false;
-  }
-  try {
-    process.kill(pid, "SIGTERM");
-    logger?.(`Terminated shared manual-login Chrome pid ${pid}`);
-    return true;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    logger?.(`Failed to terminate shared manual-login Chrome pid ${pid}: ${message}`);
-    return false;
-  }
 }
 
 function isChromeCommandForUserDataDir(command: string | null, userDataDir: string): boolean {
@@ -172,137 +192,35 @@ export function isProcessAlive(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    // EPERM means "exists but no permission"; treat as alive.
-    if (
+    return Boolean(
       error &&
       typeof error === "object" &&
       "code" in error &&
-      (error as { code?: string }).code === "EPERM"
-    ) {
-      return true;
-    }
+      (error as { code?: string }).code === "EPERM",
+    );
+  }
+}
+
+async function isChromeUsingUserDataDir(userDataDir: string): Promise<boolean> {
+  if (process.platform === "win32") return false;
+  try {
+    const { stdout } = await execFileAsync("ps", ["-ax", "-o", "command="], {
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    return String(stdout ?? "")
+      .split("\n")
+      .some((line) => {
+        const lower = line.toLowerCase();
+        return (
+          (lower.includes("chrome") || lower.includes("chromium")) &&
+          lower.includes("user-data-dir") &&
+          line.includes(userDataDir)
+        );
+      });
+  } catch {
     return false;
   }
 }
-
-export interface ProfileRunLock {
-  path: string;
-  lockId: string;
-  release: () => Promise<void>;
-}
-
-interface ProfileRunLockRecord {
-  pid: number;
-  lockId: string;
-  createdAt: string;
-  sessionId?: string;
-}
-
-function parseProfileRunLock(payload: string | null): ProfileRunLockRecord | null {
-  if (!payload) return null;
-  try {
-    const parsed = JSON.parse(payload) as ProfileRunLockRecord;
-    if (!Number.isFinite(parsed.pid) || parsed.pid <= 0) return null;
-    if (!parsed.lockId || typeof parsed.lockId !== "string") return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-export async function acquireProfileRunLock(
-  userDataDir: string,
-  options: {
-    timeoutMs: number;
-    pollMs?: number;
-    logger?: ProfileStateLogger;
-    sessionId?: string;
-  },
-): Promise<ProfileRunLock | null> {
-  const timeoutMs = options.timeoutMs;
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    return null;
-  }
-  const pollMs =
-    typeof options.pollMs === "number" && Number.isFinite(options.pollMs) && options.pollMs > 0
-      ? options.pollMs
-      : 1000;
-  const lockPath = path.join(userDataDir, ORACLE_PROFILE_LOCK_FILENAME);
-  const lockId = randomUUID();
-  const startedAt = Date.now();
-  let warned = false;
-
-  for (;;) {
-    try {
-      const payload: ProfileRunLockRecord = {
-        pid: process.pid,
-        lockId,
-        createdAt: new Date().toISOString(),
-        sessionId: options.sessionId,
-      };
-      await mkdir(path.dirname(lockPath), { recursive: true });
-      await writeFile(lockPath, JSON.stringify(payload), { encoding: "utf8", flag: "wx" });
-      options.logger?.(`Acquired Oracle profile lock at ${lockPath}`);
-      return {
-        path: lockPath,
-        lockId,
-        release: async () => releaseProfileRunLock(lockPath, lockId, options.logger),
-      };
-    } catch (error) {
-      const code = (error as { code?: string }).code;
-      if (code !== "EEXIST") {
-        throw error;
-      }
-      let existing = parseProfileRunLock(await readFile(lockPath, "utf8").catch(() => null));
-      if (!existing) {
-        // Likely partial write / corruption; re-read once, then delete (user preference: delete unreadable lockfiles).
-        await delay(200);
-        existing = parseProfileRunLock(await readFile(lockPath, "utf8").catch(() => null));
-        if (!existing) {
-          options.logger?.("Oracle profile lock unreadable; deleting lockfile.");
-          await rm(lockPath, { force: true }).catch(() => undefined);
-          continue;
-        }
-      }
-      if (!existing || !isProcessAlive(existing.pid)) {
-        await rm(lockPath, { force: true }).catch(() => undefined);
-        continue;
-      }
-      if (!warned) {
-        const waited = Math.round(timeoutMs / 1000);
-        options.logger?.(
-          `Oracle profile lock held by pid ${existing.pid}; waiting up to ${waited}s.`,
-        );
-        warned = true;
-      }
-      const elapsed = Date.now() - startedAt;
-      if (elapsed >= timeoutMs) {
-        throw new Error(
-          `Oracle profile lock still held by pid ${existing.pid} after ${Math.round(elapsed / 1000)}s`,
-        );
-      }
-      await delay(Math.min(pollMs, timeoutMs - elapsed));
-    }
-  }
-}
-
-export async function releaseProfileRunLock(
-  lockPath: string,
-  lockId: string,
-  logger?: ProfileStateLogger,
-): Promise<void> {
-  try {
-    const existing = parseProfileRunLock(await readFile(lockPath, "utf8").catch(() => null));
-    if (!existing || existing.lockId !== lockId) {
-      return;
-    }
-    await rm(lockPath, { force: true });
-    logger?.(`Released Oracle profile lock ${lockPath}`);
-  } catch {
-    // best effort
-  }
-}
-
 export async function verifyDevToolsReachable({
   port,
   host = "127.0.0.1",
@@ -372,78 +290,19 @@ export async function cleanupStaleProfileState(
       // ignore cleanup errors
     }
   }
-
-  const lockRemovalMode = options.lockRemovalMode ?? "never";
-  if (lockRemovalMode === "never") {
-    return;
-  }
-
+  if (options.lockRemovalMode !== "if_oracle_pid_dead") return;
   const pid = await readChromePid(userDataDir);
-  if (!pid) {
-    return;
-  }
+  if (!pid) return;
   if (isProcessAlive(pid)) {
     logger?.(`Chrome pid ${pid} still alive; skipping profile lock cleanup`);
     return;
   }
-
-  // Extra safety: if Chrome is running with this profile (but with a different PID, e.g. user relaunched
-  // without remote debugging), never delete lock files.
   if (await isChromeUsingUserDataDir(userDataDir)) {
     logger?.("Detected running Chrome using this profile; skipping profile lock cleanup");
     return;
   }
-
-  const lockFiles = [
-    path.join(userDataDir, "lockfile"),
-    path.join(userDataDir, "SingletonLock"),
-    path.join(userDataDir, "SingletonSocket"),
-    path.join(userDataDir, "SingletonCookie"),
-  ];
-  for (const lock of lockFiles) {
-    await rm(lock, { force: true }).catch(() => undefined);
+  for (const lock of ["lockfile", "SingletonLock", "SingletonSocket", "SingletonCookie"]) {
+    await rm(path.join(userDataDir, lock), { force: true }).catch(() => undefined);
   }
   logger?.("Cleaned up stale Chrome profile locks");
-}
-
-async function isChromeUsingUserDataDir(userDataDir: string): Promise<boolean> {
-  if (process.platform === "win32") {
-    // On Windows, lockfiles are typically held open and removal should fail anyway; avoid expensive process scans.
-    return false;
-  }
-
-  try {
-    const { stdout } = await execFileAsync("ps", ["-ax", "-o", "command="], {
-      maxBuffer: 10 * 1024 * 1024,
-    });
-    const lines = String(stdout ?? "").split("\n");
-    const needle = userDataDir;
-    for (const line of lines) {
-      if (!line) continue;
-      const lower = line.toLowerCase();
-      if (!lower.includes("chrome") && !lower.includes("chromium")) continue;
-      if (line.includes(needle) && lower.includes("user-data-dir")) {
-        return true;
-      }
-    }
-  } catch {
-    // best effort
-  }
-  return false;
-}
-
-async function readProcessCommand(pid: number): Promise<string | null> {
-  try {
-    const { stdout } = await execFileAsync(
-      "ps",
-      ["-p", String(Math.trunc(pid)), "-o", "command="],
-      {
-        maxBuffer: 1024 * 1024,
-      },
-    );
-    const command = String(stdout ?? "").trim();
-    return command || null;
-  } catch {
-    return null;
-  }
 }

@@ -29,6 +29,16 @@ export async function resolveDaemonClientWithOptionalAutostart(): Promise<Oracle
   return null;
 }
 
+export async function requireDaemonClientWithOptionalAutostart(): Promise<OracleDaemonClient> {
+  const daemon = await resolveDaemonClientWithOptionalAutostart();
+  if (!daemon) {
+    throw new Error(
+      "Oracle durable jobs require the coordinator daemon. Start `oracle daemon start --background` or enable daemon autostart.",
+    );
+  }
+  return daemon;
+}
+
 async function startDaemonBackgroundFromCurrentInstall(connectionPath: string): Promise<void> {
   const currentDir = path.dirname(fileURLToPath(import.meta.url));
   const candidateCli = path.resolve(currentDir, "..", "..", "bin", "oracle-cli.js");

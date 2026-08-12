@@ -6,6 +6,7 @@ import {
   closeTab,
   connectWithNewTab,
   launchChrome,
+  monitorAdoptedLocalChrome,
   positionChromeWindowOffscreen,
   registerTerminationHooks,
 } from "./chromeLifecycle.js";
@@ -18,21 +19,15 @@ import {
 } from "./pageActions.js";
 import type { BrowserLogger, ChromeClient, ResolvedBrowserConfig } from "./types.js";
 import {
-  acquireBrowserTabLease,
-  hasOtherActiveBrowserTabLeases,
-  type BrowserTabLease,
-} from "./tabLeaseRegistry.js";
-import {
-  acquireProfileRunLock,
   cleanupStaleProfileState,
   findRunningChromeDebugTargetForProfile,
   readChromePid,
   readDevToolsPort,
   shouldCleanupManualLoginProfileState,
   verifyDevToolsReachable,
+  withProfileLaunchLock,
   writeChromePid,
   writeDevToolsActivePort,
-  type ProfileRunLock,
 } from "./profileState.js";
 import { CHATGPT_URL } from "./constants.js";
 import { delay } from "./utils.js";
@@ -52,7 +47,11 @@ import { normalizeProjectSourcesUrl } from "../projectSources/url.js";
 import { buildProjectSourcesUploadPlan, diffAddedProjectSources } from "../projectSources/plan.js";
 import type { ProjectSourcesRequest, ProjectSourcesResult } from "../projectSources/types.js";
 
-type BrowserChrome = LaunchedChrome & { host?: string };
+type BrowserChrome = LaunchedChrome & {
+  host?: string;
+  resourceExhaustion?: Promise<never>;
+  stopResourceWatchdog?: () => void;
+};
 
 export async function runBrowserProjectSources(
   request: ProjectSourcesRequest,
@@ -109,16 +108,6 @@ export async function runBrowserProjectSources(
     logger(`Created temporary Chrome profile at ${userDataDir}`);
   }
 
-  let tabLease: BrowserTabLease | null = null;
-  if (manualLogin) {
-    tabLease = await acquireBrowserTabLease(userDataDir, {
-      maxConcurrentTabs: config.maxConcurrentTabs,
-      timeoutMs: config.timeoutMs,
-      logger,
-      sessionId: "project-sources",
-    });
-  }
-
   let chrome: BrowserChrome | null = null;
   let reusedChrome: LaunchedChrome | null = null;
   let client: ChromeClient | null = null;
@@ -138,9 +127,6 @@ export async function runBrowserProjectSources(
     chrome = acquired.chrome;
     reusedChrome = acquired.reusedChrome;
     const chromeHost = chrome.host ?? "127.0.0.1";
-    if (tabLease) {
-      await tabLease.update({ chromeHost, chromePort: chrome.port });
-    }
 
     removeTerminationHooks = registerTerminationHooks(
       chrome,
@@ -162,15 +148,6 @@ export async function runBrowserProjectSources(
     });
     client = connection.client;
     isolatedTargetId = connection.targetId ?? null;
-    if (tabLease && isolatedTargetId) {
-      await tabLease.update({
-        chromeHost,
-        chromePort: chrome.port,
-        chromeTargetId: isolatedTargetId,
-        tabUrl: projectUrl,
-      });
-    }
-
     const disconnectPromise = new Promise<never>((_, reject) => {
       client?.on("disconnect", () => {
         connectionClosedUnexpectedly = true;
@@ -178,7 +155,11 @@ export async function runBrowserProjectSources(
       });
     });
     const raceWithDisconnect = <T>(promise: Promise<T>): Promise<T> =>
-      Promise.race([promise, disconnectPromise]);
+      Promise.race([
+        promise,
+        disconnectPromise,
+        ...(chrome?.resourceExhaustion ? [chrome.resourceExhaustion] : []),
+      ]);
 
     const { Network, Page, Runtime, Input, DOM, Target } = client;
     const domainEnablers = [Network.enable({}), Page.enable(), Runtime.enable()];
@@ -258,40 +239,17 @@ export async function runBrowserProjectSources(
     if (completed && isolatedTargetId && chrome?.port) {
       await closeTab(chrome.port, isolatedTargetId, logger, chromeHost).catch(() => undefined);
     }
+    chrome?.stopResourceWatchdog?.();
 
     let keepBrowserOpen = effectiveKeepBrowser;
-    let cleanupProfileLock: ProfileRunLock | null = null;
-    let terminatedRecordedChrome = false;
-    if (!keepBrowserOpen && manualLogin && tabLease) {
-      const cleanupLockTimeoutMs = Math.max(0, config.profileLockTimeoutMs ?? 0);
-      if (cleanupLockTimeoutMs > 0) {
-        cleanupProfileLock = await acquireProfileRunLock(userDataDir, {
-          timeoutMs: cleanupLockTimeoutMs,
-          logger,
-          sessionId: "project-sources",
-        }).catch(() => null);
-      }
-      keepBrowserOpen = await hasOtherActiveBrowserTabLeases(userDataDir, tabLease.id).catch(
-        () => false,
-      );
-      if (keepBrowserOpen) {
-        logger("[browser] Other ChatGPT tab leases still active; leaving shared Chrome running.");
-      } else if (reusedChrome && !connectionClosedUnexpectedly) {
-        keepBrowserOpen = true;
-        logger("[browser] Reused shared Chrome; leaving browser process running.");
-      }
-    }
-    if (tabLease) {
-      const handle = tabLease;
-      tabLease = null;
-      await handle.release().catch(() => undefined);
+    if (!keepBrowserOpen && reusedChrome && !connectionClosedUnexpectedly) {
+      keepBrowserOpen = true;
+      logger("[browser] Reused shared Chrome; leaving browser process running.");
     }
     if (!keepBrowserOpen && chrome) {
       if (!connectionClosedUnexpectedly) {
         try {
-          if (!terminatedRecordedChrome) {
-            await chrome.kill();
-          }
+          await chrome.kill();
         } catch {
           // ignore kill failures
         }
@@ -303,9 +261,7 @@ export async function runBrowserProjectSources(
           { connectionClosedUnexpectedly, host: chrome.host ?? "127.0.0.1" },
         );
         if (shouldCleanup) {
-          await cleanupStaleProfileState(userDataDir, logger, { lockRemovalMode: "never" }).catch(
-            () => undefined,
-          );
+          await cleanupStaleProfileState(userDataDir, logger).catch(() => undefined);
         }
       } else {
         await rm(userDataDir, { recursive: true, force: true }).catch(() => undefined);
@@ -317,9 +273,6 @@ export async function runBrowserProjectSources(
         // best effort
       }
       logger(`Chrome left running on port ${chrome.port} with profile ${userDataDir}`);
-    }
-    if (cleanupProfileLock) {
-      await cleanupProfileLock.release().catch(() => undefined);
     }
   }
 }
@@ -421,39 +374,33 @@ async function acquireManualLoginChromeForProjectSources(
   config: ResolvedBrowserConfig,
   logger: BrowserLogger,
 ): Promise<{ chrome: BrowserChrome; reusedChrome: LaunchedChrome | null }> {
-  const lockTimeoutMs = Math.max(0, config.profileLockTimeoutMs ?? 0);
-  let launchLock: ProfileRunLock | null = null;
-  if (lockTimeoutMs > 0) {
-    launchLock = await acquireProfileRunLock(userDataDir, {
-      timeoutMs: lockTimeoutMs,
-      logger,
-      sessionId: "project-sources",
-    });
-  }
-  try {
-    const reusedChrome = await maybeReuseProjectSourcesChrome(userDataDir, logger, {
-      waitForPortMs: config.reuseChromeWaitMs,
-    });
-    const chrome =
-      reusedChrome ??
-      (await launchChrome(
-        {
-          ...config,
-          remoteChrome: null,
-        },
-        userDataDir,
-        logger,
-      ));
-    if (chrome.port) {
-      await writeDevToolsActivePort(userDataDir, chrome.port);
-      if (!reusedChrome && chrome.pid) {
-        await writeChromePid(userDataDir, chrome.pid);
+  return await withProfileLaunchLock(
+    userDataDir,
+    config.profileLockTimeoutMs ?? 0,
+    async () => {
+      const reusedChrome = await maybeReuseProjectSourcesChrome(userDataDir, logger, {
+        waitForPortMs: config.reuseChromeWaitMs,
+      });
+      const chrome = reusedChrome
+        ? await monitorAdoptedLocalChrome(reusedChrome, config, userDataDir, logger)
+        : await launchChrome(
+            {
+              ...config,
+              remoteChrome: null,
+            },
+            userDataDir,
+            logger,
+          );
+      if (chrome.port) {
+        await writeDevToolsActivePort(userDataDir, chrome.port);
+        if (!reusedChrome && chrome.pid) {
+          await writeChromePid(userDataDir, chrome.pid);
+        }
       }
-    }
-    return { chrome, reusedChrome };
-  } finally {
-    await launchLock?.release().catch(() => undefined);
-  }
+      return { chrome, reusedChrome };
+    },
+    logger,
+  );
 }
 
 async function maybeReuseProjectSourcesChrome(
@@ -509,7 +456,9 @@ async function maybeReuseProjectSourcesChrome(
     logger(
       `Recorded Chrome DevTools port ${port} is stale (${probe.error}); launching new Chrome.`,
     );
-    await cleanupStaleProfileState(userDataDir, logger, { lockRemovalMode: "if_oracle_pid_dead" });
+    await cleanupStaleProfileState(userDataDir, logger, {
+      lockRemovalMode: "if_oracle_pid_dead",
+    });
     return null;
   }
   logger(`Reusing running Chrome on port ${port} with profile ${userDataDir}`);

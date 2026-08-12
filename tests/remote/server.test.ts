@@ -10,6 +10,10 @@ import { createRemoteBrowserExecutor } from "../../src/remote/client.js";
 import type { BrowserRunResult } from "../../src/browserMode.js";
 import type { RemoteArtifactDescriptor } from "../../src/remote/types.js";
 import { setOracleHomeDirOverrideForTest } from "../../src/oracleHome.js";
+import {
+  MAX_REMOTE_RUN_REQUEST_BYTES,
+  prepareRemoteRunRequest,
+} from "../../src/remote/runProtocol.js";
 
 const CAN_LISTEN_LOCALHOST =
   spawnSync(
@@ -446,6 +450,143 @@ describe("remote browser service", () => {
       }
     },
   );
+
+  test.skipIf(!CAN_LISTEN_LOCALHOST)(
+    "rejects legacy and oversized run bodies before browser execution",
+    async () => {
+      let browserRuns = 0;
+      const server = await createRemoteServer(
+        { host: "127.0.0.1", port: 0, token: "secret", logger: () => {} },
+        {
+          runBrowser: async () => {
+            browserRuns += 1;
+            throw new Error("browser must not run");
+          },
+        },
+      );
+      try {
+        const legacy = await httpPostRaw({
+          hostname: "127.0.0.1",
+          port: server.port,
+          token: "secret",
+          contentType: "application/json",
+          contentLength: 2,
+          body: Buffer.from("{}"),
+        });
+        expect(legacy.statusCode).toBe(400);
+        expect(legacy.json?.error).toBe("invalid_request");
+
+        const oversized = await httpPostRaw({
+          hostname: "127.0.0.1",
+          port: server.port,
+          token: "secret",
+          contentType: "application/vnd.oracle.run+framed; version=2",
+          contentLength: MAX_REMOTE_RUN_REQUEST_BYTES + 1,
+        });
+        expect(oversized.statusCode).toBe(413);
+        expect(oversized.json?.error).toBe("request_too_large");
+        expect(browserRuns).toBe(0);
+      } finally {
+        await server.close();
+      }
+    },
+  );
+  test.skipIf(!CAN_LISTEN_LOCALHOST)(
+    "rejects SSRF origins before browser execution and binds trust-boundary config",
+    async () => {
+      const rejectedOrigins = [
+        "https://localhost/",
+        "https://127.0.0.1/",
+        "https://[::1]/",
+        "https://169.254.169.254/",
+        "https://metadata.google.internal/",
+        "https://chatgpt.com.evil.example/",
+        "https://chatgpt.com@127.0.0.1/",
+        "http://chatgpt.com/",
+        "https://chatgpt.com:444/",
+        "ftp://chatgpt.com/",
+        "https://chatgpt.com/#fragment",
+      ];
+      let browserRuns = 0;
+      const server = await createRemoteServer(
+        { host: "127.0.0.1", port: 0, token: "secret", logger: () => {} },
+        {
+          runBrowser: async (options) => {
+            browserRuns += 1;
+            expect(options.config).toMatchObject({
+              url: "https://chatgpt.com/path",
+              chatgptUrl: "https://chatgpt.com/path",
+              remoteChrome: null,
+              debugPort: null,
+              chromeProfile: null,
+              chromePath: null,
+              chromeCookiePath: null,
+              manualLoginProfileDir: null,
+            });
+            expect((options.config as Record<string, unknown>).proxy).toBeUndefined();
+            return {
+              answerText: "ok",
+              answerMarkdown: "ok",
+              tookMs: 1,
+              answerTokens: 1,
+              answerChars: 2,
+            };
+          },
+        },
+      );
+      try {
+        for (const url of rejectedOrigins) {
+          const prepared = await prepareRemoteRunRequest({
+            payload: {
+              prompt: "ssrf",
+              attachments: [],
+              browserConfig: { url },
+              options: {},
+            },
+          });
+          const response = await httpPostRaw({
+            hostname: "127.0.0.1",
+            port: server.port,
+            token: "secret",
+            contentType: "application/vnd.oracle.run+framed; version=2",
+            contentLength: prepared.contentLength,
+            body: prepared.prefix,
+          });
+          expect(response.statusCode).toBe(400);
+          expect(response.json?.error).toBe("invalid_request");
+          expect(JSON.stringify(response.json)).not.toContain(url);
+        }
+        const prepared = await prepareRemoteRunRequest({
+          payload: {
+            prompt: "allowed",
+            attachments: [],
+            browserConfig: {
+              url: "https://chatgpt.com/path",
+              remoteChrome: { host: "127.0.0.1", port: 9222 },
+              debugPort: 9_999,
+              chromeProfile: "/attacker/profile",
+              chromePath: "/attacker/chrome",
+              chromeCookiePath: "/attacker/cookies",
+              proxy: "http://127.0.0.1:8080",
+            } as never,
+            options: {},
+          },
+        });
+        const response = await httpPostRaw({
+          hostname: "127.0.0.1",
+          port: server.port,
+          token: "secret",
+          contentType: "application/vnd.oracle.run+framed; version=2",
+          contentLength: prepared.contentLength,
+          body: prepared.prefix,
+        });
+        expect(response.statusCode).toBe(200);
+        expect(browserRuns).toBe(1);
+      } finally {
+        await server.close();
+      }
+    },
+  );
 });
 
 function createArtifactDescriptor(
@@ -578,4 +719,67 @@ async function httpGetJson({
     req.on("error", reject);
     req.end();
   });
+}
+
+async function httpPostRaw({
+  hostname,
+  port,
+  token,
+  contentType,
+  contentLength,
+  body,
+}: {
+  hostname: string;
+  port: number;
+  token: string;
+  contentType: string;
+  contentLength: number;
+  body?: Buffer;
+}): Promise<{ statusCode: number; json: Record<string, unknown> | null }> {
+  let resolveResult!: (
+    value:
+      | { statusCode: number; json: Record<string, unknown> | null }
+      | PromiseLike<{ statusCode: number; json: Record<string, unknown> | null }>,
+  ) => void;
+  let rejectResult!: (reason?: unknown) => void;
+  const promise = new Promise<{ statusCode: number; json: Record<string, unknown> | null }>(
+    (resolve, reject) => {
+      resolveResult = resolve;
+      rejectResult = reject;
+    },
+  );
+  const req = http.request(
+    {
+      hostname,
+      port,
+      path: "/runs",
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": contentType,
+        "content-length": contentLength,
+      },
+    },
+    (res) => {
+      res.setEncoding("utf8");
+      let responseBody = "";
+      res.on("data", (chunk: string) => {
+        responseBody += chunk;
+      });
+      res.on("end", () => {
+        let json: Record<string, unknown> | null = null;
+        try {
+          const parsed = responseBody.length ? JSON.parse(responseBody) : null;
+          json = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+        } catch {
+          json = null;
+        }
+        resolveResult({ statusCode: res.statusCode ?? 0, json });
+      });
+    },
+  );
+  req.on("error", rejectResult);
+  if (body) req.write(body);
+  req.end();
+  return await promise;
 }

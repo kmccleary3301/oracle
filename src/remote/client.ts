@@ -3,10 +3,10 @@ import { createWriteStream } from "node:fs";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import path from "node:path";
-import { mkdir, readFile, rename, rm, stat } from "node:fs/promises";
+import { mkdir, rename, rm, stat } from "node:fs/promises";
 import type { BrowserRunOptions } from "../browserMode.js";
 import type { BrowserRunResult } from "../browserMode.js";
-import type { BrowserAttachment, SavedBrowserFile } from "../browser/types.js";
+import type { SavedBrowserFile } from "../browser/types.js";
 import {
   appendArtifacts,
   computeFileSha256,
@@ -19,10 +19,13 @@ import {
 import {
   MAX_REMOTE_ARTIFACT_BYTES,
   type RemoteArtifactDescriptor,
-  type RemoteRunPayload,
   type RemoteRunEvent,
-  type RemoteAttachmentPayload,
 } from "./types.js";
+import {
+  prepareRemoteRunRequest,
+  REMOTE_RUN_CONTENT_TYPE,
+  writePreparedRemoteRunRequest,
+} from "./runProtocol.js";
 import { parseHostPort } from "../bridge/connection.js";
 
 interface RemoteExecutorOptions {
@@ -35,25 +38,25 @@ export function createRemoteBrowserExecutor({ host, token }: RemoteExecutorOptio
   return async function remoteBrowserExecutor(
     options: BrowserRunOptions,
   ): Promise<BrowserRunResult> {
-    const payload: RemoteRunPayload = {
-      prompt: options.prompt,
-      attachments: await serializeAttachments(options.attachments ?? []),
-      fallbackSubmission: options.fallbackSubmission
-        ? {
-            prompt: options.fallbackSubmission.prompt,
-            attachments: await serializeAttachments(options.fallbackSubmission.attachments ?? []),
-          }
-        : undefined,
-      browserConfig: options.config ?? {},
-      options: {
-        heartbeatIntervalMs: options.heartbeatIntervalMs,
-        verbose: options.verbose,
-        sessionId: options.sessionId,
-        followUpPrompts: options.followUpPrompts,
+    const prepared = await prepareRemoteRunRequest({
+      payload: {
+        prompt: options.prompt,
+        attachments: options.attachments ?? [],
+        fallbackSubmission: options.fallbackSubmission
+          ? {
+              prompt: options.fallbackSubmission.prompt,
+              attachments: options.fallbackSubmission.attachments ?? [],
+            }
+          : undefined,
+        browserConfig: options.config ?? {},
+        options: {
+          heartbeatIntervalMs: options.heartbeatIntervalMs,
+          verbose: options.verbose,
+          sessionId: options.sessionId,
+          followUpPrompts: options.followUpPrompts,
+        },
       },
-    };
-
-    const body = Buffer.from(JSON.stringify(payload));
+    });
     const { hostname, port } = parseHost(host);
 
     return new Promise<BrowserRunResult>((resolve, reject) => {
@@ -77,8 +80,8 @@ export function createRemoteBrowserExecutor({ host, token }: RemoteExecutorOptio
           path: "/runs",
           method: "POST",
           headers: {
-            "Content-Type": "application/json",
-            "Content-Length": body.length,
+            "Content-Type": REMOTE_RUN_CONTENT_TYPE,
+            "Content-Length": prepared.contentLength,
             ...(token ? { authorization: `Bearer ${token}` } : {}),
           },
         },
@@ -143,27 +146,12 @@ export function createRemoteBrowserExecutor({ host, token }: RemoteExecutorOptio
         },
       );
       req.on("error", fail);
-      req.write(body);
-      req.end();
+      void writePreparedRemoteRunRequest(req, prepared).catch((error) => {
+        req.destroy(error);
+        fail(error instanceof Error ? error : new Error(String(error)));
+      });
     });
   };
-}
-
-async function serializeAttachments(
-  attachments: BrowserAttachment[],
-): Promise<RemoteAttachmentPayload[]> {
-  const serialized: RemoteAttachmentPayload[] = [];
-  for (const attachment of attachments) {
-    // Read the local file upfront so the remote host never touches the caller's filesystem.
-    const content = await readFile(attachment.path);
-    serialized.push({
-      fileName: path.basename(attachment.path),
-      displayPath: attachment.displayPath,
-      sizeBytes: attachment.sizeBytes,
-      contentBase64: content.toString("base64"),
-    });
-  }
-  return serialized;
 }
 
 function parseHost(input: string): { hostname: string; port: number } {

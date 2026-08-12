@@ -11,5 +11,8 @@ export {
   DEFAULT_MODEL_TARGET,
   parseDuration,
   normalizeChatgptUrl,
+  normalizeRemoteChatgptUrl,
+  normalizeRemoteChatgptOrigins,
+  DEFAULT_REMOTE_CHATGPT_ORIGINS,
   isTemporaryChatUrl,
 } from "./browser/index.js";

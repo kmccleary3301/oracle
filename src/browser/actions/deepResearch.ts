@@ -20,6 +20,7 @@ type ActivateOutcome =
   | { status: "activated" }
   | { status: "already-active" }
   | { status: "plus-button-missing" }
+  | { status: "plus-button-trusted-click-required"; clickPoint?: { x?: number; y?: number } }
   | { status: "dropdown-item-missing"; available?: string[] }
   | { status: "pill-not-confirmed"; clickPoint?: { x?: number; y?: number } };
 
@@ -32,13 +33,29 @@ export async function activateDeepResearch(
   Input: ChromeClient["Input"],
   logger: BrowserLogger,
 ): Promise<void> {
-  const expression = buildActivateDeepResearchExpression();
-  const outcome = await Runtime.evaluate({
-    expression,
+  let outcome = await Runtime.evaluate({
+    expression: buildActivateDeepResearchExpression(),
     awaitPromise: true,
     returnByValue: true,
   });
-  const result = outcome.result?.value as ActivateOutcome | undefined;
+  let result = outcome.result?.value as ActivateOutcome | undefined;
+
+  if (result?.status === "plus-button-trusted-click-required") {
+    const point = result.clickPoint;
+    if (typeof point?.x !== "number" || typeof point.y !== "number") {
+      throw new BrowserAutomationError(
+        "Could not determine where to click the composer plus button.",
+        { stage: "deep-research-activate", code: "plus-button-click-point-missing" },
+      );
+    }
+    await clickTrustedPoint(Runtime, Input, point.x, point.y);
+    outcome = await Runtime.evaluate({
+      expression: buildActivateDeepResearchExpression(true),
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    result = outcome.result?.value as ActivateOutcome | undefined;
+  }
 
   switch (result?.status) {
     case "activated":
@@ -91,6 +108,8 @@ async function clickTrustedPoint(
 ): Promise<void> {
   if (Input && typeof Input.dispatchMouseEvent === "function") {
     await Input.dispatchMouseEvent({ type: "mouseMoved", x, y });
+    // ChatGPT's `interestfor` composer controls arm after a short hover dwell.
+    await delay(500);
     await Input.dispatchMouseEvent({ type: "mousePressed", x, y, button: "left", clickCount: 1 });
     await Input.dispatchMouseEvent({ type: "mouseReleased", x, y, button: "left", clickCount: 1 });
     return;
@@ -1127,19 +1146,18 @@ function buildFindDeepResearchPillExpression(functionName = "findDeepResearchPil
   return `const ${functionName} = () => {
       const label = ${pillLabel}.toLowerCase();
       const selectors = [
+        '[data-inline-selection-pill][data-id="plugin:connector_openai_deep_research"]',
         '.__composer-pill-composite',
         '.__composer-pill',
         '[class*="composer-pill"]',
+        '[data-testid="composer-pill"]',
       ].join(',');
       const candidates = Array.from(document.querySelectorAll(selectors));
-      const composerRoots = Array.from(document.querySelectorAll('[data-testid="composer"], form, [class*="composer"]'));
-      for (const root of composerRoots) {
-        candidates.push(...Array.from(root.querySelectorAll('button, [role="button"], [class*="pill"], [class*="composer-pill"]')));
-      }
       const seen = new Set();
       for (const pill of candidates) {
         if (!(pill instanceof Element) || seen.has(pill)) continue;
         seen.add(pill);
+        if (pill.closest('.popover, [class*="popover"], [data-radix-popper-content-wrapper], [data-floating-ui-portal]')) continue;
         const rect = pill.getBoundingClientRect?.();
         if (!rect || rect.width <= 0 || rect.height <= 0) continue;
         const text = (pill.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
@@ -1168,10 +1186,10 @@ function buildWaitForDeepResearchPillExpression(timeoutMs: number): string {
   })()`;
 }
 
-function buildActivateDeepResearchExpression(): string {
+function buildActivateDeepResearchExpression(menuAlreadyOpen = false): string {
   const plusBtnSelector = JSON.stringify(DEEP_RESEARCH_PLUS_BUTTON);
   const targetText = JSON.stringify(DEEP_RESEARCH_DROPDOWN_ITEM_TEXT);
-
+  const shouldOpenMenu = JSON.stringify(!menuAlreadyOpen);
   return `(async () => {
     ${buildClickDispatcher()}
     ${buildFindDeepResearchPillExpression()}
@@ -1295,15 +1313,20 @@ function buildActivateDeepResearchExpression(): string {
       return { status: 'already-active' };
     }
 
-    // Step 1: Open the composer tools menu. Avoid slash commands because they
-    // mutate the main composer and can be submitted as normal prompt text.
-    const plusBtn = document.querySelector(${plusBtnSelector}) ||
-      Array.from(document.querySelectorAll('button')).find(
-        b => (b.getAttribute('aria-label') || '').toLowerCase().includes('add files')
-      );
-    if (!plusBtn) return { status: 'plus-button-missing' };
-    dispatchClickSequence(plusBtn);
-
+    // Step 1: Open the composer tools menu with a trusted CDP input event.
+    // The current ChatGPT app ignores synthetic DOM clicks on this control.
+    if (${shouldOpenMenu} && !findDeepResearchItem({ requirePopover: true })) {
+      const plusBtn = document.querySelector(${plusBtnSelector}) ||
+        Array.from(document.querySelectorAll('button')).find(
+          b => (b.getAttribute('aria-label') || '').toLowerCase().includes('add files')
+        );
+      if (!plusBtn) return { status: 'plus-button-missing' };
+      const rect = plusBtn.getBoundingClientRect?.();
+      const clickPoint = rect && rect.width > 0 && rect.height > 0
+        ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+        : undefined;
+      return { status: 'plus-button-trusted-click-required', clickPoint };
+    }
     // Step 2: Wait for dropdown
     const waitForDropdown = () => new Promise((resolve) => {
       let elapsed = 0;

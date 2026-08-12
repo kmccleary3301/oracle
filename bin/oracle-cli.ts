@@ -64,6 +64,7 @@ import { resolveRenderFlag, resolveRenderPlain } from "../src/cli/renderFlags.js
 import { resolveGeminiModelId } from "../src/oracle/geminiModels.js";
 import { asOracleUserError } from "../src/oracle/errors.js";
 import type { StatusOptions } from "../src/cli/sessionCommand.js";
+import type { OracleDaemonWorkInput } from "../src/daemon/types.js";
 import { isErrorLogged } from "../src/cli/errorUtils.js";
 import { resolveOutputPath } from "../src/cli/writeOutputPath.js";
 import { getCliVersion } from "../src/version.js";
@@ -104,6 +105,7 @@ import {
   inspectThinkingControlsForChatgptConversation,
   sendChatgptTurn,
 } from "../src/browser/chatgpt/session.js";
+import { readChatgptCapabilityProbe } from "../src/browser/chatgpt/probe.js";
 import {
   createChatgptProject,
   deleteChatgptConversation,
@@ -115,6 +117,13 @@ import {
 } from "../src/browser/chatgpt/projects.js";
 import type { BrowserAttachment } from "../src/browser/types.js";
 import { resolveBrowserAttachments as resolveChatgptBrowserAttachments } from "../src/browser/attachmentResolver.js";
+import {
+  ApprovalGrantAuthority,
+  createApprovalChallenge,
+  defaultApprovalGrantDbPath,
+  serializeApprovalChallenge,
+  type ApprovalChallenge,
+} from "../src/browser/approvalToken.js";
 
 interface CliOptions extends OptionValues {
   prompt?: string;
@@ -167,6 +176,10 @@ interface CliOptions extends OptionValues {
   browserAttachmentTimeout?: string;
   browserProfileLockTimeout?: string;
   browserMaxConcurrentTabs?: string;
+  browserResourceMonitorInterval?: string;
+  browserResourceRssSoftLimit?: string;
+  browserResourceRssHardLimit?: string;
+  browserResourceRssResumeLimit?: string;
   browserCookieWait?: string;
   browserNoCookieSync?: boolean;
   otp?: string;
@@ -270,6 +283,9 @@ const normalizedArgv = [
   ...(hasCliEntrypointArg ? [CLI_ENTRYPOINT] : []),
   ...userCliArgs,
 ];
+if (userCliArgs[0] === "bridge" && userCliArgs[1] === "claude-config") {
+  installClaudeConfigWarningFilter();
+}
 const routingCliArgs = stripPerfTraceArgs(userCliArgs);
 const isTty = process.stdout.isTTY;
 const perfTrace = createPerfTrace({
@@ -284,6 +300,24 @@ process.once("exit", (code) => {
     console.error(`Failed to write perf trace: ${error instanceof Error ? error.message : error}`);
   }
 });
+
+function installClaudeConfigWarningFilter(): void {
+  const existingWarningListeners = process.listeners("warning");
+  for (const listener of existingWarningListeners) {
+    process.removeListener("warning", listener);
+  }
+  process.on("warning", (warning) => {
+    if (
+      warning.name === "ExperimentalWarning" &&
+      warning.message.includes("SQLite is an experimental feature")
+    ) {
+      return;
+    }
+    for (const listener of existingWarningListeners) {
+      listener(warning);
+    }
+  });
+}
 
 function stripPerfTraceArgs(args: string[]): string[] {
   const stripped: string[] = [];
@@ -752,6 +786,30 @@ program
   )
   .addOption(
     new Option(
+      "--browser-resource-monitor-interval <ms|s|m>",
+      "Interval between local Chrome process-tree RSS samples (default 1s).",
+    ).hideHelp(),
+  )
+  .addOption(
+    new Option(
+      "--browser-resource-rss-soft-limit <bytes>",
+      "Pause new browser work above this local Chrome process-tree RSS (default 4 GiB).",
+    ).hideHelp(),
+  )
+  .addOption(
+    new Option(
+      "--browser-resource-rss-hard-limit <bytes>",
+      "Stop an identity-verified owned Chrome above this RSS (default 6 GiB).",
+    ).hideHelp(),
+  )
+  .addOption(
+    new Option(
+      "--browser-resource-rss-resume-limit <bytes>",
+      "Resume browser admission below this RSS after a soft pause (default 3 GiB).",
+    ).hideHelp(),
+  )
+  .addOption(
+    new Option(
       "--browser-auto-reattach-delay <ms|s|m|h>",
       "Delay before starting periodic auto-reattach attempts after a timeout.",
     ).hideHelp(),
@@ -822,7 +880,7 @@ program
       'Copy a signed-in Chrome user-data dir to a throwaway profile and run browser mode against it (login-free; auto-cleanup). e.g. "$HOME/Library/Application Support/Google/Chrome".',
     ),
   )
-  .addOption(new Option("--browser-headless", "Launch Chrome in headless mode.").hideHelp())
+  .addOption(new Option("--browser-headless", "Launch Chrome in headless mode."))
   .addOption(
     new Option(
       "--browser-hide-window",
@@ -1042,6 +1100,13 @@ function addProjectSourcesCommonOptions(command: Command): Command {
     .option("--browser-profile-lock-timeout <duration>", "Timeout waiting for profile launch lock.")
     .option("--browser-reuse-wait <duration>", "Wait for an existing shared Chrome to appear.")
     .option("--browser-max-concurrent-tabs <n>", "Concurrent tabs allowed for the shared profile.")
+    .option(
+      "--browser-resource-monitor-interval <duration>",
+      "Interval between local Chrome RSS samples.",
+    )
+    .option("--browser-resource-rss-soft-limit <bytes>", "RSS soft pause threshold in bytes.")
+    .option("--browser-resource-rss-hard-limit <bytes>", "RSS hard stop threshold in bytes.")
+    .option("--browser-resource-rss-resume-limit <bytes>", "RSS resume threshold in bytes.")
     .option("--browser-cookie-wait <duration>", "Wait before retrying cookie sync.")
     .option("--browser-chrome-profile <profile>", "Chrome profile name for cookie sync.")
     .option("--browser-chrome-path <path>", "Chrome/Chromium executable path.")
@@ -1145,6 +1210,77 @@ bridgeCommand
     await runBridgeDoctor(commandOptions);
   });
 
+function resolveApprovalGrantDbPath(explicitPath?: string): string {
+  return explicitPath || process.env.ORACLE_APPROVAL_GRANT_DB || defaultApprovalGrantDbPath();
+}
+
+function parseApprovalChallengeJson(raw: string): ApprovalChallenge {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    throw new Error("--challenge must be valid JSON.");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("--challenge must be an ApprovalChallenge JSON object.");
+  }
+  const keys = Object.keys(parsed).sort();
+  const expectedKeys = ["expiry", "operation", "payloadDigest", "revision", "target"];
+  if (
+    keys.length !== expectedKeys.length ||
+    keys.some((key, index) => key !== expectedKeys[index])
+  ) {
+    throw new Error("--challenge must contain exactly the ApprovalChallenge fields.");
+  }
+  const challenge = createApprovalChallenge(parsed as ApprovalChallenge);
+  if (
+    serializeApprovalChallenge(challenge) !==
+    serializeApprovalChallenge(parsed as ApprovalChallenge)
+  ) {
+    throw new Error("--challenge is not an exact ApprovalChallenge.");
+  }
+  return challenge;
+}
+
+const approvalCommand = program
+  .command("approval")
+  .description("Issue and inspect local one-time approval grants.");
+
+approvalCommand
+  .command("issue")
+  .description("Issue a one-time approval grant from a trusted local operator.")
+  .requiredOption("--challenge <json>", "Exact ApprovalChallenge JSON.")
+  .requiredOption("--yes", "Confirm this trusted local grant issuance.")
+  .option("--principal <id>", "Bind the grant to a principal.")
+  .option("--session <id>", "Bind the grant to a session.")
+  .option("--db-path <path>", "SQLite approval grant database path.")
+  .option("--json", "Print structured JSON.", false)
+  .action(async (commandOptions) => {
+    const challenge = parseApprovalChallengeJson(commandOptions.challenge);
+    const authority = new ApprovalGrantAuthority({
+      dbPath: resolveApprovalGrantDbPath(commandOptions.dbPath),
+    });
+    try {
+      const result = authority.issueGrant(challenge, {
+        localOperator: true,
+        principal: commandOptions.principal,
+        session: commandOptions.session,
+      });
+      if (result.state !== "issued") {
+        throw new Error(`Unable to issue approval grant: ${result.reason}.`);
+      }
+      const output = { grant: result.grant, challenge: result.challenge };
+      if (commandOptions.json) {
+        console.log(JSON.stringify(output, null, 2));
+      } else {
+        console.log(`Grant: ${result.grant}`);
+        console.log(`Challenge: ${serializeApprovalChallenge(result.challenge)}`);
+      }
+    } finally {
+      authority.close();
+    }
+  });
+
 const daemonCommand = program
   .command("daemon")
   .description("Run and inspect the durable Oracle async job daemon.");
@@ -1160,7 +1296,8 @@ daemonCommand
   .option("--max-concurrent-jobs <number>", "Maximum concurrent jobs.", parseIntOption)
   .option("--background", "Start in the background and return immediately.", false)
   .option("--foreground", "Run in the foreground.", false)
-  .option("--json", "Print structured JSON.", false)
+  .option("--json", "Print JSON output.", false)
+  .option("--approval-db-path <path>", "SQLite approval grant database path.")
   .action(async (commandOptions) => {
     const { resolveOracleDaemonConfig } = await import("../src/daemon/config.js");
     const resolved = await resolveOracleDaemonConfig();
@@ -1169,6 +1306,7 @@ daemonCommand
     const token = commandOptions.token ?? resolved.token ?? "auto";
     const jobDir = commandOptions.jobDir ?? resolved.jobDir;
     const connectionPath = commandOptions.connectionPath ?? resolved.connectionPath;
+    const approvalDbPath = resolveApprovalGrantDbPath(commandOptions.approvalDbPath);
     const requestedBackground =
       commandOptions.background === true || process.argv.includes("--background");
     const requestedForeground =
@@ -1188,6 +1326,9 @@ daemonCommand
         "--connection-path",
         connectionPath,
       ];
+      if (commandOptions.approvalDbPath) {
+        args.push("--approval-db-path", commandOptions.approvalDbPath);
+      }
       if (token !== "auto") args.push("--token", token);
       if (commandOptions.maxConcurrentJobs) {
         args.push("--max-concurrent-jobs", String(commandOptions.maxConcurrentJobs));
@@ -1207,17 +1348,32 @@ daemonCommand
       return;
     }
     const { createOracleDaemonServer } = await import("../src/daemon/server.js");
-    const server = await createOracleDaemonServer({
-      host,
-      port,
-      token: token === "auto" ? undefined : token,
-      jobDir,
-      connectionPath,
-      maxConcurrentJobs: commandOptions.maxConcurrentJobs ?? resolved.maxConcurrentJobs,
-      logger: (message) => {
-        if (!commandOptions.json) console.error(chalk.dim(message));
-      },
-    });
+    const approvalAuthority = new ApprovalGrantAuthority({ dbPath: approvalDbPath });
+    let server;
+    try {
+      server = await createOracleDaemonServer({
+        host,
+        port,
+        token: token === "auto" ? undefined : token,
+        jobDir,
+        connectionPath,
+        approvalAuthority,
+        maxConcurrentJobs: commandOptions.maxConcurrentJobs ?? resolved.maxConcurrentJobs,
+        maxQueuedJobs: resolved.maxQueuedJobs,
+        maxQueuedPersistedInputBytes: resolved.maxQueuedPersistedInputBytes,
+        maxPrincipalQueuedJobs: resolved.maxPrincipalQueuedJobs,
+        maxPrincipalQueuedInputBytes: resolved.maxPrincipalQueuedInputBytes,
+        maxPrincipalAdmissionsPerWindow: resolved.maxPrincipalAdmissionsPerWindow,
+        principalRateWindowMs: resolved.principalRateWindowMs,
+        jobRetentionMs: resolved.jobRetentionDays * 24 * 60 * 60_000,
+        logger: (message) => {
+          if (!commandOptions.json) console.error(chalk.dim(message));
+        },
+      });
+    } catch (error) {
+      approvalAuthority.close();
+      throw error;
+    }
     const payload = {
       started: true,
       background: false,
@@ -1234,12 +1390,15 @@ daemonCommand
       console.log(`Connection: ${connectionPath}`);
     }
     await new Promise<void>((resolve) => {
-      const shutdown = () => {
-        server.close().finally(() => resolve());
-      };
-      process.on("SIGINT", shutdown);
-      process.on("SIGTERM", shutdown);
+      const shutdown = () => resolve();
+      process.once("SIGINT", shutdown);
+      process.once("SIGTERM", shutdown);
     });
+    try {
+      await server.close();
+    } finally {
+      approvalAuthority.close();
+    }
   });
 
 daemonCommand
@@ -1270,6 +1429,155 @@ daemonCommand
       return;
     }
     console.log("Oracle daemon stop requested.");
+  });
+const workCommand = program
+  .command("work")
+  .description("Run and inspect ChatGPT Work operations through the daemon.");
+
+type CliWorkInput = OracleDaemonWorkInput;
+
+function printWorkResult(result: unknown): void {
+  // Work results are already typed daemon payloads. Keep every field (including
+  // state, reason, actionRequired, and runtime metadata) intact for scripts.
+  console.log(JSON.stringify(result, null, 2));
+}
+
+function workInputFromOptions(options: OptionValues): CliWorkInput {
+  return {
+    prompt: options.prompt,
+    answer: options.answer,
+    conversationId: options.conversationId,
+    taskId: options.taskId,
+    task: options.task,
+    deliverable: options.deliverable,
+    deliverables: options.deliverables,
+    turnId: options.turnId,
+    questionId: options.questionId,
+    expectedRevisionHash: options.revisionHash,
+    approvalGrant: options.approvalGrant,
+    dryRun: Boolean(options.dryRun || rawCliArgs.includes("--dry-run")),
+    remoteChrome: options.remoteChrome,
+    timeoutMs: options.timeout,
+    keepTab: options.keepTab,
+  };
+}
+
+workCommand
+  .command("start")
+  .description("Start a ChatGPT Work task.")
+  .option("--prompt <text>", "Prompt to submit in Work mode.")
+  .option("--task-id <id>", "Client task identity to preserve.")
+  .option("--task <text>", "Task description.")
+  .option("--deliverable <text>", "Expected deliverable.")
+  .option("--deliverables <json>", "Expected deliverables as a JSON object.", (value) => {
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("--deliverables must be a JSON object.");
+    }
+    return parsed;
+  })
+  .option("--conversation-id <id>", "Existing conversation identity.")
+  .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
+  .option("--timeout <ms|s|m|h>", "Work start timeout.", (value) =>
+    parseDurationOption(value, "Work start timeout"),
+  )
+  .option("--keep-tab", "Leave the opened Work tab alive.", false)
+  .option("--connection-path <path>", "Path for the daemon connection artifact.")
+  .option("--json", "Print structured JSON.", false)
+  .action(async (commandOptions: OptionValues) => {
+    const prompt = commandOptions.prompt ?? readCliOptionValue("--prompt");
+    if (!prompt) {
+      throw new Error("Work start requires --prompt <text>.");
+    }
+    const client = await resolveDaemonCliClient(commandOptions.connectionPath);
+    const result = await client.workStart({
+      ...workInputFromOptions(commandOptions),
+      prompt,
+    });
+    printWorkResult(result);
+  });
+
+workCommand
+  .command("status")
+  .description("Read the current state of an exact Work conversation.")
+  .requiredOption("--conversation-id <id>", "Exact ChatGPT conversation identity.")
+  .option("--task-id <id>", "Client task identity, when assigned.")
+  .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
+  .option("--timeout <ms|s|m|h>", "Work status timeout.", (value) =>
+    parseDurationOption(value, "Work status timeout"),
+  )
+  .option("--keep-tab", "Leave the opened Work tab alive.", false)
+  .option("--connection-path <path>", "Path for the daemon connection artifact.")
+  .option("--json", "Print structured JSON.", false)
+  .action(async (commandOptions: OptionValues) => {
+    const client = await resolveDaemonCliClient(commandOptions.connectionPath);
+    const result = await client.workStatus(workInputFromOptions(commandOptions));
+    printWorkResult(result);
+  });
+
+workCommand
+  .command("answer")
+  .description("Answer a question raised by an exact Work task.")
+  .requiredOption("--conversation-id <id>", "Exact ChatGPT conversation identity.")
+  .requiredOption("--task-id <id>", "Exact Work task identity.")
+  .requiredOption("--question-id <id>", "Exact Work question identity.")
+  .requiredOption("--answer <text>", "Response to the Work question.")
+  .option("--revision-hash <hash>", "Expected revision hash for the exact question.")
+  .option("--turn-id <id>", "Exact Work turn identity, when available.")
+  .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
+  .option("--timeout <ms|s|m|h>", "Work answer timeout.", (value) =>
+    parseDurationOption(value, "Work answer timeout"),
+  )
+  .option("--connection-path <path>", "Path for the daemon connection artifact.")
+  .option("--json", "Print structured JSON.", false)
+  .action(async (commandOptions: OptionValues) => {
+    const client = await resolveDaemonCliClient(commandOptions.connectionPath);
+    const result = await client.workAnswer(workInputFromOptions(commandOptions));
+    printWorkResult(result);
+  });
+
+workCommand
+  .command("approve")
+  .description("Approve an exact Work plan revision.")
+  .requiredOption("--conversation-id <id>", "Exact ChatGPT conversation identity.")
+  .requiredOption("--task-id <id>", "Exact Work task identity.")
+  .requiredOption("--revision-hash <hash>", "Exact Work plan revision hash.")
+  .option("--approval-grant <grant>", "One-time approval grant for the exact revision.")
+  .option("--dry-run", "Preview approval and return the current approval challenge.", false)
+  .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
+  .option("--timeout <ms|s|m|h>", "Work approval timeout.", (value) =>
+    parseDurationOption(value, "Work approval timeout"),
+  )
+  .option("--keep-tab", "Leave the opened Work tab alive.", false)
+  .option("--connection-path <path>", "Path for the daemon connection artifact.")
+  .option("--json", "Print structured JSON.", false)
+  .action(async (commandOptions: OptionValues) => {
+    const dryRun = Boolean(commandOptions.dryRun || rawCliArgs.includes("--dry-run"));
+    if (!dryRun && !commandOptions.approvalGrant) {
+      throw new Error("--approval-grant is required unless --dry-run is set.");
+    }
+    const client = await resolveDaemonCliClient(commandOptions.connectionPath);
+    const result = await client.workApprove(workInputFromOptions(commandOptions));
+    printWorkResult(result);
+  });
+
+workCommand
+  .command("interrupt")
+  .description("Interrupt an exact Work turn.")
+  .requiredOption("--conversation-id <id>", "Exact ChatGPT conversation identity.")
+  .requiredOption("--task-id <id>", "Exact Work task identity.")
+  .requiredOption("--turn-id <id>", "Exact Work turn identity.")
+  .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
+  .option("--timeout <ms|s|m|h>", "Work interrupt timeout.", (value) =>
+    parseDurationOption(value, "Work interrupt timeout"),
+  )
+  .option("--keep-tab", "Leave the opened Work tab alive.", false)
+  .option("--connection-path <path>", "Path for the daemon connection artifact.")
+  .option("--json", "Print structured JSON.", false)
+  .action(async (commandOptions: OptionValues) => {
+    const client = await resolveDaemonCliClient(commandOptions.connectionPath);
+    const result = await client.workInterrupt(workInputFromOptions(commandOptions));
+    printWorkResult(result);
   });
 
 const jobCommand = program
@@ -2179,6 +2487,41 @@ browserCommand
     console.log(`Page: ${result.page.href}`);
     console.log(`Composer: ${result.page.hasComposer ? "yes" : "no"}`);
     console.log(`Generated images: ${result.page.uniqueGeneratedImageCount}`);
+  });
+
+browserCommand
+  .command("probe")
+  .description("Read a redacted ChatGPT capability inventory without sending or changing content.")
+  .option("--remote-chrome <host:port>", "Override configured Chrome DevTools endpoint.")
+  .option("--timeout <ms|s|m|h>", "Capability probe timeout.", (value) =>
+    parseDurationOption(value, "Browser probe timeout"),
+  )
+  .option("--keep-tab", "Leave the opened probe tab alive.", false)
+  .option("--json", "Print the typed capability inventory as JSON.", false)
+  .action(async (rawCommandOptions, command?: Command) => {
+    const { options: commandOptions } = normalizeCommandActionOptions(rawCommandOptions, command);
+    const remoteChromeOption = commandOptions.remoteChrome ?? readCliOptionValue("--remote-chrome");
+    const config = await resolveChatgptCliBrowserConfig(remoteChromeOption);
+    const result = await readChatgptCapabilityProbe({
+      timeoutMs: commandOptions.timeout,
+      keepTab: commandOptions.keepTab,
+      config,
+      log: (message) => {
+        if (!commandOptions.json) console.log(chalk.dim(message));
+      },
+    });
+    if (commandOptions.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log(`Status: ${result.status}`);
+    console.log(`Page: ${result.page.identityClass}`);
+    console.log(`Login: ${result.auth.state}`);
+    console.log(`Modes: ${result.controls.modes.join(", ") || "(none observed)"}`);
+    console.log(`Models: ${result.controls.models.join(", ") || "(none observed)"}`);
+    if (result.failure) {
+      console.log(`Failure: ${result.failure.code}`);
+    }
   });
 
 const tabsCommand = program.command("tabs").description("Inspect and prune remote ChatGPT tabs.");

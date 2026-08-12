@@ -27,6 +27,13 @@ jobs:
       - run: pnpm run docs:site
         if: matrix.os == 'ubuntu-latest'
       - run: pnpm run test
+      - name: Record isolated browser resource baseline
+        run: pnpm benchmark:browser-resource --output ".oracle-benchmarks/${{ runner.os }}-${{ runner.arch }}.json"
+      - name: Upload browser resource baseline
+        uses: actions/upload-artifact@v6
+        with:
+          name: browser-resource-${{ runner.os }}-${{ runner.arch }}
+          path: .oracle-benchmarks/${{ runner.os }}-${{ runner.arch }}.json
       - run: pnpm run build
         if: matrix.os == 'ubuntu-latest'
       - run: pnpm run test:packed-cli

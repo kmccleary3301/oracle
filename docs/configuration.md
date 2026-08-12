@@ -31,15 +31,19 @@ JSON5 parsing, so trailing commas and comments are allowed.
     remoteToken: "…", // written by `oracle bridge client` (kept private; not printed by default)
     remoteViaSshReverseTunnel: { ssh: "user@linux-host", remotePort: 9473 }, // optional metadata
     debugPort: null, // fixed DevTools port (env: ORACLE_BROWSER_PORT / ORACLE_BROWSER_DEBUG_PORT)
-    timeoutMs: 1200000,
-    inputTimeoutMs: 30000,
-    attachmentTimeoutMs: 90000, // wait for file upload/readiness before clicking Send (default: 45s)
+    timeoutMs: 5400000, // 90m browser response default (Deep Research defaults to 40m)
+    inputTimeoutMs: 60000, // 60s browser input/readiness default
+    attachmentTimeoutMs: 45000, // wait for file upload/readiness before clicking Send
     cookieSyncWaitMs: 0, // wait (ms) before retrying cookie sync when Chrome cookies are empty/locked
     assistantRecheckDelayMs: 0, // wait this long after timeout, then retry capture (0 = disabled)
     assistantRecheckTimeoutMs: 120000, // time budget for the recheck attempt (default: 2m)
     reuseChromeWaitMs: 10000, // wait for a shared Chrome profile to appear before launching (parallel runs)
     profileLockTimeoutMs: 300000, // wait for the manual-login profile lock before sending (parallel runs)
     maxConcurrentTabs: 3, // soft limit for concurrent ChatGPT tabs using one manual-login profile (or set ORACLE_BROWSER_MAX_CONCURRENT_TABS)
+    resourceMonitorIntervalMs: 1000, // sample locally owned/adopted Chrome process-tree RSS every second
+    resourceRssSoftLimitBytes: 4294967296, // pause new browser admission at 4 GiB
+    resourceRssHardLimitBytes: 6442450944, // stop identity-verified owned Chrome at 6 GiB
+    resourceRssResumeLimitBytes: 3221225472, // resume admission below 3 GiB
     autoReattachDelayMs: 0, // delay before starting periodic auto-reattach attempts (0 = disabled)
     autoReattachIntervalMs: 0, // interval between auto-reattach attempts (0 = disabled)
     autoReattachTimeoutMs: 120000, // time budget per auto-reattach attempt (default: 2m)

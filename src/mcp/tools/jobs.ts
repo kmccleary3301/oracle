@@ -1,7 +1,9 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { getMcpJob, listMcpJobs } from "../jobs.js";
-import { resolveDaemonClientWithOptionalAutostart } from "../../daemon/resolve.js";
+import {
+  requireDaemonClientWithOptionalAutostart,
+  resolveDaemonClientWithOptionalAutostart,
+} from "../../daemon/resolve.js";
 
 const jobStatusInputShape = {
   jobId: z.string().min(1).describe("Job id returned by an async Oracle MCP tool."),
@@ -97,41 +99,23 @@ export function registerMcpJobTools(server: McpServer): void {
     },
     async (input: unknown) => {
       const parsed = z.object(jobStatusInputShape).parse(input);
-      const daemon = await resolveDaemonClient();
-      if (daemon) {
-        const response = (await daemon.jobStatus(parsed.jobId)) as {
-          found?: boolean;
-          job?: Record<string, unknown> & { id?: string; status?: string };
-        };
-        const structuredContent = {
-          ...response,
-          job: response.job ? normalizeJobRecordForMcp(response.job) : undefined,
-        };
-        return {
-          structuredContent,
-          content: [
-            {
-              type: "text" as const,
-              text: structuredContent.job
-                ? `Oracle job ${structuredContent.job.id} is ${structuredContent.job.status}.`
-                : `Oracle job ${parsed.jobId} was not found.`,
-            },
-          ],
-        };
-      }
-      const job = getMcpJob(parsed.jobId);
+      const daemon = await requireDaemonClientWithOptionalAutostart();
+      const response = (await daemon.jobStatus(parsed.jobId)) as {
+        found?: boolean;
+        job?: Record<string, unknown> & { id?: string; status?: string };
+      };
       const structuredContent = {
-        found: Boolean(job),
-        job,
+        ...response,
+        job: response.job ? normalizeJobRecordForMcp(response.job) : undefined,
       };
       return {
         structuredContent,
         content: [
           {
             type: "text" as const,
-            text: job
-              ? `Oracle job ${job.id} is ${job.status}.`
-              : `Oracle job ${parsed.jobId} was not found in this MCP server process.`,
+            text: structuredContent.job
+              ? `Oracle job ${structuredContent.job.id} is ${structuredContent.job.status}.`
+              : `Oracle job ${parsed.jobId} was not found.`,
           },
         ],
       };
@@ -142,37 +126,23 @@ export function registerMcpJobTools(server: McpServer): void {
     "oracle_jobs",
     {
       title: "List Oracle async jobs",
-      description: "List recent long-running Oracle MCP jobs in this MCP server process.",
+      description: "List recent durable Oracle jobs from the coordinator.",
       inputSchema: jobListInputShape,
       outputSchema: jobListOutputShape,
     },
     async (input: unknown) => {
       const parsed = z.object(jobListInputShape).parse(input);
-      const daemon = await resolveDaemonClient();
-      if (daemon) {
-        const response = (await daemon.listJobs(parsed.limit)) as { jobs?: unknown[] };
-        const structuredContent = {
-          jobs: (response.jobs ?? []).map((job) => normalizeJobRecordForMcp(job)),
-        };
-        return {
-          structuredContent,
-          content: [
-            {
-              type: "text" as const,
-              text: `Listed ${structuredContent.jobs.length} Oracle daemon job(s).`,
-            },
-          ],
-        };
-      }
+      const daemon = await requireDaemonClientWithOptionalAutostart();
+      const response = (await daemon.listJobs(parsed.limit)) as { jobs?: unknown[] };
       const structuredContent = {
-        jobs: listMcpJobs(parsed.limit).map((job) => normalizeJobRecordForMcp(job)),
+        jobs: (response.jobs ?? []).map((job) => normalizeJobRecordForMcp(job)),
       };
       return {
         structuredContent,
         content: [
           {
             type: "text" as const,
-            text: `Listed ${structuredContent.jobs.length} Oracle async job(s).`,
+            text: `Listed ${structuredContent.jobs.length} durable Oracle job(s).`,
           },
         ],
       };
@@ -189,7 +159,7 @@ export function registerMcpJobTools(server: McpServer): void {
     },
     async (input: unknown) => {
       const parsed = z.object(jobEventsInputShape).parse(input);
-      const daemon = await requireDaemonClient();
+      const daemon = await requireDaemonClientWithOptionalAutostart();
       const structuredContent = (await daemon.jobEvents(parsed.jobId, parsed.after)) as {
         events?: unknown[];
       };
@@ -216,7 +186,7 @@ export function registerMcpJobTools(server: McpServer): void {
     },
     async (input: unknown) => {
       const parsed = z.object(jobStatusInputShape).parse(input);
-      const daemon = await requireDaemonClient();
+      const daemon = await requireDaemonClientWithOptionalAutostart();
       const structuredContent = (await daemon.jobResult(parsed.jobId)) as {
         found?: boolean;
         ready?: boolean;
@@ -245,7 +215,7 @@ export function registerMcpJobTools(server: McpServer): void {
     },
     async (input: unknown) => {
       const parsed = z.object(jobCancelInputShape).parse(input);
-      const daemon = await requireDaemonClient();
+      const daemon = await requireDaemonClientWithOptionalAutostart();
       const response = (await daemon.cancelJob(parsed.jobId)) as {
         found?: boolean;
         job?: Record<string, unknown> & { id?: string; status?: string };
@@ -284,7 +254,7 @@ export function registerMcpJobTools(server: McpServer): void {
     },
     async (input: unknown) => {
       const parsed = z.object(jobRecoverInputShape).parse(input);
-      const daemon = await requireDaemonClient();
+      const daemon = await requireDaemonClientWithOptionalAutostart();
       const response = (await daemon.recoverJob(parsed.jobId, {
         conversationUrl: parsed.conversationUrl,
         outputDir: parsed.outputDir,
@@ -327,7 +297,7 @@ export function registerMcpJobTools(server: McpServer): void {
       outputSchema: daemonStatusOutputShape,
     },
     async () => {
-      const daemon = await resolveDaemonClient();
+      const daemon = await resolveDaemonClientWithOptionalAutostart();
       if (!daemon) {
         const structuredContent = {
           available: false,
@@ -346,20 +316,6 @@ export function registerMcpJobTools(server: McpServer): void {
       };
     },
   );
-}
-
-async function resolveDaemonClient() {
-  return await resolveDaemonClientWithOptionalAutostart();
-}
-
-async function requireDaemonClient() {
-  const daemon = await resolveDaemonClient();
-  if (!daemon) {
-    throw new Error(
-      "Oracle daemon is not configured. Start `oracle daemon start --background` or set ORACLE_DAEMON_CONNECTION.",
-    );
-  }
-  return daemon;
 }
 
 function normalizeJobRecordForMcp(job: unknown): Record<string, unknown> {

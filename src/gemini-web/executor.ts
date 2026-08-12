@@ -137,7 +137,9 @@ async function loadGeminiCookiesFromCDP(
     let cookieMap: Record<string, string> = {};
 
     while (Date.now() < deadline) {
-      const { cookies } = await Network.getCookies({ urls: GEMINI_CDP_COOKIE_URLS });
+      const { cookies } = await session.raceWithResourceLimit(
+        Network.getCookies({ urls: GEMINI_CDP_COOKIE_URLS }),
+      );
       cookieMap = buildGeminiCookieMap(cookies);
 
       if (hasRequiredGeminiCookies(cookieMap)) {
@@ -153,7 +155,7 @@ async function loadGeminiCookiesFromCDP(
         lastNotice = now;
       }
 
-      await delay(pollIntervalMs);
+      await session.raceWithResourceLimit(delay(pollIntervalMs));
     }
 
     throw new Error("Timed out waiting for Google sign-in (5 minutes). Please sign in and retry.");
@@ -198,16 +200,18 @@ async function runGeminiDeepThinkViaBrowser(
     await Page.navigate({ url: "https://gemini.google.com/app" });
     await delay(3_000);
 
-    const domResult = await runProviderDomFlow(geminiDeepThinkDomProvider, {
-      prompt,
-      evaluate,
-      delay,
-      log,
-      state: {
-        inputTimeoutMs: browserConfig?.inputTimeoutMs,
-        timeoutMs: browserConfig?.timeoutMs,
-      },
-    });
+    const domResult = await session.raceWithResourceLimit(
+      runProviderDomFlow(geminiDeepThinkDomProvider, {
+        prompt,
+        evaluate,
+        delay,
+        log,
+        state: {
+          inputTimeoutMs: browserConfig?.inputTimeoutMs,
+          timeoutMs: browserConfig?.timeoutMs,
+        },
+      }),
+    );
 
     log?.(`[gemini-web] Deep Think response received (${domResult.text.length} chars).`);
     return domResult;

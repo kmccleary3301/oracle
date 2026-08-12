@@ -2,9 +2,26 @@
 
 ## 0.17.2 — Unreleased
 
+### Added
+
+- Browser: add durable coordinated ChatGPT jobs, bounded actor/resource ownership, streamed remote attachments, capability probes, and semantic Work, Deep Research, file, image, project, app, writing, history, and schedule operations with fail-closed evidence states.
+- Release: add resource baselines, capability-drift ledgers, platform/soak promotion gates, and packaged rollback verification.
+
 ### Changed
 
 - Developer workflow: remove the obsolete scoped-commit helper and allow standard Git commands in isolated worktrees.
+
+### Fixed
+
+- Browser: map the retired `gpt-5.5-instant` alias to GPT-5.6 Sol with Instant effort, and select refreshed ChatGPT Intelligence effort options through the portal submenu.
+- Browser: re-enable `--browser-headless`, normalize Chrome's headless user-agent before ChatGPT navigation, and document persistent-profile authentication for unattended runs.
+- Browser: sample every locally owned Chrome process tree once per second and fail closed at a 6 GiB RSS hard limit, with PID start-token/profile/generation validation before automatic shutdown.
+- Security: bind every consequential browser action to its locally computed approval identity, restrict request-level Chrome endpoints to trusted configuration, contain durable job paths, release terminal admission quota, prune retained jobs, and enforce trusted MCP download roots and byte ceilings.
+- Browser: restore project discovery on the overhauled ChatGPT sidebar by reading the browser-authenticated paginated project feed and recognizing button-based project rows when the endpoint is unavailable.
+- Browser: release coordinator ownership when a persistent terminal-login tab is detached, allowing the next CLI command to reuse the authenticated Chrome profile without a false contradictory-owner failure.
+- Browser: activate Deep Research through the overhauled `interestfor` composer menu using trusted, hover-armed input and recognize its inline selection pill without mistaking open menu rows for active mode.
+- Browser: stop treating sidebar conversation titles containing “model” as model-picker capability evidence.
+- Browser: wait for the authenticated composer to hydrate before classifying a capability probe, avoiding transient unknown results on project pages.
 
 ## 0.17.1 — 2026-08-02
 

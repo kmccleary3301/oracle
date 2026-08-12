@@ -157,4 +157,86 @@ describe("ChatGPT project extraction", () => {
     expect(project.name).toBe("Oracle Ubuntu QA Temp");
     expect(project.projectId).toBe("g-p-abc123-oracle-ubuntu-qa-temp");
   });
+
+  test("extracts projects from the button-based sidebar", () => {
+    Object.defineProperty(globalThis, "location", {
+      configurable: true,
+      value: { href: "https://chatgpt.com/", origin: "https://chatgpt.com" },
+    });
+    Object.defineProperty(globalThis, "document", {
+      configurable: true,
+      value: {
+        querySelectorAll(selector: string) {
+          expect(selector).toBe('a, [role="button"][data-sidebar-item="true"]');
+          return [
+            {
+              href: "",
+              innerText: "Personal",
+              textContent: "Personal",
+              getAttribute: () => null,
+              querySelector: () => null,
+              closest: () => ({
+                querySelector: () => ({
+                  getAttribute: (name: string) =>
+                    name === "aria-label" ? "Open project options for Personal" : null,
+                }),
+              }),
+            },
+          ];
+        },
+      },
+    });
+
+    const projects = Function(`return ${__test__.buildProjectListExpression()}`)() as Array<{
+      name: string;
+      url?: string;
+      projectId?: string;
+    }>;
+
+    expect(projects).toEqual([
+      expect.objectContaining({
+        name: "Personal",
+        url: undefined,
+        projectId: undefined,
+      }),
+    ]);
+  });
+
+  test("parses the current paginated project sidebar response", () => {
+    expect(
+      __test__.parseProjectSidebarResult({
+        ok: true,
+        origin: "https://chatgpt.com/",
+        items: [
+          {
+            id: "g-p-abc123",
+            shortUrl: "g-p-abc123-personal",
+            name: " Personal ",
+          },
+          {
+            id: "g-p-def456",
+            name: "Research",
+          },
+          {
+            id: "not-a-project",
+            name: "Ignored",
+          },
+        ],
+      }),
+    ).toEqual([
+      {
+        name: "Personal",
+        url: "https://chatgpt.com/g/g-p-abc123-personal/project",
+        projectId: "g-p-abc123",
+        documentIndex: 0,
+      },
+      {
+        name: "Research",
+        url: "https://chatgpt.com/g/g-p-def456/project",
+        projectId: "g-p-def456",
+        documentIndex: 1,
+      },
+    ]);
+    expect(__test__.parseProjectSidebarResult({ ok: false })).toBeUndefined();
+  });
 });

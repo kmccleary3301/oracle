@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "platform": "linux",
+  "architecture": "arm64",
+  "workload": "isolated-headless-about-blank",
+  "sampleCount": 3,
+  "sampleIntervalMs": 250,
+  "rssBytes": {
+    "min": 729956352,
+    "max": 729956352,
+    "mean": 729956352
+  },
+  "samples": [
+    {
+      "sampledAt": "2026-08-10T21:35:14.406Z",
+      "sampledAtMs": 1786397714406,
+      "rootPid": 18,
+      "rootFound": true,
+      "targetCount": 1,
+      "targetTypes": {
+        "page": 1
+      },
+      "processCount": 8,
+      "processTypeCounts": {
+        "browser": 1,
+        "crashpad": 2,
+        "gpu": 1,
+        "network": 1,
+        "utility": 1,
+        "renderer": 2
+      },
+      "rssBytes": 729956352,
+      "workingSetBytes": 729956352,
+      "cpuPercent": 110.19999999999997,
+      "cpuTimeMs": 1000
+    },
+    {
+      "sampledAt": "2026-08-10T21:35:14.665Z",
+      "sampledAtMs": 1786397714665,
+      "rootPid": 18,
+      "rootFound": true,
+      "targetCount": 1,
+      "targetTypes": {
+        "page": 1
+      },
+      "processCount": 8,
+      "processTypeCounts": {
+        "browser": 1,
+        "crashpad": 2,
+        "gpu": 1,
+        "network": 1,
+        "utility": 1,
+        "renderer": 2
+      },
+      "rssBytes": 729956352,
+      "workingSetBytes": 729956352,
+      "cpuPercent": 97.69999999999999,
+      "cpuTimeMs": 1000
+    },
+    {
+      "sampledAt": "2026-08-10T21:35:14.919Z",
+      "sampledAtMs": 1786397714919,
+      "rootPid": 18,
+      "rootFound": true,
+      "targetCount": 1,
+      "targetTypes": {
+        "page": 1
+      },
+      "processCount": 8,
+      "processTypeCounts": {
+        "browser": 1,
+        "crashpad": 2,
+        "gpu": 1,
+        "network": 1,
+        "utility": 1,
+        "renderer": 2
+      },
+      "rssBytes": 729956352,
+      "workingSetBytes": 729956352,
+      "cpuPercent": 88.5,
+      "cpuTimeMs": 1000
+    }
+  ],
+  "cleanup": {
+    "sampledAt": "2026-08-10T21:35:15.029Z",
+    "sampledAtMs": 1786397715029,
+    "rootPid": 18,
+    "rootFound": false,
+    "targetCount": 0,
+    "targetTypes": {},
+    "processCount": 0,
+    "processTypeCounts": {},
+    "rssBytes": 0,
+    "workingSetBytes": 0,
+    "cpuPercent": 0,
+    "cpuTimeMs": 0
+  }
+}

@@ -534,7 +534,15 @@ function buildThinkingTimeExpression(
       diagnostic: collectPickerDiagnostic(),
     });
     const findOptionInMenu = (menu, modelKindOverride = null) => {
-      const items = Array.from(menu.querySelectorAll(MENU_ITEM_SELECTOR));
+      const menus = [menu];
+      if (isIntelligenceEffortMenu(menu)) {
+        for (const candidate of document.querySelectorAll(MENU_CONTAINER_SELECTOR)) {
+          if (candidate !== menu && isVisible(candidate)) menus.push(candidate);
+        }
+      }
+      const items = menus.flatMap((candidate) =>
+        Array.from(candidate.querySelectorAll(MENU_ITEM_SELECTOR)),
+      );
       const modelKind = modelKindOverride || effectiveTargetModelKind();
       if (modelKind === 'pro') {
         // GPT-5.6's unified Intelligence picker exposes Pro as the highest
@@ -597,6 +605,46 @@ function buildThinkingTimeExpression(
         }
       }
       return null;
+    };
+    const openRefreshedEffortSubmenu = async () => {
+      const content = document.querySelector(INTELLIGENCE_MENU_SELECTOR);
+      if (!isVisible(content)) return false;
+
+      const advancedToggle = Array.from(content.querySelectorAll('[role="menuitem"]')).find(
+        (item) => {
+          const text = normalize(
+            (item.textContent ?? '') + ' ' + (item.getAttribute?.('aria-label') ?? ''),
+          );
+          return text.includes('advanced');
+        },
+      );
+      if (advancedToggle && advancedToggle.getAttribute?.('aria-expanded') !== 'true') {
+        dispatchClickSequence(advancedToggle);
+        await sleep(INITIAL_WAIT_MS);
+      }
+
+      let effortRow = null;
+      const deadline = performance.now() + MAX_WAIT_MS;
+      while (performance.now() < deadline) {
+        const advancedView = document.querySelector(
+          '[data-testid="composer-model-picker-slider-advanced-view"]',
+        );
+        const owner = advancedView || content;
+        effortRow = Array.from(owner.querySelectorAll('[role="menuitem"]')).find((item) => {
+          const text = normalize(
+            (item.textContent ?? '') + ' ' + (item.getAttribute?.('aria-label') ?? ''),
+          );
+          return text.includes('effort') && item.getAttribute?.('aria-haspopup') === 'menu';
+        });
+        if (effortRow) break;
+        await sleep(100);
+      }
+      if (!effortRow) return false;
+      if (effortRow.getAttribute?.('aria-expanded') !== 'true') {
+        dispatchClickSequence(effortRow);
+        await sleep(STEP_WAIT_MS);
+      }
+      return true;
     };
     // Menu-shape heuristic only. This reads the whole menu's textContent, where
     // adjacent row labels concatenate without a separator ("Pro StandardPro
@@ -716,13 +764,25 @@ function buildThinkingTimeExpression(
       }
       return matchesLevel(normalizedLabel);
     };
+    const hasRefreshedEffortSlider = () =>
+      Boolean(
+        document.querySelector('[data-model-reasoning-effort-slider]') ||
+          document.querySelector('[data-testid="composer-model-picker-slider-simple-view"]'),
+      );
     const selectAndVerify = async (trigger, findOption, modelKindOverride = null) => {
       const triggerModelKind =
         modelKindOverride ||
         TARGET_MODEL_KIND ||
         modelKindFromNode(trigger) ||
         effectiveTargetModelKind();
-      const option = findOption();
+      let option = findOption();
+      if (!option && hasRefreshedEffortSlider()) {
+        const menu = findVisibleEffortMenu(trigger);
+        if (menu && isIntelligenceEffortMenu(menu)) {
+          await openRefreshedEffortSubmenu();
+          option = findOption();
+        }
+      }
       if (!option && TARGET_IS_GPT56_MODEL && TARGET_LEVEL === 'heavy') {
         // GPT-5.6 has no "heavy" tier: Pro is the closest thing. Accept a pill that
         // is already on Pro as satisfying the request, but never click Pro to get
@@ -738,6 +798,18 @@ function buildThinkingTimeExpression(
           closeOpenMenus();
           return { status: 'already-selected', label: trigger.textContent?.trim?.() || null };
         }
+      }
+      if (
+        !option &&
+        hasRefreshedEffortSlider() &&
+        currentEffortPillMatchesTarget(trigger, triggerModelKind)
+      ) {
+        const pill = freshComposerTrigger(trigger) || findModelButton();
+        closeOpenMenus();
+        return {
+          status: 'already-selected',
+          label: pill?.textContent?.trim?.() || trigger.textContent?.trim?.() || null,
+        };
       }
       if (!option) return failure('option-not-found', { modelKind: triggerModelKind });
       const label = option.textContent?.trim?.() || null;

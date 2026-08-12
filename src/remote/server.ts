@@ -6,18 +6,24 @@ import path from "node:path";
 import net from "node:net";
 import { randomBytes, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtemp, rm, mkdir, writeFile, stat, realpath } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, stat, realpath } from "node:fs/promises";
 import chalk from "chalk";
-import type { BrowserAttachment, BrowserLogger, CookieParam } from "../browser/types.js";
+import type { BrowserAutomationConfig, BrowserLogger, CookieParam } from "../browser/types.js";
 import { runBrowserMode } from "../browserMode.js";
 import type { BrowserRunResult } from "../browserMode.js";
 import type {
   RemoteArtifactCapabilities,
   RemoteArtifactDescriptor,
-  RemoteRunPayload,
   RemoteRunEvent,
 } from "./types.js";
 import { MAX_REMOTE_ARTIFACT_BYTES } from "./types.js";
+import {
+  MAX_REMOTE_RUN_ATTACHMENTS,
+  MAX_REMOTE_RUN_REQUEST_BYTES,
+  receiveRemoteRunRequest,
+  REMOTE_RUN_PROTOCOL_VERSION,
+  type ReceivedRemoteRunRequest,
+} from "./runProtocol.js";
 import { getCookies, type Cookie } from "@steipete/sweet-cookie";
 import { CHATGPT_URL } from "../browser/constants.js";
 import { getCliVersion } from "../version.js";
@@ -29,7 +35,7 @@ import {
   writeChromePid,
   writeDevToolsActivePort,
 } from "../browser/profileState.js";
-import { normalizeChatgptUrl } from "../browser/utils.js";
+import { normalizeRemoteChatgptOrigins, normalizeRemoteChatgptUrl } from "../browser/utils.js";
 import {
   computeFileSha256,
   sanitizeArtifactFilename,
@@ -45,6 +51,11 @@ export interface RemoteServerOptions {
   logger?: (message: string) => void;
   manualLoginDefault?: boolean;
   manualLoginProfileDir?: string;
+  /**
+   * Additional exact HTTPS OpenAI origins trusted for request browser URLs.
+   * The default https://chatgpt.com origin is always retained.
+   */
+  allowedChatgptOrigins?: readonly string[];
 }
 
 interface RemoteServerDeps {
@@ -70,7 +81,108 @@ const ARTIFACT_CAPABILITIES: RemoteArtifactCapabilities = {
   artifactTransfer: true,
   artifactProtocolVersion: ARTIFACT_PROTOCOL_VERSION,
   maxArtifactBytes: MAX_REMOTE_ARTIFACT_BYTES,
+  streamingRunUpload: true,
+  runUploadProtocolVersion: REMOTE_RUN_PROTOCOL_VERSION,
+  maxRunUploadBytes: MAX_REMOTE_RUN_REQUEST_BYTES,
+  maxRunAttachmentCount: MAX_REMOTE_RUN_ATTACHMENTS,
 };
+const REMOTE_CONFIG_PASSTHROUGH_KEYS = [
+  "timeoutMs",
+  "inputTimeoutMs",
+  "attachmentTimeoutMs",
+  "assistantRecheckDelayMs",
+  "assistantRecheckTimeoutMs",
+  "reuseChromeWaitMs",
+  "profileLockTimeoutMs",
+  "maxConcurrentTabs",
+  "autoReattachDelayMs",
+  "autoReattachIntervalMs",
+  "autoReattachTimeoutMs",
+  "cookieSyncWaitMs",
+  "headless",
+  "keepBrowser",
+  "hideWindow",
+  "desiredModel",
+  "modelStrategy",
+  "debug",
+  "allowCookieErrors",
+  "remoteChromeMaxTabs",
+  "thinkingTime",
+  "researchMode",
+  "archiveConversations",
+  "thinkingFallback",
+] as const satisfies readonly (keyof BrowserAutomationConfig)[];
+
+function bindRemoteBrowserConfig(
+  requested: Record<string, unknown>,
+  allowedOrigins: readonly string[],
+  manualLoginDefault: boolean,
+  manualLoginProfileDir: string | undefined,
+): BrowserAutomationConfig {
+  const configuredUrls = [requested.chatgptUrl, requested.url];
+  for (const value of configuredUrls) {
+    if (value !== undefined && value !== null && typeof value !== "string") {
+      throw new Error("Invalid remote ChatGPT URL.");
+    }
+    if (typeof value === "string" && value.trim().length > 0) {
+      normalizeRemoteChatgptUrl(value, CHATGPT_URL, allowedOrigins);
+    }
+  }
+
+  const selectedUrl =
+    requested.chatgptUrl !== undefined && requested.chatgptUrl !== null
+      ? requested.chatgptUrl
+      : requested.url;
+  const normalizedUrl = normalizeRemoteChatgptUrl(
+    typeof selectedUrl === "string" ? selectedUrl : null,
+    CHATGPT_URL,
+    allowedOrigins,
+  );
+
+  let resumeConversationUrl: string | null = null;
+  if (requested.resumeConversationUrl !== undefined && requested.resumeConversationUrl !== null) {
+    if (typeof requested.resumeConversationUrl !== "string") {
+      throw new Error("Invalid remote ChatGPT URL.");
+    }
+    if (requested.resumeConversationUrl.trim().length > 0) {
+      resumeConversationUrl = normalizeRemoteChatgptUrl(
+        requested.resumeConversationUrl,
+        CHATGPT_URL,
+        allowedOrigins,
+      );
+    }
+  }
+
+  const effective: BrowserAutomationConfig = {
+    chromeProfile: null,
+    chromePath: null,
+    chromeCookiePath: null,
+    attachRunning: false,
+    browserTabRef: null,
+    url: normalizedUrl,
+    chatgptUrl: normalizedUrl,
+    debugPort: null,
+    cookieSync: true,
+    inlineCookies: null,
+    inlineCookiesSource: null,
+    remoteChrome: null,
+    remoteChromeBrowserWSEndpoint: null,
+    remoteChromeProfileRoot: null,
+    manualLogin: manualLoginDefault,
+    manualLoginProfileDir: manualLoginDefault ? (manualLoginProfileDir ?? null) : null,
+    copyProfileSource: null,
+    sandboxArtifactsOutputDir: null,
+    resumeConversationUrl,
+  };
+
+  for (const key of REMOTE_CONFIG_PASSTHROUGH_KEYS) {
+    const value = requested[key];
+    if (value !== undefined) {
+      (effective as unknown as Record<string, unknown>)[key] = value;
+    }
+  }
+  return effective;
+}
 
 async function findAvailablePort(): Promise<number> {
   return await new Promise<number>((resolve, reject) => {
@@ -93,6 +205,7 @@ export async function createRemoteServer(
   deps: RemoteServerDeps = {},
 ): Promise<RemoteServerInstance> {
   const runBrowser = deps.runBrowser ?? runBrowserMode;
+  const allowedChatgptOrigins = normalizeRemoteChatgptOrigins(options.allowedChatgptOrigins ?? []);
   const server = http.createServer();
   const logger = options.logger ?? console.log;
   const authToken = options.token ?? randomBytes(16).toString("hex");
@@ -187,79 +300,73 @@ export async function createRemoteServer(
     }
     busy = true;
     const runStartedAt = Date.now();
-
-    let payload: RemoteRunPayload | null = null;
+    const runId = randomUUID();
+    // Each run gets an isolated spool so request bytes never coexist in memory.
+    let runDir: string;
     try {
-      const body = await readRequestBody(req);
-      payload = JSON.parse(body) as RemoteRunPayload;
-      if (payload?.browserConfig) {
-        payload.browserConfig.url = normalizeChatgptUrl(payload.browserConfig.url, CHATGPT_URL);
-      }
-    } catch {
+      runDir = await mkdtemp(path.join(os.tmpdir(), `oracle-serve-${runId}-`));
+    } catch (error) {
       busy = false;
-      res.writeHead(400, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "invalid_request" }));
+      logger(
+        `[serve] Unable to create request spool for ${runId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "temporary_storage_unavailable" }));
       return;
     }
 
+    let clientRequestedKeepBrowser = false;
+    let received: ReceivedRemoteRunRequest;
+    try {
+      received = await receiveRemoteRunRequest(req, runDir);
+      const requestedConfig = received.payload.browserConfig as unknown as Record<string, unknown>;
+      clientRequestedKeepBrowser = requestedConfig.keepBrowser === true;
+      const effectiveConfig = bindRemoteBrowserConfig(
+        requestedConfig,
+        allowedChatgptOrigins,
+        Boolean(options.manualLoginDefault),
+        options.manualLoginProfileDir,
+      );
+      if (options.manualLoginDefault) {
+        effectiveConfig.keepBrowser = true;
+      }
+      received.payload.browserConfig = effectiveConfig as typeof received.payload.browserConfig;
+    } catch (error) {
+      busy = false;
+      await rm(runDir, { recursive: true, force: true }).catch(() => undefined);
+      const message = error instanceof Error ? error.message : String(error);
+      const requestTooLarge = /exceed|limit|at most|size/i.test(message);
+      res.writeHead(requestTooLarge ? 413 : 400, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          error: requestTooLarge ? "request_too_large" : "invalid_request",
+        }),
+      );
+      return;
+    }
+
+    const payload = received.payload;
+    const attachments = received.attachments;
+    const fallbackSubmission = payload.fallbackSubmission
+      ? {
+          prompt: payload.fallbackSubmission.prompt,
+          attachments: received.fallbackAttachments,
+        }
+      : undefined;
+
     res.writeHead(200, { "Content-Type": "application/x-ndjson" });
 
-    const runId = randomUUID();
     logger(
-      `[serve] Accepted run ${runId} from ${formatSocket(req)} (prompt ${payload?.prompt?.length ?? 0} chars)`,
+      `[serve] Accepted run ${runId} from ${formatSocket(req)} (prompt ${payload.prompt.length} chars)`,
     );
-    // Each run gets an isolated temp dir so attachments/logs don't collide.
-    const runDir = await mkdtemp(path.join(os.tmpdir(), `oracle-serve-${runId}-`));
-    const attachmentDir = path.join(runDir, "attachments");
-    await mkdir(attachmentDir, { recursive: true });
 
     const sendEvent = (event: RemoteRunEvent) => {
       res.write(`${JSON.stringify(event)}\n`);
     };
 
-    const attachments: BrowserAttachment[] = [];
-    let fallbackSubmission:
-      | {
-          prompt: string;
-          attachments: BrowserAttachment[];
-        }
-      | undefined;
     try {
-      const attachmentsPayload = Array.isArray(payload.attachments) ? payload.attachments : [];
-      for (const [index, attachment] of attachmentsPayload.entries()) {
-        const safeName = sanitizeName(attachment.fileName ?? `attachment-${index + 1}`);
-        const filePath = path.join(attachmentDir, safeName);
-        await writeFile(filePath, Buffer.from(attachment.contentBase64, "base64"));
-        attachments.push({
-          path: filePath,
-          displayPath: attachment.displayPath,
-          sizeBytes: attachment.sizeBytes,
-        });
-      }
-
-      if (payload.fallbackSubmission) {
-        const fallbackAttachmentDir = path.join(runDir, "fallback-attachments");
-        await mkdir(fallbackAttachmentDir, { recursive: true });
-        const fallbackAttachments: BrowserAttachment[] = [];
-        const fallbackPayload = Array.isArray(payload.fallbackSubmission.attachments)
-          ? payload.fallbackSubmission.attachments
-          : [];
-        for (const [index, attachment] of fallbackPayload.entries()) {
-          const safeName = sanitizeName(attachment.fileName ?? `fallback-attachment-${index + 1}`);
-          const filePath = path.join(fallbackAttachmentDir, safeName);
-          await writeFile(filePath, Buffer.from(attachment.contentBase64, "base64"));
-          fallbackAttachments.push({
-            path: filePath,
-            displayPath: attachment.displayPath,
-            sizeBytes: attachment.sizeBytes,
-          });
-        }
-        fallbackSubmission = {
-          prompt: payload.fallbackSubmission.prompt,
-          attachments: fallbackAttachments,
-        };
-      }
-
       // Reuse the existing browser logger surface so clients see the same log stream.
       const automationLogger: BrowserLogger = ((message?: string) => {
         if (typeof message === "string") {
@@ -267,31 +374,6 @@ export async function createRemoteServer(
         }
       }) as BrowserLogger;
       automationLogger.verbose = Boolean(payload.options.verbose);
-
-      // Preserve an explicit request to leave the completed conversation tab
-      // open before the service forces `keepBrowser` for process lifetime.
-      const clientRequestedKeepBrowser = payload.browserConfig?.keepBrowser === true;
-
-      // Remote runs always rely on the host's own Chrome profile; ignore any inline cookie transfer.
-      if (payload.browserConfig) {
-        payload.browserConfig.inlineCookies = null;
-        payload.browserConfig.inlineCookiesSource = null;
-        payload.browserConfig.cookieSync = true;
-      } else {
-        payload.browserConfig = {} as typeof payload.browserConfig;
-      }
-
-      // Enforce manual-login profile when cookie sync is unavailable (e.g., Windows/WSL).
-      if (options.manualLoginDefault) {
-        payload.browserConfig.manualLogin = true;
-        payload.browserConfig.manualLoginProfileDir = options.manualLoginProfileDir;
-        payload.browserConfig.keepBrowser = true;
-        if (verbose) {
-          logger(
-            `[serve] Enforcing manual-login profile at ${options.manualLoginProfileDir ?? "default"} for remote run ${runId}`,
-          );
-        }
-      }
 
       const result = await runBrowser({
         prompt: payload.prompt,
@@ -700,18 +782,6 @@ function classifySourceUrlKind(sourceUrl?: string): RemoteArtifactDescriptor["so
     return "browser-download";
   }
   return "chatgpt-file-endpoint";
-}
-
-async function readRequestBody(req: http.IncomingMessage): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) {
-    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-  }
-  return Buffer.concat(chunks).toString("utf8");
-}
-
-function sanitizeName(raw: string): string {
-  return raw.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
 function sanitizeResult(

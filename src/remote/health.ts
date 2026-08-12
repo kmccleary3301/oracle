@@ -104,19 +104,36 @@ function parseCapabilities(value: unknown): RemoteArtifactCapabilities | undefin
     artifactTransfer?: unknown;
     artifactProtocolVersion?: unknown;
     maxArtifactBytes?: unknown;
+    streamingRunUpload?: unknown;
+    runUploadProtocolVersion?: unknown;
+    maxRunUploadBytes?: unknown;
+    maxRunAttachmentCount?: unknown;
   };
   if (raw.artifactTransfer !== true) {
     return undefined;
   }
   const artifactProtocolVersion = raw.artifactProtocolVersion;
   const maxArtifactBytes = raw.maxArtifactBytes;
+  const runUploadProtocolVersion = raw.runUploadProtocolVersion;
+  const maxRunUploadBytes = raw.maxRunUploadBytes;
+  const maxRunAttachmentCount = raw.maxRunAttachmentCount;
   if (
     typeof artifactProtocolVersion !== "number" ||
     !Number.isSafeInteger(artifactProtocolVersion) ||
     artifactProtocolVersion <= 0 ||
     typeof maxArtifactBytes !== "number" ||
     !Number.isSafeInteger(maxArtifactBytes) ||
-    maxArtifactBytes <= 0
+    maxArtifactBytes <= 0 ||
+    typeof raw.streamingRunUpload !== "boolean" ||
+    typeof runUploadProtocolVersion !== "number" ||
+    !Number.isSafeInteger(runUploadProtocolVersion) ||
+    runUploadProtocolVersion <= 0 ||
+    typeof maxRunUploadBytes !== "number" ||
+    !Number.isSafeInteger(maxRunUploadBytes) ||
+    maxRunUploadBytes <= 0 ||
+    typeof maxRunAttachmentCount !== "number" ||
+    !Number.isSafeInteger(maxRunAttachmentCount) ||
+    maxRunAttachmentCount <= 0
   ) {
     return undefined;
   }
@@ -124,6 +141,10 @@ function parseCapabilities(value: unknown): RemoteArtifactCapabilities | undefin
     artifactTransfer: true,
     artifactProtocolVersion,
     maxArtifactBytes: Math.min(maxArtifactBytes, MAX_REMOTE_ARTIFACT_BYTES),
+    streamingRunUpload: raw.streamingRunUpload,
+    runUploadProtocolVersion,
+    maxRunUploadBytes,
+    maxRunAttachmentCount,
   };
 }
 

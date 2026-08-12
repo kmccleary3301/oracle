@@ -5,12 +5,13 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { parse as parseDotenv } from "dotenv";
-import type { LaunchedChrome } from "chrome-launcher";
 import CDP from "chrome-remote-interface";
 import {
   connectToRemoteChrome,
   ensureWindowsChromeDevtoolsBridge,
   launchChrome,
+  monitorLocalChromeProcess,
+  type LocalChromeResourceMonitor,
 } from "../chromeLifecycle.js";
 import { resolveBrowserConfig } from "../config.js";
 import { detectChromeBinary } from "../detect.js";
@@ -113,12 +114,13 @@ interface SavedChatgptLoginContinuation {
 
 interface OpenChatgptLoginSessionResult {
   client: ChromeClient;
+  detach: () => Promise<void>;
   host: string;
   port: number;
   targetId?: string;
   profileDir?: string | null;
   browserPid?: number;
-  launchedChrome?: LaunchedChrome;
+  resourceMonitor?: LocalChromeResourceMonitor;
 }
 
 export async function beginChatgptTerminalLogin(
@@ -137,6 +139,10 @@ export async function beginChatgptTerminalLogin(
     chatgptUrl: options.config?.chatgptUrl ?? CHATGPT_LOGIN_URL,
   });
   const session = await openChatgptLoginSession(config, logger, CHATGPT_LOGIN_URL);
+  const raceWithResourceLimit = <T>(promise: Promise<T>): Promise<T> =>
+    session.resourceMonitor
+      ? Promise.race([promise, session.resourceMonitor.resourceExhaustion])
+      : promise;
   const timeoutMs = options.timeoutMs ?? DEFAULT_LOGIN_TIMEOUT_MS;
 
   try {
@@ -144,7 +150,9 @@ export async function beginChatgptTerminalLogin(
     await Promise.all([Page.enable(), Runtime.enable()]);
     await navigateToChatGPT(Page, Runtime, CHATGPT_LOGIN_URL, logger);
     await ensureNotBlocked(Runtime, false, logger);
-    const result = await driveChatgptLoginToOtp(Runtime, credentials, timeoutMs, logger);
+    const result = await raceWithResourceLimit(
+      driveChatgptLoginToOtp(Runtime, credentials, timeoutMs, logger),
+    );
     const warnings = result.warnings;
     if (result.page.phase === "logged_in") {
       await clearSavedChatgptLoginContinuation();
@@ -210,7 +218,11 @@ export async function beginChatgptTerminalLogin(
       warnings,
     };
   } finally {
-    await session.client.close().catch(() => undefined);
+    try {
+      await session.detach();
+    } finally {
+      session.resourceMonitor?.stopResourceWatchdog();
+    }
   }
 }
 
@@ -239,6 +251,34 @@ export async function submitChatgptLoginOtp(
       `Saved login browser is no longer reachable at ${saved.host}:${saved.port}: ${reachable.error}`,
     );
   }
+  if (
+    isLocalChromeHost(saved.host) &&
+    (!saved.profileDir || typeof saved.browserPid !== "number")
+  ) {
+    throw new Error(
+      "Oracle refused to continue the local login browser because its process identity is unavailable for memory monitoring.",
+    );
+  }
+  const monitoredChrome =
+    saved.profileDir && saved.browserPid
+      ? await monitorLocalLoginChrome(
+          saved.host,
+          saved.port,
+          saved.browserPid,
+          saved.profileDir,
+          resolveBrowserConfig({
+            manualLogin: true,
+            manualLoginProfileDir: saved.profileDir,
+            keepBrowser: true,
+            cookieSync: false,
+          }),
+          logger,
+        )
+      : undefined;
+  const raceWithResourceLimit = <T>(promise: Promise<T>): Promise<T> =>
+    monitoredChrome?.resourceExhaustion
+      ? Promise.race([promise, monitoredChrome.resourceExhaustion])
+      : promise;
 
   const client = await attachToSavedLoginTarget(saved, logger);
   try {
@@ -266,10 +306,12 @@ export async function submitChatgptLoginOtp(
 
     const warnings: string[] = [];
     await submitOtpCode(Runtime, code);
-    const finalPage = await waitForAuthPhase(Runtime, options.timeoutMs ?? DEFAULT_OTP_TIMEOUT_MS, {
-      terminalPhases: ["logged_in", "otp", "manual_action_required"],
-      ignoreInitialPhase: "otp",
-    });
+    const finalPage = await raceWithResourceLimit(
+      waitForAuthPhase(Runtime, options.timeoutMs ?? DEFAULT_OTP_TIMEOUT_MS, {
+        terminalPhases: ["logged_in", "otp", "manual_action_required"],
+        ignoreInitialPhase: "otp",
+      }),
+    );
     if (finalPage.phase === "logged_in") {
       await clearSavedChatgptLoginContinuation();
       return {
@@ -312,6 +354,7 @@ export async function submitChatgptLoginOtp(
     };
   } finally {
     await client.close().catch(() => undefined);
+    monitoredChrome?.stopResourceWatchdog?.();
   }
 }
 
@@ -496,6 +539,27 @@ async function driveChatgptLoginToOtp(
     warnings: [...warnings, `Timed out waiting for OTP/login state from phase ${page.phase}.`],
   };
 }
+async function monitorLocalLoginChrome(
+  host: string,
+  port: number,
+  pid: number,
+  profileDir: string,
+  config: ReturnType<typeof resolveBrowserConfig>,
+  logger: BrowserLogger,
+): Promise<LocalChromeResourceMonitor | undefined> {
+  if (!isLocalChromeHost(host)) return undefined;
+  return await monitorLocalChromeProcess({
+    port,
+    pid,
+    profileDir,
+    config,
+    logger,
+  });
+}
+
+function isLocalChromeHost(host: string): boolean {
+  return ["127.0.0.1", "localhost", "::1"].includes(host.trim().toLowerCase());
+}
 
 async function openChatgptLoginSession(
   config: ReturnType<typeof resolveBrowserConfig>,
@@ -513,6 +577,7 @@ async function openChatgptLoginSession(
     );
     return {
       client: connection.client,
+      detach: connection.detach,
       host: config.remoteChrome.host,
       port: config.remoteChrome.port,
       targetId: connection.targetId,
@@ -546,21 +611,44 @@ async function openChatgptLoginSession(
       timeoutMs: 2_000,
     });
     if (reachable.ok) {
-      const connection = await connectToRemoteChrome(
-        existingHost ?? "127.0.0.1",
-        existingPort,
-        logger,
-        targetUrl,
-        undefined,
-        { maxTabs: config.remoteChromeMaxTabs },
-      );
+      const browserPid = (await readChromePid(profileDir)) ?? undefined;
+      if (isLocalChromeHost(existingHost ?? "127.0.0.1") && !browserPid) {
+        throw new Error(
+          `Oracle refused to reuse Chrome on port ${existingPort} because its root PID is unavailable for memory monitoring.`,
+        );
+      }
+      const monitoredChrome = browserPid
+        ? await monitorLocalLoginChrome(
+            existingHost ?? "127.0.0.1",
+            existingPort,
+            browserPid,
+            profileDir,
+            config,
+            logger,
+          )
+        : undefined;
+      let connection: Awaited<ReturnType<typeof connectToRemoteChrome>>;
+      try {
+        connection = await connectToRemoteChrome(
+          existingHost ?? "127.0.0.1",
+          existingPort,
+          logger,
+          targetUrl,
+          undefined,
+          { maxTabs: config.remoteChromeMaxTabs },
+        );
+      } catch (error) {
+        monitoredChrome?.stopResourceWatchdog();
+        throw error;
+      }
       return {
         client: connection.client,
+        detach: connection.detach,
         host: existingHost ?? "127.0.0.1",
         port: existingPort,
-        targetId: connection.targetId,
+        browserPid,
+        resourceMonitor: monitoredChrome,
         profileDir,
-        browserPid: (await readChromePid(profileDir)) ?? undefined,
       };
     }
   }
@@ -574,17 +662,31 @@ async function openChatgptLoginSession(
   if (chrome.pid) {
     await writeChromePid(profileDir, chrome.pid);
   }
-  const connection = await connectToRemoteChrome(host, chrome.port, logger, targetUrl, undefined, {
-    maxTabs: config.remoteChromeMaxTabs,
-  });
+  let connection: Awaited<ReturnType<typeof connectToRemoteChrome>>;
+  try {
+    connection = await connectToRemoteChrome(host, chrome.port, logger, targetUrl, undefined, {
+      maxTabs: config.remoteChromeMaxTabs,
+    });
+  } catch (error) {
+    chrome.stopResourceWatchdog?.();
+    await chrome.kill();
+    throw error;
+  }
   return {
     client: connection.client,
+    detach: connection.detach,
     host,
     port: chrome.port,
     targetId: connection.targetId,
     profileDir,
     browserPid: chrome.pid,
-    launchedChrome: chrome,
+    resourceMonitor:
+      chrome.resourceExhaustion && chrome.stopResourceWatchdog
+        ? {
+            resourceExhaustion: chrome.resourceExhaustion,
+            stopResourceWatchdog: chrome.stopResourceWatchdog,
+          }
+        : undefined,
   };
 }
 

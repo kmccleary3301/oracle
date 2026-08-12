@@ -82,6 +82,8 @@ interface SubmitPreparedPromptDeps extends InsertPromptDeps {
   attachmentNames?: AttachmentReadyInput[];
   baselineTurns?: number | null;
   attachmentTimeoutMs?: number | null;
+  /** Runs after composer preparation and immediately before the send interaction. */
+  beforeSend?: () => Promise<void> | void;
   onPromptSubmitted?: () => Promise<void> | void;
 }
 
@@ -532,6 +534,7 @@ export async function submitPreparedPrompt(
   logger: BrowserLogger,
 ): Promise<number | null> {
   const { runtime, input } = deps;
+  await deps.beforeSend?.();
   const clicked = await attemptSendButton(
     runtime,
     input,

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { resetCoordinatorRuntimeCache } from "../../src/browser/coordinatorRuntime.js";
 
 const cdpNewMock = vi.fn();
 const cdpCloseMock = vi.fn();
@@ -25,6 +26,10 @@ vi.doMock("../../src/browser/profileState.js", async () => {
     ...original,
     cleanupStaleProfileState: vi.fn(async () => undefined),
   };
+});
+afterEach(() => {
+  resetCoordinatorRuntimeCache();
+  vi.useRealTimers();
 });
 
 describe("registerTerminationHooks", () => {
@@ -428,6 +433,50 @@ describe("closeBlankChromeTabs", () => {
     expect(send).toHaveBeenCalledWith("Target.setAutoAttach", { autoAttach: true }, "session-9");
   });
 
+  test("detaches a persistent dedicated tab without leaving coordinator ownership", async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "oracle-detach-coordinator-"));
+    const databasePath = path.join(tmpDir, "coordinator.sqlite");
+    const firstClient = { close: vi.fn(async () => undefined) };
+    const secondClient = { close: vi.fn(async () => undefined) };
+    cdpListMock.mockResolvedValue([]);
+    cdpNewMock
+      .mockResolvedValueOnce({ id: "login-target-1" })
+      .mockResolvedValueOnce({ id: "login-target-2" });
+    cdpMock.mockResolvedValueOnce(firstClient).mockResolvedValueOnce(secondClient);
+    const logger = vi.fn<(message: string) => void>();
+
+    const { connectToRemoteChrome } = await import("../../src/browser/chromeLifecycle.js");
+    const coordinator = {
+      databasePath,
+      profileId: "persistent-login-test",
+      ownerStartToken: "test-owner",
+    };
+
+    try {
+      const first = await connectToRemoteChrome(
+        "127.0.0.1",
+        9222,
+        logger,
+        "https://chatgpt.com/auth/login",
+        undefined,
+        { coordinator },
+      );
+      await first.detach();
+
+      expect(firstClient.close).toHaveBeenCalledOnce();
+      expect(cdpCloseMock).not.toHaveBeenCalledWith(
+        expect.objectContaining({ id: "login-target-1" }),
+      );
+      await expect(
+        connectToRemoteChrome("127.0.0.1", 9222, logger, "https://chatgpt.com/", undefined, {
+          coordinator: { ...coordinator, ownerStartToken: "next-owner" },
+        }),
+      ).resolves.toMatchObject({ targetId: "login-target-2" });
+    } finally {
+      resetCoordinatorRuntimeCache();
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
   test("waits on a single websocket connection attempt for Chrome approval", async () => {
     vi.useFakeTimers();
     const browserClient = {

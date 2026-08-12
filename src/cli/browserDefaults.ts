@@ -24,6 +24,10 @@ export interface BrowserDefaultsOptions {
   browserReuseWait?: string | number;
   browserProfileLockTimeout?: string | number;
   browserMaxConcurrentTabs?: string | number;
+  browserResourceMonitorInterval?: string | number;
+  browserResourceRssSoftLimit?: string | number;
+  browserResourceRssHardLimit?: string | number;
+  browserResourceRssResumeLimit?: string | number;
   browserAutoReattachDelay?: string | number;
   browserAutoReattachInterval?: string | number;
   browserAutoReattachTimeout?: string | number;
@@ -124,6 +128,30 @@ export function applyBrowserDefaultsFromConfig(
   }
   if (isUnset("browserMaxConcurrentTabs") && typeof browser.maxConcurrentTabs === "number") {
     options.browserMaxConcurrentTabs = String(browser.maxConcurrentTabs);
+  }
+  if (
+    isUnset("browserResourceMonitorInterval") &&
+    typeof browser.resourceMonitorIntervalMs === "number"
+  ) {
+    options.browserResourceMonitorInterval = String(browser.resourceMonitorIntervalMs);
+  }
+  if (
+    isUnset("browserResourceRssSoftLimit") &&
+    typeof browser.resourceRssSoftLimitBytes === "number"
+  ) {
+    options.browserResourceRssSoftLimit = String(browser.resourceRssSoftLimitBytes);
+  }
+  if (
+    isUnset("browserResourceRssHardLimit") &&
+    typeof browser.resourceRssHardLimitBytes === "number"
+  ) {
+    options.browserResourceRssHardLimit = String(browser.resourceRssHardLimitBytes);
+  }
+  if (
+    isUnset("browserResourceRssResumeLimit") &&
+    typeof browser.resourceRssResumeLimitBytes === "number"
+  ) {
+    options.browserResourceRssResumeLimit = String(browser.resourceRssResumeLimitBytes);
   }
   if (isUnset("browserAutoReattachDelay") && typeof browser.autoReattachDelayMs === "number") {
     options.browserAutoReattachDelay = String(browser.autoReattachDelayMs);

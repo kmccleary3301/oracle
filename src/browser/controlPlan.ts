@@ -63,7 +63,9 @@ export function describeBrowserControlPlan(config: BrowserControlConfig = {}): B
   }
 
   if (config.headless) {
-    guidance.push("Headless mode avoids visible UI but may be blocked by ChatGPT or Cloudflare.");
+    guidance.push(
+      "Headless Chrome uses a normal Chrome user-agent before navigation to avoid the current ChatGPT/Cloudflare headless check.",
+    );
     return {
       mode: "headless",
       launchesChrome: true,

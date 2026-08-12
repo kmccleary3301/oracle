@@ -63,10 +63,6 @@ describe("formatClaudeMcpConfig", () => {
         ["--import", "tsx", CLI_ENTRY, "bridge", "claude-config", "--local-browser"],
         {
           env: {
-            ...process.env,
-            NODE_OPTIONS: [process.env.NODE_OPTIONS, "--disable-warning=DEP0205"]
-              .filter(Boolean)
-              .join(" "),
             // biome-ignore lint/style/useNamingConvention: env var name
             ORACLE_HOME_DIR: oracleHome,
             // biome-ignore lint/style/useNamingConvention: env var name

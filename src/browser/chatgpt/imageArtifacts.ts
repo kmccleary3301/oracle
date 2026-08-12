@@ -401,8 +401,8 @@ function buildPageSnapshotExpression(): string {
     const conversationMatch = location.pathname.match(/\\/c\\/([^/?#]+)/);
     const modelButton =
       document.querySelector('[data-testid="model-switcher-dropdown-button"]') ||
-      document.querySelector('[aria-label*="model" i]') ||
-      document.querySelector('button[id*="model" i]');
+      Array.from(document.querySelectorAll('button[aria-label*="model" i], button[id*="model" i]'))
+        .find((button) => !button.closest('[data-sidebar-item], [class*="sidebar"], aside'));
     const modelMenuLabel = modelButton
       ? ((modelButton.innerText || modelButton.textContent || modelButton.getAttribute?.("aria-label") || "").replace(/\\s+/g, " ").trim())
       : "";

@@ -39,6 +39,10 @@ describe("resolveBrowserConfig", () => {
     expect(resolved.profileLockTimeoutMs).toBe(300_000);
     expect(resolved.attachmentTimeoutMs).toBe(45_000);
     expect(resolved.maxConcurrentTabs).toBe(3);
+    expect(resolved.resourceMonitorIntervalMs).toBe(1_000);
+    expect(resolved.resourceRssSoftLimitBytes).toBe(4 * 1024 ** 3);
+    expect(resolved.resourceRssHardLimitBytes).toBe(6 * 1024 ** 3);
+    expect(resolved.resourceRssResumeLimitBytes).toBe(3 * 1024 ** 3);
     expect(resolved.researchMode).toBe("off");
     expect(resolved.archiveConversations).toBe("auto");
   });
@@ -58,6 +62,10 @@ describe("resolveBrowserConfig", () => {
       sandboxArtifactsOutputDir: "/tmp/oracle-artifacts",
       debug: true,
       maxConcurrentTabs: 5,
+      resourceMonitorIntervalMs: 250,
+      resourceRssSoftLimitBytes: 200,
+      resourceRssHardLimitBytes: 300,
+      resourceRssResumeLimitBytes: 100,
       researchMode: "deep",
       archiveConversations: "never",
     });
@@ -74,6 +82,10 @@ describe("resolveBrowserConfig", () => {
     expect(resolved.sandboxArtifactsOutputDir).toBe("/tmp/oracle-artifacts");
     expect(resolved.debug).toBe(true);
     expect(resolved.maxConcurrentTabs).toBe(5);
+    expect(resolved.resourceMonitorIntervalMs).toBe(250);
+    expect(resolved.resourceRssSoftLimitBytes).toBe(200);
+    expect(resolved.resourceRssHardLimitBytes).toBe(300);
+    expect(resolved.resourceRssResumeLimitBytes).toBe(100);
     expect(resolved.researchMode).toBe("deep");
     expect(resolved.archiveConversations).toBe("never");
   });

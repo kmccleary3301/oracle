@@ -68,6 +68,14 @@ The MCP response includes `structuredContent.images[]` with the saved file path,
 - Safety: `add` requires `confirmMutation: true` unless `dryRun: true`. This keeps agent callers from mutating a persistent ChatGPT Project by accident.
 - Workflow: use this when Claude Code, Codex, or another MCP host needs a durable shared context file in a ChatGPT Project. Use `consult` when you want an actual model answer.
 
+### `chatgpt_file_preflight`, `chatgpt_file_get`, and `chatgpt_file_download`
+
+- `chatgpt_file_preflight` fingerprints a local source and returns typed size, MIME, quota, and rate-limit evidence without mutating it.
+- `chatgpt_file_get` returns bounded file metadata and content.
+- `chatgpt_file_download` copies a verified ChatGPT file into the operator-approved output root. The MCP server defaults to `${ORACLE_HOME_DIR:-~/.oracle}/downloads`, enforces a 512 MiB ceiling, rejects traversal and symlink escapes, and writes atomically.
+- Operators may set `ORACLE_FILE_DOWNLOAD_ROOT` and `ORACLE_FILE_DOWNLOAD_MAX_BYTES` before starting `oracle-mcp`. Tool-call arguments cannot override either policy.
+- A request-level `remoteChrome` value may only repeat the `browser.remoteChrome` host and port from trusted Oracle configuration. It cannot select a new daemon-side network destination.
+
 ### Long-running ChatGPT browser jobs
 
 Use the async tools for ChatGPT Pro, image generation/editing, or any turn that

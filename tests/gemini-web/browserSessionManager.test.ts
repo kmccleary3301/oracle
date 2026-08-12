@@ -7,7 +7,9 @@ const {
   launchChrome,
   connectWithNewTab,
   closeTab,
+  monitorLocalChromeProcess,
   readDevToolsPort,
+  readChromePid,
   writeDevToolsActivePort,
   writeChromePid,
   cleanupStaleProfileState,
@@ -16,21 +18,28 @@ const {
   launchChrome: vi.fn(),
   connectWithNewTab: vi.fn(),
   closeTab: vi.fn(async () => undefined),
-  readDevToolsPort: vi.fn(async () => null),
+  monitorLocalChromeProcess: vi.fn(),
+  readDevToolsPort: vi.fn<() => Promise<number | null>>(async () => null),
+  readChromePid: vi.fn<() => Promise<number | null>>(async () => null),
   writeDevToolsActivePort: vi.fn(async () => undefined),
   writeChromePid: vi.fn(async () => undefined),
   cleanupStaleProfileState: vi.fn(async () => undefined),
-  verifyDevToolsReachable: vi.fn(async () => ({ ok: false, error: "unreachable" })),
+  verifyDevToolsReachable: vi.fn<() => Promise<{ ok: boolean; error?: string }>>(async () => ({
+    ok: false,
+    error: "unreachable",
+  })),
 }));
 
 vi.mock("../../src/browser/chromeLifecycle.js", () => ({
   launchChrome,
   connectWithNewTab,
   closeTab,
+  monitorLocalChromeProcess,
 }));
 
 vi.mock("../../src/browser/profileState.js", () => ({
   readDevToolsPort,
+  readChromePid,
   writeDevToolsActivePort,
   writeChromePid,
   cleanupStaleProfileState,
@@ -48,7 +57,9 @@ describe("openGeminiBrowserSession", () => {
     launchChrome.mockReset();
     connectWithNewTab.mockReset();
     closeTab.mockClear();
+    monitorLocalChromeProcess.mockReset();
     readDevToolsPort.mockReset();
+    readChromePid.mockReset();
     writeDevToolsActivePort.mockClear();
     writeChromePid.mockClear();
     cleanupStaleProfileState.mockClear();
@@ -66,6 +77,7 @@ describe("openGeminiBrowserSession", () => {
       },
     });
     readDevToolsPort.mockResolvedValue(null);
+    readChromePid.mockResolvedValue(null);
     verifyDevToolsReachable.mockResolvedValue({ ok: false, error: "unreachable" });
   });
 
@@ -149,5 +161,47 @@ describe("openGeminiBrowserSession", () => {
       expect.any(Function),
     );
     homedirSpy.mockRestore();
+  });
+
+  it("refuses to reuse an unidentifiable Chrome process", async () => {
+    readDevToolsPort.mockResolvedValue(9222);
+    verifyDevToolsReachable.mockResolvedValue({ ok: true });
+
+    const { openGeminiBrowserSession } =
+      await import("../../src/gemini-web/browserSessionManager.js");
+    await expect(
+      openGeminiBrowserSession({
+        browserConfig: { manualLoginProfileDir: tempRoot },
+        keepBrowserDefault: true,
+        purpose: "test",
+      }),
+    ).rejects.toThrow("root PID is unavailable for memory monitoring");
+
+    expect(connectWithNewTab).not.toHaveBeenCalled();
+  });
+
+  it("monitors reused Chrome until the Gemini session closes", async () => {
+    const stopResourceWatchdog = vi.fn();
+    readDevToolsPort.mockResolvedValue(9222);
+    readChromePid.mockResolvedValue(12345);
+    verifyDevToolsReachable.mockResolvedValue({ ok: true });
+    monitorLocalChromeProcess.mockResolvedValue({
+      resourceExhaustion: new Promise<never>(() => undefined),
+      stopResourceWatchdog,
+    });
+
+    const { openGeminiBrowserSession } =
+      await import("../../src/gemini-web/browserSessionManager.js");
+    const session = await openGeminiBrowserSession({
+      browserConfig: { manualLoginProfileDir: tempRoot },
+      keepBrowserDefault: true,
+      purpose: "test",
+    });
+    await session.close();
+
+    expect(monitorLocalChromeProcess).toHaveBeenCalledWith(
+      expect.objectContaining({ port: 9222, pid: 12345, profileDir: tempRoot }),
+    );
+    expect(stopResourceWatchdog).toHaveBeenCalledOnce();
   });
 });

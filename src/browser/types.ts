@@ -11,6 +11,11 @@ import type {
   ChatgptDownloadedSandboxArtifact,
   ChatgptSandboxArtifactRef,
 } from "./chatgpt/types.js";
+import type {
+  ChatgptConversationDivergencePolicy,
+  ChatgptConversationRevision,
+} from "./chatgpt/revision.js";
+
 import type { ThinkingTimeSelectionResult } from "./actions/thinkingTime.js";
 
 export type ChromeClient = Awaited<ReturnType<typeof CDP>>;
@@ -66,6 +71,59 @@ export interface SavedBrowserFile extends SessionArtifact {
   sandboxUrl?: string;
   filename?: string;
 }
+export interface BrowserResponseCitation {
+  href: string;
+  text: string;
+  title?: string;
+  turnId?: string | null;
+  messageId?: string | null;
+  turnIndex?: number;
+}
+
+export interface BrowserResponseCodeBlock {
+  language?: string;
+  code: string;
+  turnId?: string | null;
+  messageId?: string | null;
+  turnIndex?: number;
+}
+
+export interface BrowserResponseTable {
+  headers: string[];
+  rows: string[][];
+  turnId?: string | null;
+  messageId?: string | null;
+  turnIndex?: number;
+}
+
+export interface BrowserResponseFileRef {
+  href?: string;
+  name?: string;
+  mimeType?: string;
+  turnId?: string | null;
+  messageId?: string | null;
+  turnIndex?: number;
+}
+
+export interface BrowserResponseImageRef {
+  src: string;
+  alt?: string;
+  title?: string;
+  turnId?: string | null;
+  messageId?: string | null;
+  turnIndex?: number;
+}
+
+export interface BrowserResponseProvenance {
+  source: "chatgpt-dom";
+  capturedAt: string;
+  conversationUrl?: string;
+  conversationId?: string;
+  turnId?: string | null;
+  messageId?: string | null;
+  turnIndex?: number;
+  modelSelection?: BrowserModelSelectionEvidence;
+}
 
 export interface BrowserAutomationConfig {
   chromeProfile?: string | null;
@@ -96,6 +154,14 @@ export interface BrowserAutomationConfig {
   autoReattachIntervalMs?: number;
   /** Time budget for each auto-reattach attempt. */
   autoReattachTimeoutMs?: number;
+  /** Interval between OS process-tree memory samples for locally owned Chrome. */
+  resourceMonitorIntervalMs?: number;
+  /** Pause threshold for locally owned Chrome process-tree RSS. */
+  resourceRssSoftLimitBytes?: number;
+  /** Mandatory shutdown threshold for locally owned Chrome process-tree RSS. */
+  resourceRssHardLimitBytes?: number;
+  /** Hysteresis threshold below which memory admission resumes. */
+  resourceRssResumeLimitBytes?: number;
   cookieSync?: boolean;
   cookieNames?: string[] | null;
   cookieSyncWaitMs?: number;
@@ -139,7 +205,13 @@ export interface BrowserRunOptions {
    * (e.g. inline file paste exceeds composer limits). Intended for auto inline->upload fallback.
    */
   fallbackSubmission?: { prompt: string; attachments: BrowserAttachment[] };
+  /** Expected conversation head captured before submitting a resumed turn. */
+  expectedRevision?: ChatgptConversationRevision;
+  /** Policy for handling external changes to the expected conversation head. */
+  divergencePolicy?: ChatgptConversationDivergencePolicy;
   config?: BrowserAutomationConfig;
+  /** Requested ChatGPT mode. Chat remains the default; Work never silently falls back to Chat. */
+  requestedMode?: "chat" | "work";
   log?: BrowserLogger;
   heartbeatIntervalMs?: number;
   verbose?: boolean;
@@ -167,6 +239,10 @@ export interface BrowserRunOptions {
    * the assistant response. Useful when ChatGPT will keep long Pro work running server-side.
    */
   returnAfterSubmit?: boolean;
+  /** Persist submission intent immediately before the send interaction. */
+  beforeSend?: () => void | Promise<void>;
+  /** Persist dispatch acknowledgement immediately after Send/Enter dispatch. */
+  onPromptSubmitted?: () => void | Promise<void>;
 }
 
 export interface BrowserArchiveResult {
@@ -182,6 +258,12 @@ export interface BrowserRunResult {
   answerText: string;
   answerMarkdown: string;
   answerHtml?: string;
+  citations?: BrowserResponseCitation[];
+  codeBlocks?: BrowserResponseCodeBlock[];
+  tables?: BrowserResponseTable[];
+  fileRefs?: BrowserResponseFileRef[];
+  imageRefs?: BrowserResponseImageRef[];
+  provenance?: BrowserResponseProvenance[];
   artifacts?: SessionArtifact[];
   generatedImages?: BrowserGeneratedImage[];
   savedImages?: SavedBrowserImage[];

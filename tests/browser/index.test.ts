@@ -73,6 +73,17 @@ describe("shouldPreserveBrowserOnErrorForTest", () => {
   });
 });
 
+describe("headless Chrome compatibility", () => {
+  test("removes the headless product token before ChatGPT navigation", () => {
+    expect(
+      __test__.normalizeHeadlessUserAgent("Mozilla/5.0 ... Chrome/151.0.0.0 Safari/537.36"),
+    ).toBe("Mozilla/5.0 ... Chrome/151.0.0.0 Safari/537.36");
+    expect(
+      __test__.normalizeHeadlessUserAgent("Mozilla/5.0 ... HeadlessChrome/151.0.0.0 Safari/537.36"),
+    ).toBe("Mozilla/5.0 ... Chrome/151.0.0.0 Safari/537.36");
+  });
+});
+
 describe("authenticated model-selection errors", () => {
   test("preserves picker diagnostics without adding cookie guidance", () => {
     const error = new BrowserAutomationError(

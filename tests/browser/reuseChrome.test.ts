@@ -193,14 +193,17 @@ describe("maybeReuseRunningChrome", () => {
         }
         return null;
       });
+      const monitorReused = vi.fn(async (chrome: LaunchedChrome) => chrome);
 
       const first = acquireManualLoginChromeForRunForTest(tmpDir, config, noopLogger, "first", {
         maybeReuse,
         launch,
+        monitorReused,
       });
       const second = acquireManualLoginChromeForRunForTest(tmpDir, config, noopLogger, "second", {
         maybeReuse,
         launch,
+        monitorReused,
       });
 
       const [firstResult, secondResult] = await Promise.all([first, second]);
@@ -209,6 +212,7 @@ describe("maybeReuseRunningChrome", () => {
       const results = [firstResult, secondResult];
       expect(results.filter((result) => result.reusedChrome === null)).toHaveLength(1);
       expect(results.filter((result) => result.reusedChrome?.port === 45678)).toHaveLength(1);
+      expect(monitorReused).toHaveBeenCalledTimes(1);
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }

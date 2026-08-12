@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { connectToRemoteChrome, closeRemoteChromeTarget } from "../chromeLifecycle.js";
 import { resolveBrowserConfig } from "../config.js";
 import { CHATGPT_URL } from "../constants.js";
@@ -16,6 +17,18 @@ import type {
   ChatgptProjectRenameResult,
   ChatgptProjectSnapshotResult,
 } from "./types.js";
+
+const projectSidebarResultSchema = z.object({
+  ok: z.literal(true),
+  origin: z.string().min(1),
+  items: z.array(
+    z.object({
+      id: z.string(),
+      shortUrl: z.string().optional(),
+      name: z.string(),
+    }),
+  ),
+});
 
 export interface ListChatgptProjectsOptions {
   config?: BrowserAutomationConfig;
@@ -593,6 +606,11 @@ async function waitForProjects(
   Runtime: ChromeClient["Runtime"],
   timeoutMs: number,
 ): Promise<ChatgptProjectRef[]> {
+  const sessionProjects = await readProjectsFromSessionApi(Runtime);
+  if (sessionProjects !== undefined) {
+    return sessionProjects;
+  }
+
   const deadline = Date.now() + timeoutMs;
   let projects = await readProjectsFromRuntime(Runtime);
   while (Date.now() < deadline) {
@@ -603,6 +621,81 @@ async function waitForProjects(
     projects = await readProjectsFromRuntime(Runtime);
   }
   return projects;
+}
+
+async function readProjectsFromSessionApi(
+  Runtime: ChromeClient["Runtime"],
+): Promise<ChatgptProjectRef[] | undefined> {
+  const { result, exceptionDetails } = await Runtime.evaluate({
+    expression: `(${async () => {
+      const bootstrapText = document.getElementById("client-bootstrap")?.textContent;
+      const bootstrap =
+        (window as any).CLIENT_BOOTSTRAP ?? (bootstrapText ? JSON.parse(bootstrapText) : {});
+      const token = bootstrap.session?.accessToken;
+      if (!token) return { ok: false };
+
+      const items: unknown[] = [];
+      const seenCursors = new Set<string>();
+      let cursor: string | undefined;
+      for (let page = 0; page < 50; page += 1) {
+        const params = new URLSearchParams({
+          owned_only: "true",
+          conversations_per_gizmo: "0",
+          limit: "20",
+        });
+        if (cursor) params.set("cursor", cursor);
+        const response = await fetch(`/backend-api/gizmos/snorlax/sidebar?${params}`, {
+          credentials: "include",
+          headers: { authorization: `Bearer ${token}` },
+        });
+        if (!response.ok) return { ok: false };
+        const payload = await response.json();
+        if (!Array.isArray(payload?.items)) return { ok: false };
+        for (const entry of payload.items) {
+          const gizmo = entry?.gizmo?.gizmo;
+          items.push({
+            id: gizmo?.id,
+            shortUrl: gizmo?.short_url,
+            name: gizmo?.display?.name,
+          });
+        }
+        const nextCursor =
+          typeof payload.cursor === "string" && payload.cursor ? payload.cursor : undefined;
+        if (!nextCursor || seenCursors.has(nextCursor)) break;
+        seenCursors.add(nextCursor);
+        cursor = nextCursor;
+      }
+      return { ok: true, origin: location.origin, items };
+    }})()`,
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  if (exceptionDetails) {
+    return undefined;
+  }
+  return parseProjectSidebarResult(result?.value);
+}
+
+function parseProjectSidebarResult(value: unknown): ChatgptProjectRef[] | undefined {
+  const parsed = projectSidebarResultSchema.safeParse(value);
+  if (!parsed.success) {
+    return undefined;
+  }
+  const { origin, items } = parsed.data;
+  return items.flatMap((entry, documentIndex): ChatgptProjectRef[] => {
+    const projectId = entry.id.startsWith("g-p-") ? entry.id : undefined;
+    const name = entry.name.trim();
+    if (!projectId || !name) return [];
+    const shortUrl = entry.shortUrl || projectId;
+    return [
+      {
+        name,
+        url: `${origin.replace(/\/$/, "")}/g/${shortUrl}/project`,
+        projectId,
+        documentIndex,
+      },
+    ];
+  });
 }
 
 async function waitForProjectConversations(
@@ -707,20 +800,33 @@ function buildProjectListExpression(): string {
       }
     };
     const candidates = [];
-    Array.from(document.querySelectorAll("a")).forEach((anchor, documentIndex) => {
-      const href = anchor.href || anchor.getAttribute("href") || "";
-      const hasProjectIcon = Boolean(anchor.querySelector('[data-testid="project-folder-icon"]'));
-      const projectId = projectIdFromUrl(href);
-      if (!hasProjectIcon && !projectId) return;
-      const name = normalize(anchor.innerText || anchor.textContent || anchor.getAttribute("aria-label"));
-      if (!name) return;
-      candidates.push({
-        name,
-        url: href ? new URL(href, location.href).toString() : undefined,
-        projectId: projectId || undefined,
-        documentIndex
-      });
-    });
+    Array.from(document.querySelectorAll('a, [role="button"][data-sidebar-item="true"]')).forEach(
+      (candidate, documentIndex) => {
+        const href = candidate.href || candidate.getAttribute("href") || "";
+        const hasProjectIcon = Boolean(
+          candidate.querySelector?.('[data-testid="project-folder-icon"]')
+        );
+        const projectOptionsLabel = candidate
+          .closest?.("li")
+          ?.querySelector?.('button[aria-label^="Open project options for "]')
+          ?.getAttribute("aria-label");
+        const projectId = projectIdFromUrl(href);
+        if (!hasProjectIcon && !projectOptionsLabel && !projectId) return;
+        const name = normalize(
+          projectOptionsLabel?.replace(/^Open project options for\\s+/, "") ||
+            candidate.innerText ||
+            candidate.textContent ||
+            candidate.getAttribute("aria-label")
+        );
+        if (!name) return;
+        candidates.push({
+          name,
+          url: href ? new URL(href, location.href).toString() : undefined,
+          projectId: projectId || undefined,
+          documentIndex
+        });
+      }
+    );
     const seen = new Set();
     return candidates.filter((item) => {
       const key = item.projectId || item.url || item.name.toLowerCase();
@@ -1372,4 +1478,6 @@ function normalizeUrl(url: string): string {
 export const __test__ = {
   buildConversationListExpression,
   buildCurrentProjectExpression,
+  buildProjectListExpression,
+  parseProjectSidebarResult,
 };

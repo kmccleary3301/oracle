@@ -2,9 +2,16 @@ import path from "node:path";
 import os from "node:os";
 import { mkdir } from "node:fs/promises";
 import type { BrowserRunOptions, BrowserLogger, ChromeClient } from "../browser/types.js";
-import { launchChrome, connectWithNewTab, closeTab } from "../browser/chromeLifecycle.js";
+import {
+  launchChrome,
+  connectWithNewTab,
+  closeTab,
+  monitorLocalChromeProcess,
+  type LocalChromeResourceMonitor,
+} from "../browser/chromeLifecycle.js";
 import { resolveBrowserConfig } from "../browser/config.js";
 import {
+  readChromePid,
   readDevToolsPort,
   writeDevToolsActivePort,
   writeChromePid,
@@ -18,6 +25,7 @@ export interface GeminiBrowserSession {
   client: ChromeClient;
   targetId?: string;
   close: () => Promise<void>;
+  raceWithResourceLimit: <T>(promise: Promise<T>) => Promise<T>;
 }
 
 export interface OpenGeminiBrowserSessionInput {
@@ -44,6 +52,7 @@ export async function openGeminiBrowserSession(
   let port = await readDevToolsPort(profileDir);
   let launchedChrome: Awaited<ReturnType<typeof launchChrome>> | null = null;
   let chromeWasLaunched = false;
+  let resourceMonitor: LocalChromeResourceMonitor | undefined;
 
   if (port) {
     const probe = await verifyDevToolsReachable({ port });
@@ -63,15 +72,49 @@ export async function openGeminiBrowserSession(
     if (launchedChrome.pid) {
       await writeChromePid(profileDir, launchedChrome.pid);
     }
+    if (launchedChrome.resourceExhaustion && launchedChrome.stopResourceWatchdog) {
+      resourceMonitor = {
+        resourceExhaustion: launchedChrome.resourceExhaustion,
+        stopResourceWatchdog: launchedChrome.stopResourceWatchdog,
+      };
+    }
   } else {
     log?.(`[gemini-web] Reusing Chrome on port ${port} for ${purpose}.`);
+    const pid = await readChromePid(profileDir);
+    if (!pid) {
+      throw new Error(
+        `Oracle refused to reuse Chrome on port ${port} because its root PID is unavailable for memory monitoring.`,
+      );
+    }
+    resourceMonitor = await monitorLocalChromeProcess({
+      port,
+      pid,
+      profileDir,
+      config: resolvedConfig,
+      logger: log ?? (() => {}),
+    });
   }
 
-  const connection = await connectWithNewTab(port, log ?? (() => {}), undefined);
+  let connection: Awaited<ReturnType<typeof connectWithNewTab>>;
+  try {
+    connection = await (resourceMonitor
+      ? Promise.race([
+          connectWithNewTab(port, log ?? (() => {}), undefined),
+          resourceMonitor.resourceExhaustion,
+        ])
+      : connectWithNewTab(port, log ?? (() => {}), undefined));
+  } catch (error) {
+    resourceMonitor?.stopResourceWatchdog();
+    if (chromeWasLaunched && launchedChrome) {
+      await launchedChrome.kill();
+    }
+    throw error;
+  }
   const client = connection.client;
   const targetId = connection.targetId;
 
   const close = async (): Promise<void> => {
+    resourceMonitor?.stopResourceWatchdog();
     if (keepBrowser) {
       try {
         await client.close();
@@ -101,6 +144,8 @@ export async function openGeminiBrowserSession(
       );
     }
   };
+  const raceWithResourceLimit = <T>(promise: Promise<T>): Promise<T> =>
+    resourceMonitor ? Promise.race([promise, resourceMonitor.resourceExhaustion]) : promise;
 
   return {
     profileDir,
@@ -108,5 +153,6 @@ export async function openGeminiBrowserSession(
     client,
     targetId: targetId ?? undefined,
     close,
+    raceWithResourceLimit,
   };
 }

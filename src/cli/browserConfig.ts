@@ -16,11 +16,11 @@ import type {
 import type { CookieParam } from "../browser/types.js";
 import { getOracleHomeDir } from "../oracleHome.js";
 
-const DEFAULT_BROWSER_TIMEOUT_MS = 90 * 60_000;
+const DEFAULT_BROWSER_TIMEOUT_MS = 20 * 60_000;
 const DEFAULT_BROWSER_INPUT_TIMEOUT_MS = 60_000;
 const DEFAULT_BROWSER_ATTACHMENT_TIMEOUT_MS = 45_000;
 const DEFAULT_BROWSER_RECHECK_TIMEOUT_MS = 180_000;
-const DEFAULT_BROWSER_AUTO_REATTACH_TIMEOUT_MS = 180_000;
+const DEFAULT_BROWSER_AUTO_REATTACH_TIMEOUT_MS = 120_000;
 const DEFAULT_CHROME_PROFILE = "Default";
 
 // Ordered array: most specific models first to ensure correct selection.
@@ -30,7 +30,8 @@ const BROWSER_MODEL_LABELS: [ModelName, string][] = [
   ["gpt-5.6-sol", "GPT-5.6 Sol"],
   ["gpt-5.6", "GPT-5.6 Sol"],
   ["gpt-5.5-pro", "Pro"],
-  ["gpt-5.5-instant", "GPT-5.5 Instant"],
+  // ChatGPT replaced the retired 5.5 Instant row with GPT-5.6 Sol's Instant effort.
+  ["gpt-5.5-instant", "GPT-5.6 Sol"],
   ["gpt-5.5", "Thinking 5.5"],
   ["gpt-5.4-pro", "Pro"],
   ["gpt-5.2-thinking", "GPT-5.2 Thinking"],
@@ -65,6 +66,10 @@ export interface BrowserFlagOptions {
   browserReuseWait?: string;
   browserProfileLockTimeout?: string;
   browserMaxConcurrentTabs?: string;
+  browserResourceMonitorInterval?: string;
+  browserResourceRssSoftLimit?: string;
+  browserResourceRssHardLimit?: string;
+  browserResourceRssResumeLimit?: string;
   browserAutoReattachDelay?: string;
   browserAutoReattachInterval?: string;
   browserAutoReattachTimeout?: string;
@@ -163,6 +168,8 @@ export async function buildBrowserConfig(
   const normalizedOverride = desiredModelOverride?.toLowerCase() ?? "";
   const baseModel = options.model.toLowerCase();
   const isChatGptModel = baseModel.startsWith("gpt-") && !baseModel.includes("codex");
+  const normalizedBrowserModel = normalizeChatGptModelForBrowser(options.model);
+  const isRetiredInstantAlias = normalizedBrowserModel === "gpt-5.5-instant";
   const shouldUseOverride =
     !isChatGptModel && normalizedOverride.length > 0 && normalizedOverride !== baseModel;
   const modelStrategy =
@@ -247,6 +254,25 @@ export async function buildBrowserConfig(
       ? parseBrowserDuration(options.browserProfileLockTimeout, "--browser-profile-lock-timeout", 0)
       : undefined,
     maxConcurrentTabs: parseMaxConcurrentTabs(options.browserMaxConcurrentTabs),
+    resourceMonitorIntervalMs: options.browserResourceMonitorInterval
+      ? parseBrowserDuration(
+          options.browserResourceMonitorInterval,
+          "--browser-resource-monitor-interval",
+          1_000,
+        )
+      : undefined,
+    resourceRssSoftLimitBytes: parsePositiveByteCount(
+      options.browserResourceRssSoftLimit,
+      "--browser-resource-rss-soft-limit",
+    ),
+    resourceRssHardLimitBytes: parsePositiveByteCount(
+      options.browserResourceRssHardLimit,
+      "--browser-resource-rss-hard-limit",
+    ),
+    resourceRssResumeLimitBytes: parsePositiveByteCount(
+      options.browserResourceRssResumeLimit,
+      "--browser-resource-rss-resume-limit",
+    ),
     autoReattachDelayMs: options.browserAutoReattachDelay
       ? parseBrowserDuration(options.browserAutoReattachDelay, "--browser-auto-reattach-delay", 0)
       : undefined,
@@ -271,7 +297,7 @@ export async function buildBrowserConfig(
     cookieNames,
     inlineCookies: inline?.cookies,
     inlineCookiesSource: inline?.source ?? null,
-    headless: undefined, // disable headless; Cloudflare blocks it
+    headless: options.browserHeadless ? true : undefined,
     keepBrowser: options.browserKeepBrowser ? true : undefined,
     manualLogin: options.browserManualLogin === undefined ? undefined : options.browserManualLogin,
     manualLoginProfileDir: options.browserManualLoginProfileDir ?? undefined,
@@ -284,7 +310,9 @@ export async function buildBrowserConfig(
     allowCookieErrors: options.browserAllowCookieErrors ?? true,
     remoteChrome,
     browserTabRef: options.browserTab ?? undefined,
-    thinkingTime: normalizeThinkingTimeLevel(options.browserThinkingTime) ?? undefined,
+    thinkingTime:
+      normalizeThinkingTimeLevel(options.browserThinkingTime) ??
+      (isRetiredInstantAlias ? "light" : undefined),
     thinkingFallback: options.browserThinkingFallback,
     researchMode: options.browserResearch === "deep" ? "deep" : "off",
     archiveConversations: options.browserArchive,
@@ -357,6 +385,15 @@ function parseMaxConcurrentTabs(raw?: string): number | undefined {
     throw new Error(`Invalid browser max concurrent tabs: ${raw}. Expected a positive integer.`);
   }
   return Math.trunc(value);
+}
+
+function parsePositiveByteCount(raw: string | undefined, optionName: string): number | undefined {
+  if (!raw) return undefined;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`Invalid ${optionName}: ${raw}. Expected a positive integer byte count.`);
+  }
+  return value;
 }
 
 function parseBrowserDuration(raw: string, optionName: string, fallbackMs: number): number {

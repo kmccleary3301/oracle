@@ -184,7 +184,17 @@ type ChatModeProbeResult = {
     | "controls-absent"
     | "mode-unresolved";
   chatPoint?: { x: number; y: number };
+  workPoint?: { x: number; y: number };
 };
+
+export type RequestedChatGptMode = "chat" | "work";
+
+export type RequestedChatGptModeResult =
+  | "chat"
+  | "work"
+  | "switched"
+  | "unavailable"
+  | "unsupported";
 
 function buildChatModeProbeExpression(): string {
   return `(() => {
@@ -249,7 +259,13 @@ function buildChatModeProbeExpression(): string {
     const work = radios.find((node) => normalize(node.textContent) === 'work');
     if (!chat && !work) return { status: 'controls-absent' };
     if (!chat || !work) return { status: 'mode-unresolved' };
-    if (isSelected(chat)) return { status: 'chat-selected' };
+    if (isSelected(chat)) {
+      const rect = work.getBoundingClientRect();
+      return {
+        status: 'chat-selected',
+        workPoint: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },
+      };
+    }
     if (isSelected(work)) {
       const rect = chat.getBoundingClientRect();
       return {
@@ -259,6 +275,85 @@ function buildChatModeProbeExpression(): string {
     }
     return { status: 'mode-unresolved' };
   })()`;
+}
+
+async function clickModePoint(
+  Input: ChromeClient["Input"],
+  point: { x: number; y: number },
+): Promise<void> {
+  const { x, y } = point;
+  await Input.dispatchMouseEvent({ type: "mouseMoved", x, y });
+  await Input.dispatchMouseEvent({
+    type: "mousePressed",
+    x,
+    y,
+    button: "left",
+    clickCount: 1,
+  });
+  await Input.dispatchMouseEvent({
+    type: "mouseReleased",
+    x,
+    y,
+    button: "left",
+    clickCount: 1,
+  });
+}
+
+export async function ensureRequestedChatGptMode(
+  Runtime: ChromeClient["Runtime"],
+  Input: ChromeClient["Input"],
+  timeoutMs: number,
+  logger: BrowserLogger,
+  requestedMode: RequestedChatGptMode,
+  options: { pollMs?: number; resetWorkConversation?: () => Promise<void> } = {},
+): Promise<RequestedChatGptModeResult> {
+  if (requestedMode === "chat") {
+    return ensureChatMode(Runtime, Input, timeoutMs, logger, options);
+  }
+
+  const verificationWindowMs = Math.min(Math.max(0, timeoutMs), 10_000);
+  const pollMs = Math.max(0, options.pollMs ?? 200);
+  let deadline = Date.now() + verificationWindowMs;
+  let clickedChat = false;
+
+  for (;;) {
+    const outcome = await Runtime.evaluate({
+      expression: buildChatModeProbeExpression(),
+      returnByValue: true,
+    });
+    const probe = outcome.result?.value as ChatModeProbeResult | undefined;
+    if (probe?.status === "work-selected" || probe?.status === "work-conversation") {
+      logger(clickedChat ? "ChatGPT mode: Work (switched from Chat)" : "ChatGPT mode: Work");
+      return clickedChat ? "switched" : "work";
+    }
+    if (probe?.status === "chat-conversation") {
+      throw new BrowserAutomationError(
+        "The selected ChatGPT tab is an existing Chat conversation and cannot be resumed as a Work conversation.",
+        { stage: "work-mode-selection", details: { mode: "chat-conversation" } },
+      );
+    }
+    if (probe?.status === "controls-absent" || probe?.status === "mode-unresolved") {
+      if (Date.now() >= deadline) {
+        logger("ChatGPT Work mode controls unavailable");
+        return "unsupported";
+      }
+      await delay(pollMs);
+      continue;
+    }
+    if (probe?.status === "chat-selected" && !clickedChat && probe.workPoint) {
+      logger("ChatGPT mode: Chat; switching to Work");
+      await clickModePoint(Input, probe.workPoint);
+      clickedChat = true;
+      deadline = Date.now() + verificationWindowMs;
+      await delay(pollMs);
+      continue;
+    }
+    if (Date.now() >= deadline) {
+      logger("ChatGPT Work mode could not be verified");
+      return "unsupported";
+    }
+    await delay(pollMs);
+  }
 }
 
 export async function ensureChatMode(

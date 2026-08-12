@@ -50,6 +50,14 @@ export interface BrowserConfigDefaults {
   profileLockTimeoutMs?: number;
   /** Soft limit for concurrent ChatGPT tabs sharing one manual-login profile. */
   maxConcurrentTabs?: number;
+  /** Interval between OS process-tree RSS samples for local Chrome. */
+  resourceMonitorIntervalMs?: number;
+  /** Pause new browser admission at this local Chrome process-tree RSS. */
+  resourceRssSoftLimitBytes?: number;
+  /** Stop identity-verified owned Chrome at this process-tree RSS. */
+  resourceRssHardLimitBytes?: number;
+  /** Resume browser admission below this process-tree RSS. */
+  resourceRssResumeLimitBytes?: number;
   /** Delay before starting periodic auto-reattach attempts after a timeout. */
   autoReattachDelayMs?: number;
   /** Interval between auto-reattach attempts (0 disables). */
@@ -100,6 +108,12 @@ export interface DaemonConfigDefaults {
   connectionPath?: string;
   jobDir?: string;
   maxConcurrentJobs?: number;
+  maxQueuedJobs?: number;
+  maxQueuedPersistedInputBytes?: number;
+  maxPrincipalQueuedJobs?: number;
+  maxPrincipalQueuedInputBytes?: number;
+  maxPrincipalAdmissionsPerWindow?: number;
+  principalRateWindowMs?: number;
   maxOpenChatgptTabs?: number;
   jobRetentionDays?: number;
   completedRetentionDays?: number;

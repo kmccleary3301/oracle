@@ -598,6 +598,51 @@ describe("ensureChatMode", () => {
     expect(expression).toContain("node.classList.contains('shrink-0')");
     expect(expression).not.toContain("document.body.innerText");
   });
+  test("runtime-evaluates conversation and unknown surfaces with bounded evidence", () => {
+    const expression = buildChatModeProbeExpressionForTest();
+    const evaluate = new Function(
+      "document",
+      "location",
+      "URL",
+      "HTMLElement",
+      `return ${expression};`,
+    ) as (
+      document: unknown,
+      location: unknown,
+      url: typeof URL,
+      htmlElement: typeof FakeChatModeElement,
+    ) => { status: string };
+
+    const conversationLink = {
+      getAttribute: (name: string) =>
+        name === "href" ? "/c/fixture-thread" : name === "aria-label" ? "Fixture Chat" : null,
+      querySelectorAll: () => [],
+    };
+    const conversationDocument = {
+      querySelectorAll: (selector: string) =>
+        selector === 'a.__menu-item[href*="/c/"]' ? [conversationLink] : [],
+    };
+    expect(
+      evaluate(
+        conversationDocument,
+        { origin: "https://chatgpt.com", pathname: "/c/fixture-thread" },
+        URL,
+        FakeChatModeElement,
+      ),
+    ).toEqual({ status: "chat-conversation" });
+
+    const unknownDocument = {
+      querySelectorAll: () => [],
+    };
+    expect(
+      evaluate(
+        unknownDocument,
+        { origin: "https://chatgpt.com", pathname: "/unknown-surface" },
+        URL,
+        FakeChatModeElement,
+      ),
+    ).toEqual({ status: "controls-absent" });
+  });
 });
 
 describe("waitForResumedConversationHydration", () => {

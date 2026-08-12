@@ -19,6 +19,8 @@ interface ChatgptDomProviderState {
   baselineTurns?: number | null;
   attachmentNames?: AttachmentReadyExpectation[];
   committedTurns?: number | null;
+  /** Runs after prompt/upload preparation and immediately before Send. */
+  beforeSend?: () => Promise<void> | void;
   onPromptSubmitted?: () => Promise<void> | void;
   promptAlreadyInserted?: boolean;
 }
@@ -52,6 +54,7 @@ async function submitPromptViaAdapter(ctx: ProviderDomFlowContext): Promise<void
       baselineTurns: state.baselineTurns ?? undefined,
       inputTimeoutMs: state.inputTimeoutMs ?? undefined,
       attachmentTimeoutMs: state.attachmentTimeoutMs ?? undefined,
+      beforeSend: state.beforeSend,
       onPromptSubmitted: state.onPromptSubmitted,
     },
     ctx.prompt,

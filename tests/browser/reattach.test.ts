@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
-import { resumeBrowserSession, __test__ } from "../../src/browser/reattach.js";
+import { resumeBrowserSession, __test__, type ReattachDeps } from "../../src/browser/reattach.js";
 import type { BrowserLogger, ChromeClient } from "../../src/browser/types.js";
 
 type FakeTarget = { id?: string; targetId?: string; type?: string; url?: string };
@@ -234,6 +234,36 @@ describe("resumeBrowserSession", () => {
 
     expect(result.answerMarkdown).toBe("fallback-md");
     expect(recoverSession).toHaveBeenCalled();
+  });
+
+  test("cleans a replacement Chrome when setup fails before response waiting", async () => {
+    const stopResourceWatchdog = vi.fn();
+    const kill = vi.fn(async () => undefined);
+    const fakeChrome = {
+      port: 51560,
+      pid: 321,
+      kill,
+      process: undefined,
+      resourceExhaustion: new Promise<never>(() => undefined),
+      stopResourceWatchdog,
+    } as unknown as Awaited<ReturnType<NonNullable<ReattachDeps["launch"]>>>;
+    const launch: NonNullable<ReattachDeps["launch"]> = vi.fn(async () => fakeChrome);
+    const connectNew: NonNullable<ReattachDeps["connectNew"]> = vi.fn(async () => {
+      throw new Error("CDP setup failed");
+    });
+    const logger = vi.fn() as BrowserLogger;
+
+    await expect(
+      resumeBrowserSession(
+        { tabUrl: "https://chatgpt.com/c/recover-me" },
+        { keepBrowser: false, cookieSync: false },
+        logger,
+        { launch, connectNew },
+      ),
+    ).rejects.toThrow("CDP setup failed");
+
+    expect(stopResourceWatchdog).toHaveBeenCalledOnce();
+    expect(kill).toHaveBeenCalledOnce();
   });
 
   test("tries live reattach from browser websocket metadata before falling back", async () => {

@@ -2715,6 +2715,109 @@ describe("browser thinking-time selection expression", () => {
       ),
     ).resolves.toEqual({ status: "switched", label: "Instant" });
   });
+  it("accepts the refreshed ChatGPT Instant slider when no radio option is rendered", async () => {
+    class FakeEventTarget {
+      dispatchEvent(_event: unknown): boolean {
+        return true;
+      }
+    }
+    class FakeElement extends FakeEventTarget {
+      constructor(
+        public textContent: string,
+        private readonly attributes: Readonly<Record<string, string>> = {},
+        private readonly children: FakeElement[] = [],
+      ) {
+        super();
+      }
+      getAttribute(name: string): string | null {
+        return this.attributes[name] ?? null;
+      }
+      querySelector(_selector: string): FakeElement | null {
+        return null;
+      }
+      querySelectorAll(_selector: string): FakeElement[] {
+        return this.children;
+      }
+      closest(_selector: string): FakeElement | null {
+        return null;
+      }
+      matches(selector: string): boolean {
+        return (
+          selector.includes("__composer-pill") &&
+          this.attributes.class?.includes("__composer-pill") === true
+        );
+      }
+      getBoundingClientRect(): { width: number; height: number } {
+        return { width: 144, height: 36 };
+      }
+    }
+
+    const modelButton = new FakeElement("Instant", {
+      class: "__composer-pill",
+      "aria-expanded": "true",
+    });
+    const intelligenceMenu = new FakeElement(
+      "Instant, 1 of 5. Use Left and Right arrow keys to adjust power.",
+      { "data-testid": "composer-intelligence-picker-content", role: "menu" },
+      [new FakeElement("", { role: "menuitem", "aria-label": "Power" })],
+    );
+    const documentStub = {
+      body: new FakeElement(""),
+      querySelector: (selector: string) => {
+        if (selector.includes("composer-intelligence-picker-content")) return intelligenceMenu;
+        if (selector.includes("data-model-reasoning-effort-slider")) {
+          return new FakeElement("", { "data-model-reasoning-effort-slider": "" });
+        }
+        if (selector.includes("model-switcher-dropdown-button")) return null;
+        if (selector.includes("__composer-pill")) return modelButton;
+        return null;
+      },
+      querySelectorAll: (selector: string) => {
+        if (selector.includes("__composer-pill")) return [modelButton];
+        if (selector.includes('role="menu"') || selector.includes("data-radix")) {
+          return [intelligenceMenu];
+        }
+        return [];
+      },
+      dispatchEvent: () => true,
+    };
+    let now = 0;
+    const performanceStub = { now: () => (now += 100) };
+    const expression = buildThinkingTimeExpressionForTest("light", "gpt-5.6-sol");
+    const evaluate = new Function(
+      "document",
+      "performance",
+      "setTimeout",
+      "window",
+      "EventTarget",
+      "PointerEvent",
+      "MouseEvent",
+      "HTMLElement",
+      `return ${expression};`,
+    ) as (
+      document: unknown,
+      performance: unknown,
+      setTimeout: unknown,
+      window: unknown,
+      EventTarget: unknown,
+      PointerEvent: unknown,
+      MouseEvent: unknown,
+      HTMLElement: unknown,
+    ) => Promise<unknown>;
+
+    await expect(
+      evaluate(
+        documentStub,
+        performanceStub,
+        (callback: () => void) => callback(),
+        {},
+        FakeEventTarget,
+        class FakePointerEvent {},
+        class FakeMouseEvent {},
+        FakeElement,
+      ),
+    ).resolves.toEqual({ status: "already-selected", label: "Instant" });
+  });
 
   it("inspects visible thinking controls without selecting", async () => {
     const runtime = {

@@ -109,6 +109,44 @@ describe("activateDeepResearch", () => {
     ).rejects.toThrow(/composer plus button/);
   });
 
+  it("opens the current composer tools menu with a trusted point click", async () => {
+    const dispatchMouseEvent = vi.fn(async () => undefined);
+    mockInput = { dispatchMouseEvent };
+    mockRuntime.evaluate
+      .mockResolvedValueOnce({
+        result: {
+          value: {
+            status: "plus-button-trusted-click-required",
+            clickPoint: { x: 20, y: 40 },
+          },
+        },
+      })
+      .mockResolvedValueOnce({ result: { value: { status: "activated" } } });
+
+    await expect(
+      activateDeepResearch(mockRuntime as never, mockInput as never, mockLogger),
+    ).resolves.toBeUndefined();
+    expect(mockRuntime.evaluate).toHaveBeenCalledTimes(2);
+    expect(dispatchMouseEvent).toHaveBeenCalledTimes(3);
+    expect(dispatchMouseEvent).toHaveBeenCalledWith({
+      type: "mousePressed",
+      x: 20,
+      y: 40,
+      button: "left",
+      clickCount: 1,
+    });
+  });
+
+  it("fails closed when the composer plus button has no trusted click point", async () => {
+    mockRuntime.evaluate.mockResolvedValueOnce({
+      result: { value: { status: "plus-button-trusted-click-required" } },
+    });
+
+    await expect(
+      activateDeepResearch(mockRuntime as never, mockInput as never, mockLogger),
+    ).rejects.toThrow(/determine where to click/);
+  });
+
   it("throws with available options when Deep Research item missing", async () => {
     mockRuntime.evaluate.mockResolvedValueOnce({
       result: {
@@ -182,6 +220,10 @@ describe("Deep Research activation expression", () => {
     expect(expression).toContain('[class*="composer-pill"]');
     expect(expression).toContain("deep research");
     expect(expression).toContain("already-active");
+    expect(expression).toContain(
+      '[data-inline-selection-pill][data-id="plugin:connector_openai_deep_research"]',
+    );
+    expect(expression).toContain("pill.closest('.popover");
   });
 });
 

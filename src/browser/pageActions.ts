@@ -5,6 +5,7 @@ export {
   ensureLoggedIn,
   ensurePromptReady,
   ensureChatMode,
+  ensureRequestedChatGptMode,
   waitForResumedConversationHydration,
   installJavaScriptDialogAutoDismissal,
 } from "./actions/navigation.js";

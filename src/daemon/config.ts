@@ -11,6 +11,12 @@ export interface ResolvedOracleDaemonConfig {
   connectionPath: string;
   jobDir: string;
   maxConcurrentJobs: number;
+  maxQueuedJobs: number;
+  maxQueuedPersistedInputBytes: number;
+  maxPrincipalQueuedJobs: number;
+  maxPrincipalQueuedInputBytes: number;
+  maxPrincipalAdmissionsPerWindow: number;
+  principalRateWindowMs: number;
   maxOpenChatgptTabs: number;
   jobRetentionDays: number;
   completedRetentionDays: number;
@@ -33,7 +39,47 @@ export async function resolveOracleDaemonConfig(): Promise<ResolvedOracleDaemonC
       daemon.connectionPath ??
       path.join(home, "daemon", "connection.json"),
     jobDir: process.env.ORACLE_JOBS_DIR ?? daemon.jobDir ?? path.join(home, "jobs"),
-    maxConcurrentJobs: daemon.maxConcurrentJobs ?? 1,
+    maxConcurrentJobs: positiveNumber(
+      parseNumberEnv(process.env.ORACLE_MAX_CONCURRENT_JOBS) ?? daemon.maxConcurrentJobs ?? 1,
+      1,
+    ),
+    maxQueuedJobs: positiveNumber(
+      parseNumberEnv(process.env.ORACLE_MAX_QUEUED_JOBS) ?? daemon.maxQueuedJobs ?? 256,
+      256,
+    ),
+    maxQueuedPersistedInputBytes: positiveNumber(
+      parseNumberEnv(
+        process.env.ORACLE_MAX_QUEUED_PERSISTED_INPUT_BYTES ??
+          process.env.ORACLE_MAX_QUEUED_INPUT_BYTES,
+      ) ??
+        daemon.maxQueuedPersistedInputBytes ??
+        64 * 1024 * 1024,
+      64 * 1024 * 1024,
+    ),
+    maxPrincipalQueuedJobs: positiveNumber(
+      parseNumberEnv(process.env.ORACLE_MAX_PRINCIPAL_QUEUED_JOBS) ??
+        daemon.maxPrincipalQueuedJobs ??
+        128,
+      128,
+    ),
+    maxPrincipalQueuedInputBytes: positiveNumber(
+      parseNumberEnv(process.env.ORACLE_MAX_PRINCIPAL_QUEUED_INPUT_BYTES) ??
+        daemon.maxPrincipalQueuedInputBytes ??
+        32 * 1024 * 1024,
+      32 * 1024 * 1024,
+    ),
+    maxPrincipalAdmissionsPerWindow: positiveNumber(
+      parseNumberEnv(process.env.ORACLE_MAX_PRINCIPAL_ADMISSIONS_PER_WINDOW) ??
+        daemon.maxPrincipalAdmissionsPerWindow ??
+        128,
+      128,
+    ),
+    principalRateWindowMs: positiveNumber(
+      parseNumberEnv(process.env.ORACLE_PRINCIPAL_RATE_WINDOW_MS) ??
+        daemon.principalRateWindowMs ??
+        60_000,
+      60_000,
+    ),
     maxOpenChatgptTabs:
       parseNumberEnv(process.env.ORACLE_MAX_OPEN_CHATGPT_TABS) ?? daemon.maxOpenChatgptTabs ?? 4,
     jobRetentionDays: daemon.jobRetentionDays ?? 14,
@@ -41,6 +87,10 @@ export async function resolveOracleDaemonConfig(): Promise<ResolvedOracleDaemonC
     failedRetentionDays: daemon.failedRetentionDays ?? 30,
     defaultPollIntervalMs: daemon.defaultPollIntervalMs ?? 5_000,
   };
+}
+
+function positiveNumber(value: number, fallback: number): number {
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
 function parseBooleanEnv(value: string | undefined): boolean | undefined {

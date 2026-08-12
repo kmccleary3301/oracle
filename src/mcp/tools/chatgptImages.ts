@@ -1,16 +1,19 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { loadUserConfig } from "../../config.js";
-import { buildBrowserConfig } from "../../cli/browserConfig.js";
-import { DEFAULT_MODEL } from "../../oracle.js";
-import { extractChatgptImagesFromConfiguredBrowser } from "../../browser/chatgpt/imageArtifacts.js";
+import { resolveTrustedBrowserConfig } from "../../browser/trustedBrowserConfig.js";
+import {
+  editChatgptImage,
+  extractChatgptImageArtifacts,
+  generateChatgptImage,
+  listChatgptImageLibraryFromConfiguredBrowser,
+  verifyChatgptImageModeFromConfiguredBrowser,
+} from "../../browser/chatgpt/imageService.js";
 import { extractChatgptSandboxArtifactsFromConfiguredBrowser } from "../../browser/chatgpt/sandboxArtifacts.js";
-import { createChatgptSession } from "../../browser/chatgpt/session.js";
 import { resolveBrowserAttachments } from "../../browser/attachmentResolver.js";
+import type { ChatgptTurnResult } from "../../browser/chatgpt/types.js";
 import type { BrowserModelStrategy } from "../../browser/types.js";
 import type { ThinkingTimeLevel } from "../../oracle/types.js";
 import { startMcpJob } from "../jobs.js";
-import { resolveDaemonClientWithOptionalAutostart } from "../../daemon/resolve.js";
 
 const DEFAULT_CHATGPT_IMAGE_TURN_TIMEOUT_MS = 30 * 60_000;
 
@@ -34,6 +37,26 @@ const extractImagesInputShape = {
     .describe("Optional Chrome DevTools endpoint override, formatted host:port."),
   timeoutMs: z.number().optional().describe("Read-only extraction timeout in milliseconds."),
   keepTab: z.boolean().optional().default(false).describe("Leave the opened browser tab alive."),
+} satisfies z.ZodRawShape;
+
+const imageLibraryInputShape = {
+  remoteChrome: z.string().optional(),
+  libraryUrl: z.string().url().optional(),
+  timeoutMs: z.number().optional(),
+  keepTab: z.boolean().optional().default(false),
+} satisfies z.ZodRawShape;
+
+const imageLibraryGetInputShape = {
+  ...imageLibraryInputShape,
+  fileId: z.string().min(1),
+  turnId: z.string().optional(),
+  messageId: z.string().optional(),
+} satisfies z.ZodRawShape;
+const imageGetInputShape = {
+  ...extractImagesInputShape,
+  fileId: z.string().min(1),
+  turnId: z.string().optional(),
+  messageId: z.string().optional(),
 } satisfies z.ZodRawShape;
 
 const generateImagesInputShape = {
@@ -149,6 +172,30 @@ const generatedImageShape = z.object({
   duplicateNodeCount: z.number(),
 });
 
+const imageLibraryOutputShape = {
+  state: z.enum(["completed", "partial"]),
+  entries: z.array(
+    z.object({
+      fileId: z.string(),
+      sourceUrl: z.string(),
+      turnId: z.string().nullable().optional(),
+      messageId: z.string().nullable().optional(),
+      turnIndex: z.number().nullable().optional(),
+      variantIndex: z.number(),
+      outputIndex: z.number(),
+      renderedWidth: z.number(),
+      renderedHeight: z.number(),
+      isThumbnail: z.boolean(),
+      duplicateNodeCount: z.number(),
+      mimeType: z.string().optional(),
+      byteSize: z.number().optional(),
+      sha256: z.string().optional(),
+      createdAt: z.string().optional(),
+    }),
+  ),
+  warnings: z.array(z.string()),
+} satisfies z.ZodRawShape;
+
 const extractImagesOutputShape = {
   conversationUrl: z.string(),
   uniqueGeneratedImageCount: z.number(),
@@ -214,28 +261,21 @@ export function registerChatgptImagesTool(server: McpServer): void {
     },
     async (input: unknown) => {
       const parsed = z.object(extractImagesInputShape).parse(input);
-      const { config: userConfig } = await loadUserConfig();
-      const cliBrowserConfig = parsed.remoteChrome
-        ? await buildBrowserConfig({ model: DEFAULT_MODEL, remoteChrome: parsed.remoteChrome })
-        : {};
-      const result = await extractChatgptImagesFromConfiguredBrowser({
+      const browserConfig = await resolveTrustedBrowserConfig(parsed.remoteChrome);
+      const result = await extractChatgptImageArtifacts({
         conversationUrl: parsed.conversationUrl,
         outputDir: parsed.outputDir,
         download: parsed.download,
         timeoutMs: parsed.timeoutMs,
         keepTab: parsed.keepTab,
-        config: {
-          ...(userConfig.browser ?? {}),
-          ...cliBrowserConfig,
-          remoteChrome: cliBrowserConfig.remoteChrome ?? userConfig.browser?.remoteChrome ?? null,
-        },
+        config: browserConfig,
       });
       const structuredContent = {
         conversationUrl: result.page.href,
         uniqueGeneratedImageCount: result.images.length,
         generatedImageNodeCount: result.page.generatedImageNodeCount,
         outputDir: result.outputDir,
-        images: result.images.map(({ domRecords: _domRecords, ...image }) => image),
+        images: result.images,
         artifacts: result.artifacts,
         warnings: result.warnings,
       };
@@ -262,34 +302,14 @@ export function registerChatgptImagesTool(server: McpServer): void {
     },
     async (input: unknown) => {
       const parsed = generateImagesInputSchema.parse(input);
-      const daemonJob = await maybeStartDaemonJob("chatgpt_generate_images", parsed);
-      if (daemonJob) {
-        const structuredContent = { ...daemonJob };
-        return {
-          structuredContent,
-          content: [
-            {
-              type: "text" as const,
-              text: `Started daemon-backed ChatGPT image generation job ${daemonJob.jobId}. Poll oracle_job_status with this jobId.`,
-            },
-          ],
-        };
-      }
-      const job = startMcpJob("chatgpt_generate_images", () => runGenerateImages(parsed));
-      const structuredContent = {
-        jobId: job.id,
-        kind: job.kind,
-        status: job.status,
-        startedAt: job.startedAt,
-        updatedAt: job.updatedAt,
-        pollTool: "oracle_job_status" as const,
-      };
+      const daemonJob = await startMcpJob("chatgpt_generate_images", parsed);
+      const structuredContent = { ...daemonJob };
       return {
         structuredContent,
         content: [
           {
             type: "text" as const,
-            text: `Started ChatGPT image generation job ${job.id}. Poll oracle_job_status with this jobId.`,
+            text: `Started durable ChatGPT image generation job ${daemonJob.jobId}. Poll oracle_job_status with this jobId.`,
           },
         ],
       };
@@ -331,34 +351,14 @@ export function registerChatgptImagesTool(server: McpServer): void {
     },
     async (input: unknown) => {
       const parsed = editImageInputSchema.parse(input);
-      const daemonJob = await maybeStartDaemonJob("chatgpt_edit_image", parsed);
-      if (daemonJob) {
-        const structuredContent = { ...daemonJob };
-        return {
-          structuredContent,
-          content: [
-            {
-              type: "text" as const,
-              text: `Started daemon-backed ChatGPT image edit job ${daemonJob.jobId}. Poll oracle_job_status with this jobId.`,
-            },
-          ],
-        };
-      }
-      const job = startMcpJob("chatgpt_edit_image", () => runEditImage(parsed));
-      const structuredContent = {
-        jobId: job.id,
-        kind: job.kind,
-        status: job.status,
-        startedAt: job.startedAt,
-        updatedAt: job.updatedAt,
-        pollTool: "oracle_job_status" as const,
-      };
+      const daemonJob = await startMcpJob("chatgpt_edit_image", parsed);
+      const structuredContent = { ...daemonJob };
       return {
         structuredContent,
         content: [
           {
             type: "text" as const,
-            text: `Started ChatGPT image edit job ${job.id}. Poll oracle_job_status with this jobId.`,
+            text: `Started durable ChatGPT image edit job ${daemonJob.jobId}. Poll oracle_job_status with this jobId.`,
           },
         ],
       };
@@ -388,35 +388,183 @@ export function registerChatgptImagesTool(server: McpServer): void {
       };
     },
   );
+  for (const registration of [
+    { name: "chatgpt_image_library_list", get: false },
+    { name: "chatgpt_image_library_get", get: true },
+  ] as const) {
+    server.registerTool(
+      registration.name,
+      {
+        title: registration.get ? "Get ChatGPT image library entry" : "List ChatGPT image library",
+        description: "Read public ChatGPT image library metadata without private DOM labels.",
+        inputSchema: registration.get ? imageLibraryGetInputShape : imageLibraryInputShape,
+        outputSchema: imageLibraryOutputShape,
+      },
+      async (input: unknown) => {
+        if (registration.get) {
+          const parsed = z.object(imageLibraryGetInputShape).parse(input);
+          const config = await resolveMcpBrowserConfig(parsed.remoteChrome);
+          const result = await listChatgptImageLibraryFromConfiguredBrowser({
+            config,
+            libraryUrl: parsed.libraryUrl,
+            timeoutMs: parsed.timeoutMs,
+            keepTab: parsed.keepTab,
+          });
+          const entries = result.entries.filter(
+            (entry) =>
+              entry.fileId === parsed.fileId &&
+              (parsed.turnId === undefined || entry.turnId === parsed.turnId) &&
+              (parsed.messageId === undefined || entry.messageId === parsed.messageId),
+          );
+          return {
+            structuredContent: { ...result, entries },
+            content: [
+              {
+                type: "text" as const,
+                text: `Found ${entries.length} image library entr${entries.length === 1 ? "y" : "ies"}.`,
+              },
+            ],
+          };
+        }
+        const parsed = z.object(imageLibraryInputShape).parse(input);
+        const config = await resolveMcpBrowserConfig(parsed.remoteChrome);
+        const result = await listChatgptImageLibraryFromConfiguredBrowser({
+          config,
+          libraryUrl: parsed.libraryUrl,
+          timeoutMs: parsed.timeoutMs,
+          keepTab: parsed.keepTab,
+        });
+        const entries = result.entries;
+        return {
+          structuredContent: { ...result, entries },
+          content: [
+            {
+              type: "text" as const,
+              text: `Found ${entries.length} image library entr${entries.length === 1 ? "y" : "ies"}.`,
+            },
+          ],
+        };
+      },
+    );
+  }
+
+  server.registerTool(
+    "chatgpt_get_image",
+    {
+      title: "Get ChatGPT image metadata",
+      description: "Get one exact generated image by file, turn, and message identity.",
+      inputSchema: imageGetInputShape,
+      outputSchema: extractImagesOutputShape,
+    },
+    async (input: unknown) => {
+      const parsed = z.object(imageGetInputShape).parse(input);
+      const config = await resolveMcpBrowserConfig(parsed.remoteChrome);
+      const result = await extractChatgptImageArtifacts({ ...parsed, config, download: false });
+      const images = result.images.filter(
+        (image) =>
+          image.fileId === parsed.fileId &&
+          (parsed.turnId === undefined || image.turnId === parsed.turnId) &&
+          (parsed.messageId === undefined || image.messageId === parsed.messageId),
+      );
+      return {
+        structuredContent: {
+          conversationUrl: result.page.href,
+          uniqueGeneratedImageCount: images.length,
+          generatedImageNodeCount: result.page.generatedImageNodeCount,
+          outputDir: result.outputDir,
+          images,
+          artifacts: [],
+          warnings: result.warnings,
+        },
+        content: [{ type: "text" as const, text: `Found ${images.length} exact image target(s).` }],
+      };
+    },
+  );
+
+  server.registerTool(
+    "chatgpt_download_image",
+    {
+      title: "Download ChatGPT image",
+      description: "Download one exact generated image at full quality with byte metadata.",
+      inputSchema: imageGetInputShape,
+      outputSchema: extractImagesOutputShape,
+    },
+    async (input: unknown) => {
+      const parsed = z.object(imageGetInputShape).parse(input);
+      const config = await resolveMcpBrowserConfig(parsed.remoteChrome);
+      const result = await extractChatgptImageArtifacts({ ...parsed, config, download: true });
+      const images = result.images.filter(
+        (image) =>
+          image.fileId === parsed.fileId &&
+          (parsed.turnId === undefined || image.turnId === parsed.turnId) &&
+          (parsed.messageId === undefined || image.messageId === parsed.messageId),
+      );
+      return {
+        structuredContent: {
+          conversationUrl: result.page.href,
+          uniqueGeneratedImageCount: images.length,
+          generatedImageNodeCount: result.page.generatedImageNodeCount,
+          outputDir: result.outputDir,
+          images,
+          artifacts: result.artifacts.filter((artifact) =>
+            images.some((image) => image.fileId === artifact.fileId),
+          ),
+          warnings: result.warnings,
+        },
+        content: [
+          { type: "text" as const, text: `Downloaded ${images.length} exact image target(s).` },
+        ],
+      };
+    },
+  );
 }
 
 async function runGenerateImages(parsed: z.infer<typeof generateImagesInputSchema>) {
   const config = await resolveMcpBrowserConfig(parsed.remoteChrome);
   const attachments = await resolveBrowserAttachments(parsed.files ?? []);
-  const generation = await createChatgptSession({
+  const sessionConfig = {
+    ...config,
+    url: parsed.projectUrl ?? config.url,
+    chatgptUrl: parsed.projectUrl ?? config.chatgptUrl,
+    modelStrategy: parsed.browserModelStrategy as BrowserModelStrategy,
+    desiredModel: parsed.browserModelLabel ?? config.desiredModel,
+    thinkingTime: (parsed.browserThinkingTime ?? config.thinkingTime) as
+      | ThinkingTimeLevel
+      | undefined,
+    thinkingFallback: parsed.thinkingFallback ?? config.thinkingFallback,
+  };
+  const operation = await generateChatgptImage({
     prompt: parsed.prompt,
     attachments,
     timeoutMs: parsed.timeoutMs ?? DEFAULT_CHATGPT_IMAGE_TURN_TIMEOUT_MS,
     includeSnapshot: true,
-    config: {
-      ...config,
-      url: parsed.projectUrl ?? config.url,
-      chatgptUrl: parsed.projectUrl ?? config.chatgptUrl,
-      modelStrategy: parsed.browserModelStrategy as BrowserModelStrategy,
-      desiredModel: parsed.browserModelLabel ?? config.desiredModel,
-      thinkingTime: (parsed.browserThinkingTime ?? config.thinkingTime) as
-        | ThinkingTimeLevel
-        | undefined,
-      thinkingFallback: parsed.thinkingFallback ?? config.thinkingFallback,
-    },
+    config: sessionConfig,
+    requireVerifiedMode: true,
+    verifyMode: () =>
+      verifyChatgptImageModeFromConfiguredBrowser({
+        config: sessionConfig,
+        timeoutMs: parsed.timeoutMs,
+      }),
   });
+  if (
+    operation.state !== "completed" ||
+    !operation.value ||
+    typeof operation.value !== "object" ||
+    !("turn" in operation.value)
+  ) {
+    throw new Error(
+      `${operation.failure?.code ?? operation.state}: ${operation.failure?.message ?? "ChatGPT image generation did not complete."}`,
+    );
+  }
+  const operationValue = operation.value as { turn: ChatgptTurnResult };
+  const generation = operationValue.turn;
   const extractionWarnings: string[] = [];
   const extractionTimeoutMs =
     parsed.extractionTimeoutMs ??
     Math.min(parsed.timeoutMs ?? DEFAULT_CHATGPT_IMAGE_TURN_TIMEOUT_MS, 60_000);
   const extraction =
     generation.conversationUrl && parsed.artifactTypes.includes("images")
-      ? await extractChatgptImagesFromConfiguredBrowser({
+      ? await extractChatgptImageArtifacts({
           conversationUrl: generation.conversationUrl,
           outputDir: parsed.outputDir,
           download: parsed.download,
@@ -469,7 +617,7 @@ async function runGenerateImages(parsed: z.infer<typeof generateImagesInputSchem
     outputDir: extraction?.outputDir,
     images:
       extraction && extraction.images.length > 0
-        ? extraction.images.map(({ domRecords: _domRecords, ...image }) => image)
+        ? extraction.images
         : (generation.generatedImages?.map(({ domRecords: _domRecords, ...image }) => image) ?? []),
     artifacts: extraction?.artifacts ?? [],
     sandboxArtifacts: sandboxExtraction?.sandboxArtifacts ?? generation.sandboxArtifacts ?? [],
@@ -483,30 +631,49 @@ async function runGenerateImages(parsed: z.infer<typeof generateImagesInputSchem
 async function runEditImage(parsed: z.infer<typeof editImageInputSchema>) {
   const config = await resolveMcpBrowserConfig(parsed.remoteChrome);
   const attachments = await resolveBrowserAttachments(parsed.files ?? []);
-  const generation = await createChatgptSession({
+  const sessionConfig = {
+    ...config,
+    url: parsed.projectUrl ?? config.url,
+    chatgptUrl: parsed.projectUrl ?? config.chatgptUrl,
+    modelStrategy: parsed.browserModelStrategy as BrowserModelStrategy,
+    desiredModel: parsed.browserModelLabel ?? config.desiredModel,
+    thinkingTime: (parsed.browserThinkingTime ?? config.thinkingTime) as
+      | ThinkingTimeLevel
+      | undefined,
+    thinkingFallback: parsed.thinkingFallback ?? config.thinkingFallback,
+  };
+  const operation = await editChatgptImage({
     prompt: parsed.prompt,
     attachments,
     timeoutMs: parsed.timeoutMs ?? DEFAULT_CHATGPT_IMAGE_TURN_TIMEOUT_MS,
     includeSnapshot: true,
-    config: {
-      ...config,
-      url: parsed.projectUrl ?? config.url,
-      chatgptUrl: parsed.projectUrl ?? config.chatgptUrl,
-      modelStrategy: parsed.browserModelStrategy as BrowserModelStrategy,
-      desiredModel: parsed.browserModelLabel ?? config.desiredModel,
-      thinkingTime: (parsed.browserThinkingTime ?? config.thinkingTime) as
-        | ThinkingTimeLevel
-        | undefined,
-      thinkingFallback: parsed.thinkingFallback ?? config.thinkingFallback,
-    },
+    config: sessionConfig,
+    requireVerifiedMode: true,
+    verifyMode: () =>
+      verifyChatgptImageModeFromConfiguredBrowser({
+        config: sessionConfig,
+        timeoutMs: parsed.timeoutMs,
+      }),
   });
+  if (
+    operation.state !== "completed" ||
+    !operation.value ||
+    typeof operation.value !== "object" ||
+    !("turn" in operation.value)
+  ) {
+    throw new Error(
+      `${operation.failure?.code ?? operation.state}: ${operation.failure?.message ?? "ChatGPT image edit did not complete."}`,
+    );
+  }
+  const operationValue = operation.value as { turn: ChatgptTurnResult };
+  const generation = operationValue.turn;
   const extractionWarnings: string[] = [];
   const extractionTimeoutMs =
     parsed.extractionTimeoutMs ??
     Math.min(parsed.timeoutMs ?? DEFAULT_CHATGPT_IMAGE_TURN_TIMEOUT_MS, 60_000);
   const extraction =
     generation.conversationUrl && parsed.artifactTypes.includes("images")
-      ? await extractChatgptImagesFromConfiguredBrowser({
+      ? await extractChatgptImageArtifacts({
           conversationUrl: generation.conversationUrl,
           outputDir: parsed.outputDir,
           download: parsed.download,
@@ -559,7 +726,7 @@ async function runEditImage(parsed: z.infer<typeof editImageInputSchema>) {
     outputDir: extraction?.outputDir,
     images:
       extraction && extraction.images.length > 0
-        ? extraction.images.map(({ domRecords: _domRecords, ...image }) => image)
+        ? extraction.images
         : (generation.generatedImages?.map(({ domRecords: _domRecords, ...image }) => image) ?? []),
     artifacts: extraction?.artifacts ?? [],
     sandboxArtifacts: sandboxExtraction?.sandboxArtifacts ?? generation.sandboxArtifacts ?? [],
@@ -575,23 +742,4 @@ async function runEditImage(parsed: z.infer<typeof editImageInputSchema>) {
   };
 }
 
-async function resolveMcpBrowserConfig(remoteChrome?: string) {
-  const { config: userConfig } = await loadUserConfig();
-  const cliBrowserConfig = remoteChrome
-    ? await buildBrowserConfig({ model: DEFAULT_MODEL, remoteChrome })
-    : {};
-  return {
-    ...(userConfig.browser ?? {}),
-    ...cliBrowserConfig,
-    remoteChrome: cliBrowserConfig.remoteChrome ?? userConfig.browser?.remoteChrome ?? null,
-  };
-}
-
-async function maybeStartDaemonJob(
-  kind: "chatgpt_generate_images" | "chatgpt_edit_image",
-  input: unknown,
-) {
-  const daemon = await resolveDaemonClientWithOptionalAutostart();
-  if (!daemon) return null;
-  return await daemon.startJob({ kind, input });
-}
+const resolveMcpBrowserConfig = resolveTrustedBrowserConfig;

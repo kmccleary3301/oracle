@@ -35,9 +35,16 @@ describe("buildBrowserConfig", () => {
     expect(sol.desiredModel).toBe("GPT-5.6 Sol");
   });
 
-  test("keeps version signal for gpt-5.5 Instant browser runs", async () => {
+  test("maps retired gpt-5.5 Instant to the current GPT-5.6 Sol Instant effort", async () => {
     const config = await buildBrowserConfig({ model: "gpt-5.5-instant" });
-    expect(config.desiredModel).toBe("GPT-5.5 Instant");
+    expect(config.desiredModel).toBe("GPT-5.6 Sol");
+    expect(config.thinkingTime).toBe("light");
+
+    const overridden = await buildBrowserConfig({
+      model: "gpt-5.5-instant",
+      browserThinkingTime: "extended",
+    });
+    expect(overridden.thinkingTime).toBe("extended");
   });
 
   test.each(["gpt-5.2", "gpt-5.2-instant", "gpt-5.2-thinking", "gpt-5.1"])(
@@ -157,6 +164,10 @@ describe("buildBrowserConfig", () => {
       browserAttachmentTimeout: "2m",
       browserProfileLockTimeout: "2m",
       browserMaxConcurrentTabs: "5",
+      browserResourceMonitorInterval: "250ms",
+      browserResourceRssSoftLimit: "200",
+      browserResourceRssHardLimit: "300",
+      browserResourceRssResumeLimit: "100",
       browserCookieWait: "4s",
       browserNoCookieSync: true,
       browserHeadless: true,
@@ -175,9 +186,13 @@ describe("buildBrowserConfig", () => {
       attachmentTimeoutMs: 120_000,
       profileLockTimeoutMs: 120_000,
       maxConcurrentTabs: 5,
+      resourceMonitorIntervalMs: 250,
+      resourceRssSoftLimitBytes: 200,
+      resourceRssHardLimitBytes: 300,
+      resourceRssResumeLimitBytes: 100,
       cookieSyncWaitMs: 4_000,
       cookieSync: false,
-      headless: undefined,
+      headless: true,
       hideWindow: true,
       keepBrowser: true,
       desiredModel: "Thinking 5.4",
@@ -280,6 +295,15 @@ describe("buildBrowserConfig", () => {
         browserMaxConcurrentTabs: "0",
       }),
     ).rejects.toThrow(/max concurrent tabs/i);
+  });
+
+  test("rejects invalid browser resource byte limits", async () => {
+    await expect(
+      buildBrowserConfig({
+        model: "gpt-5.4",
+        browserResourceRssHardLimit: "6GiB",
+      }),
+    ).rejects.toThrow(/positive integer byte count/i);
   });
 
   test("falls back to canonical label when override matches base model", async () => {
@@ -490,7 +514,7 @@ describe("buildBrowserConfig", () => {
 describe("resolveBrowserModelLabel", () => {
   test("returns canonical ChatGPT label when CLI value matches API model", () => {
     expect(resolveBrowserModelLabel("gpt-5.5-pro", "gpt-5.5-pro")).toBe("Pro");
-    expect(resolveBrowserModelLabel("gpt-5.5-instant", "gpt-5.5-instant")).toBe("GPT-5.5 Instant");
+    expect(resolveBrowserModelLabel("gpt-5.5-instant", "gpt-5.5-instant")).toBe("GPT-5.6 Sol");
     expect(resolveBrowserModelLabel("gpt-5.5", "gpt-5.5")).toBe("Thinking 5.5");
     expect(resolveBrowserModelLabel("gpt-5.4-pro", "gpt-5.4-pro")).toBe("Pro");
     expect(resolveBrowserModelLabel("gpt-5.4", "gpt-5.4")).toBe("Thinking 5.4");

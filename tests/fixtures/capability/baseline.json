@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "status": "ok",
+  "capturedAt": "2026-08-10T12:00:00.000Z",
+  "adapterVersion": "chatgpt-web-v1",
+  "remoteChrome": { "host": "private-host.example", "port": 9222 },
+  "page": { "identityClass": "chatgpt_app", "readyState": "complete", "locale": "en-US" },
+  "auth": { "state": "logged_in", "challenge": "none" },
+  "controls": {
+    "modes": ["chat", "work", "private mode secret"],
+    "models": ["gpt-5.6", "private model secret"],
+    "effort": ["standard", "private effort secret"],
+    "uploads": { "file": true, "image": true, "multiple": false }
+  },
+  "indicators": { "project": true, "tools": ["browser", "private connector secret"] },
+  "fingerprint": {
+    "algorithm": "sha256",
+    "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "structure": {
+      "readyState": "complete",
+      "landmarkCount": 4,
+      "buttonCount": 12,
+      "inputCount": 2,
+      "linkCount": 8,
+      "dialogCount": 0,
+      "menuCount": 1
+    }
+  },
+  "privateSourceSecret": "fixture secret must never be emitted"
+}

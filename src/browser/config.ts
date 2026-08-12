@@ -5,10 +5,13 @@ import {
   DEFAULT_MODEL_TARGET,
 } from "./constants.js";
 import { normalizeBrowserModelStrategy } from "./modelStrategy.js";
-import {
-  DEFAULT_MAX_CONCURRENT_CHATGPT_TABS,
-  normalizeMaxConcurrentTabs,
-} from "./tabLeaseRegistry.js";
+import { DEFAULT_BROWSER_RESOURCE_WATCHDOG_CONFIG } from "./resourceWatchdog.js";
+const DEFAULT_MAX_CONCURRENT_CHATGPT_TABS = 3;
+
+function normalizeMaxConcurrentTabs(value: unknown): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_CONCURRENT_CHATGPT_TABS;
+}
 import type { BrowserAutomationConfig, ResolvedBrowserConfig } from "./types.js";
 import { normalizeChatgptUrl } from "./utils.js";
 import os from "node:os";
@@ -47,6 +50,10 @@ export const DEFAULT_BROWSER_CONFIG: ResolvedBrowserConfig = {
   autoReattachDelayMs: 0,
   autoReattachIntervalMs: 0,
   autoReattachTimeoutMs: 180_000,
+  resourceMonitorIntervalMs: DEFAULT_BROWSER_RESOURCE_WATCHDOG_CONFIG.pollIntervalMs,
+  resourceRssSoftLimitBytes: DEFAULT_BROWSER_RESOURCE_WATCHDOG_CONFIG.rssSoftBytes,
+  resourceRssHardLimitBytes: DEFAULT_BROWSER_RESOURCE_WATCHDOG_CONFIG.rssHardBytes,
+  resourceRssResumeLimitBytes: DEFAULT_BROWSER_RESOURCE_WATCHDOG_CONFIG.rssResumeBytes,
   cookieSync: true,
   cookieNames: DEFAULT_CHATGPT_COOKIE_NAMES,
   cookieSyncWaitMs: 0,
@@ -132,6 +139,14 @@ export function resolveBrowserConfig(
       config?.autoReattachIntervalMs ?? DEFAULT_BROWSER_CONFIG.autoReattachIntervalMs,
     autoReattachTimeoutMs:
       config?.autoReattachTimeoutMs ?? DEFAULT_BROWSER_CONFIG.autoReattachTimeoutMs,
+    resourceMonitorIntervalMs:
+      config?.resourceMonitorIntervalMs ?? DEFAULT_BROWSER_CONFIG.resourceMonitorIntervalMs,
+    resourceRssSoftLimitBytes:
+      config?.resourceRssSoftLimitBytes ?? DEFAULT_BROWSER_CONFIG.resourceRssSoftLimitBytes,
+    resourceRssHardLimitBytes:
+      config?.resourceRssHardLimitBytes ?? DEFAULT_BROWSER_CONFIG.resourceRssHardLimitBytes,
+    resourceRssResumeLimitBytes:
+      config?.resourceRssResumeLimitBytes ?? DEFAULT_BROWSER_CONFIG.resourceRssResumeLimitBytes,
     cookieSync: config?.cookieSync ?? cookieSyncDefault,
     cookieNames: config?.cookieNames ?? DEFAULT_BROWSER_CONFIG.cookieNames,
     cookieSyncWaitMs: config?.cookieSyncWaitMs ?? DEFAULT_BROWSER_CONFIG.cookieSyncWaitMs,
