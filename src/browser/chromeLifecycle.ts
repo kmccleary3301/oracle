@@ -598,11 +598,14 @@ export async function connectToRemoteChromeTarget(
   },
 ): Promise<RemoteChromeConnection> {
   let lease: CoordinatorTargetLease | undefined;
+  const coordinatorOptions = options.coordinator ?? {
+    ownerStartToken: `controller:${process.pid}`,
+  };
   const createdByOracle = !options.targetId;
   if (!options.browserWSEndpoint) {
     if (options.targetId) {
       lease = await attachCoordinatorTarget(host, port, options.targetId, {
-        ...(options.coordinator ?? {}),
+        ...coordinatorOptions,
         role: options.role,
       });
     }
@@ -636,13 +639,13 @@ export async function connectToRemoteChromeTarget(
   try {
     if (options.targetId) {
       lease = await attachCoordinatorTarget(host, port, options.targetId, {
-        ...(options.coordinator ?? {}),
+        ...coordinatorOptions,
         role: options.role,
       });
     }
     if (!options.targetId) {
       lease = await reserveCoordinatorTarget(host, port, {
-        ...(options.coordinator ?? {}),
+        ...coordinatorOptions,
         role: options.role,
         url: options.targetUrl ?? "about:blank",
       });
