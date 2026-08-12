@@ -82,6 +82,7 @@ jobs:
           name: release-evidence-${{ matrix.platform }}-${{ github.run_id }}
           if-no-files-found: error
           path: .release-evidence/
+          include-hidden-files: true
       - name: Attest platform manifest with GitHub OIDC
         uses: actions/attest-build-provenance@v2
         with:
