@@ -353,7 +353,7 @@ export async function runResourceSoak(
           provider: dependencies.processProvider,
         });
         assertLiveChromeSample(sample, rootPid);
-        samples.push(sample);
+        samples.push({ ...sample, processes: [] });
 
         await browserClient.Target.closeTarget({ targetId });
         const absentInventory = await waitForTarget(

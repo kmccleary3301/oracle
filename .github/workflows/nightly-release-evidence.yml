@@ -100,7 +100,7 @@ jobs:
       - name: Run focused resource proofs
         run: pnpm exec vitest run tests/benchmark/resourceCycleProof.test.ts tests/browser/resourceGovernor.test.ts tests/browser/resourceTelemetry.test.ts
       - name: Run uninterrupted resource soak
-        run: pnpm benchmark:resource-soak --duration-ms "${{ env.SOAK_DURATION_MS }}" --output ".release-evidence/soak-macos.json" --deterministic-output ".release-evidence/soak-fixture-macos.json"
+        run: pnpm benchmark:resource-soak --duration-ms "${{ env.SOAK_DURATION_MS }}" --sample-interval-ms 10000 --output ".release-evidence/soak-macos.json" --deterministic-output ".release-evidence/soak-fixture-macos.json"
       - name: Emit sanitized soak manifest
         run: >-
           pnpm release:evidence-manifest soak
