@@ -86,4 +86,4 @@ jobs:
       - name: Attest platform manifest with GitHub OIDC
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: .release-evidence/platform-${{ matrix.platform }}.json
+          subject-path: ${{ github.workspace }}/.release-evidence/platform-${{ matrix.platform }}.json
