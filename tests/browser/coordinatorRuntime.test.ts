@@ -32,7 +32,12 @@ async function dbPath(): Promise<string> {
 function open(databasePath: string, options: ConstructorParameters<typeof CoordinatorRuntime>[1]) {
   const runtime = new CoordinatorRuntime(
     { host: "127.0.0.1", port: 19222 },
-    { databasePath, ...options },
+    {
+      databasePath,
+      processProvider: { listProcesses: async () => [] },
+      endpointProbe: async () => ({ ok: false }),
+      ...options,
+    },
   );
   runtimes.push(runtime);
   return runtime;

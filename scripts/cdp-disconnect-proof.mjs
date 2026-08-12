@@ -57,6 +57,29 @@ function resolveChromePath() {
     "Chrome/Chromium not found. Set CHROME_PATH to a browser binary (Linux: chromium or google-chrome).",
   );
 }
+function withDeadline(promise, label, timeoutMs = 15_000) {
+  let timeout;
+  const deadline = new Promise((_, reject) => {
+    timeout = setTimeout(
+      () => reject(new Error(`${label} timed out after ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timeout));
+}
+
+async function connectPage(port, targetId) {
+  let pageTargetId = targetId;
+  if (!pageTargetId) {
+    const targets = await withDeadline(listTargets(port), "list Chrome targets");
+    pageTargetId = targets.find((target) => target.type === "page")?.id;
+  }
+  if (!pageTargetId) throw new Error("no page target available for CDP connection");
+  return await withDeadline(
+    CDP({ host: "127.0.0.1", port, target: pageTargetId }),
+    "connect to Chrome page target",
+  );
+}
 
 async function listTargets(port) {
   const res = await fetch(`http://127.0.0.1:${port}/json/list`);
@@ -96,7 +119,7 @@ async function run() {
     port = chrome.port;
     log("chrome-up", `port=${port} pid=${chrome.pid}`);
 
-    client = await CDP({ host: "127.0.0.1", port });
+    client = await connectPage(port);
     const { Page, Runtime } = client;
     await Page.enable();
     await Page.navigate({
@@ -144,7 +167,7 @@ async function run() {
     log("case-1-pass", "recoverableDisconnect path; sessionRunner would auto-reattach");
 
     log("case-2", "close target + kill Chrome");
-    client = await CDP({ host: "127.0.0.1", port });
+    client = await connectPage(port, targetId);
     try {
       await client.Target.closeTarget({ targetId });
     } catch (err) {
