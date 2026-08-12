@@ -274,13 +274,25 @@ export async function verifyThinkingTimeSelection(
   Runtime: ChromeClient["Runtime"],
   level: ThinkingTimeLevel,
 ): Promise<ThinkingTimeVerificationResult> {
-  const diagnostics = await inspectThinkingControls(Runtime, level);
+  const outcome = await Runtime.evaluate({
+    expression: buildThinkingControlsInspectionExpression(level),
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  const value = outcome.result?.value as
+    | (Partial<ThinkingControlsDiagnostics> & {
+        actualThinkingTime?: string | null;
+        diagnostics?: Partial<ThinkingControlsDiagnostics>;
+      })
+    | undefined;
+  const diagnostics = normalizeThinkingControlsDiagnostics(value?.diagnostics ?? value, level);
   const normalizedLevel = normalizeThinkingTimeLevel(level) ?? level;
   const selectedControls = [...diagnostics.chipCandidates, ...diagnostics.menuControls]
     .filter((control) => control.selected)
     .map((control) => [control.label, control.ariaLabel, control.testId].filter(Boolean).join(" "))
     .filter(Boolean);
   const visibleLabels = [
+    value?.actualThinkingTime ?? "",
     ...selectedControls,
     ...diagnostics.chipCandidates.map((control) =>
       [control.label, control.ariaLabel, control.testId].filter(Boolean).join(" "),
@@ -290,7 +302,7 @@ export async function verifyThinkingTimeSelection(
     requestedThinkingTime: level,
     normalizedThinkingTime: normalizedLevel,
     matches: visibleLabels.some((label) => thinkingLabelMatchesLevel(label, normalizedLevel)),
-    actualThinkingTime: visibleLabels[0] ?? null,
+    actualThinkingTime: value?.actualThinkingTime ?? visibleLabels[0] ?? null,
     diagnostics,
   };
 }
@@ -1296,6 +1308,27 @@ export function buildThinkingTimeExpressionForTest(
   desiredModel?: string | null,
 ): string {
   return buildThinkingTimeExpression(level, desiredModel);
+}
+
+function thinkingLabelMatchesLevel(label: string, level: ThinkingTimeLevel): boolean {
+  const normalized = label.toLowerCase().replace(/\s+/g, " ").trim();
+  if (!normalized) return false;
+  if (level === "extra-high") {
+    return /extra high|sehr hoch|极高/.test(normalized);
+  }
+  if (level === "heavy") {
+    return /heavy|schwer|重度|加重/.test(normalized);
+  }
+  if (level === "extended") {
+    return (
+      !/extra high|sehr hoch|极高/.test(normalized) &&
+      /extended|\bhigh\b|\bhoch\b|erweitert|扩展|深度|加强|高/.test(normalized)
+    );
+  }
+  if (level === "standard") {
+    return /standard|medium|mittel|标准|中/.test(normalized);
+  }
+  return /light|instant|sofort|leicht|轻|极速/.test(normalized);
 }
 
 function inferThinkingTargetModelKind(

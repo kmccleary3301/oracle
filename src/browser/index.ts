@@ -217,7 +217,10 @@ function isReattachableCaptureError(error: unknown): error is BrowserAutomationE
   return stage === "assistant-timeout" || stage === "assistant-recheck";
 }
 
-type PreservedBrowserErrorKind = "cloudflare-challenge" | "reattachable-capture";
+type PreservedBrowserErrorKind =
+  | "cloudflare-challenge"
+  | "reattachable-capture"
+  | "manual-intervention";
 
 function classifyPreservedBrowserError(
   error: unknown,
@@ -226,6 +229,12 @@ function classifyPreservedBrowserError(
   if (headless) return null;
   if (isCloudflareChallengeError(error)) return "cloudflare-challenge";
   if (isReattachableCaptureError(error)) return "reattachable-capture";
+  if (
+    error instanceof BrowserAutomationError &&
+    Boolean((error.details as { manualIntervention?: unknown } | undefined)?.manualIntervention)
+  ) {
+    return "manual-intervention";
+  }
   return null;
 }
 
@@ -2768,7 +2777,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       warnings: [
         thinkingFallbackWarning(config.thinkingFallback, thinkingTimeSelection),
         ...sandboxArtifactResult.warnings,
-      ].filter((warning): warning is string => Boolean(warning)),
+      ].filter((warning): warning is BrowserRunWarning => Boolean(warning)),
     };
   } catch (error) {
     const normalizedError = error instanceof Error ? error : new Error(String(error));
@@ -4329,7 +4338,7 @@ async function runRemoteBrowserMode(
       warnings: [
         thinkingFallbackWarning(config.thinkingFallback, thinkingTimeSelection),
         ...sandboxArtifactResult.warnings,
-      ].filter((warning): warning is string => Boolean(warning)),
+      ].filter((warning): warning is BrowserRunWarning => Boolean(warning)),
     };
   } catch (error) {
     const normalizedError = error instanceof Error ? error : new Error(String(error));

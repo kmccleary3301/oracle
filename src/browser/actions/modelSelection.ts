@@ -179,6 +179,8 @@ export function assertResolvedModelSelectionForTest(
   resolvedLabel: string,
 ): void {
   assertResolvedModelSelection(desiredModel, resolvedLabel);
+}
+
 export async function verifyModelSelection(
   Runtime: ChromeClient["Runtime"],
   desiredModel: string,
