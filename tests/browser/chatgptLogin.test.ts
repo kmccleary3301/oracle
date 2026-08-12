@@ -44,6 +44,7 @@ describe("chatgpt login helpers", () => {
 
   test("maps WSL Windows Chrome profiles to LocalAppData-backed storage", async () => {
     vi.stubEnv("WSL_DISTRO_NAME", "Ubuntu");
+    vi.stubEnv("LOCALAPPDATA", "");
     detectChromeBinaryMock.mockResolvedValue({
       path: "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe",
     });

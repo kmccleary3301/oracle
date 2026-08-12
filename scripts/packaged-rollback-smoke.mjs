@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const CURRENT_VERSION = "2.0.0-current";
 const PREVIOUS_VERSION = "1.0.0-previous";
+const NPM_COMMAND = process.platform === "win32" ? "npm.cmd" : "npm";
 
 function run(command, args, options = {}) {
   try {
@@ -87,7 +88,7 @@ if (process.env.ORACLE_ROLLBACK_INJECT_FAILURE === "1") {
 }
 
 function packFixture(root, destination) {
-  const packed = run("npm", ["pack", "--pack-destination", destination], { cwd: root });
+  const packed = run(NPM_COMMAND, ["pack", "--pack-destination", destination], { cwd: root });
   if (packed.status !== 0) throw new Error(`npm pack failed: ${packed.stderr}`);
   const match = packed.stdout.trim().split(/\r?\n/).at(-1)?.trim();
   if (!match || !match.endsWith(".tgz"))
@@ -96,9 +97,13 @@ function packFixture(root, destination) {
 }
 
 function install(app, tarball) {
-  const result = run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", tarball], {
-    cwd: app,
-  });
+  const result = run(
+    NPM_COMMAND,
+    ["install", "--ignore-scripts", "--no-audit", "--no-fund", tarball],
+    {
+      cwd: app,
+    },
+  );
   if (result.status !== 0) throw new Error(`npm install failed: ${result.stderr}`);
 }
 

@@ -1404,7 +1404,33 @@ async function atomicWriteText(filePath: string, content: string): Promise<void>
   } finally {
     await handle.close();
   }
-  await fs.rename(tempPath, filePath);
+  try {
+    await replaceFile(tempPath, filePath);
+  } finally {
+    await fs.rm(tempPath, { force: true }).catch(() => undefined);
+  }
+}
+
+async function replaceFile(tempPath: string, filePath: string): Promise<void> {
+  const deadline = Date.now() + (process.platform === "win32" ? 5_000 : 0);
+  let delayMs = 10;
+  while (true) {
+    try {
+      await fs.rename(tempPath, filePath);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (
+        process.platform !== "win32" ||
+        (code !== "EPERM" && code !== "EACCES") ||
+        Date.now() >= deadline
+      ) {
+        throw error;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+      delayMs = Math.min(delayMs * 2, 250);
+    }
+  }
 }
 
 function serializePersistedJson(value: unknown): string {

@@ -695,11 +695,11 @@ async function resolveLocalLoginProfileDir(
   config: ReturnType<typeof resolveBrowserConfig>,
   logger: BrowserLogger,
 ): Promise<string> {
-  const profilePath = isWsl() ? path.posix : path;
-  const resolved = profilePath.resolve(requestedProfileDir);
-  if (!(await shouldUseWindowsLocalProfileDir(config))) {
-    return resolved;
+  const useWindowsLocalProfileDir = await shouldUseWindowsLocalProfileDir(config);
+  if (!useWindowsLocalProfileDir) {
+    return path.resolve(requestedProfileDir);
   }
+  const resolved = path.posix.resolve(requestedProfileDir);
   if (isWindowsMountedPath(resolved)) {
     return resolved;
   }
@@ -708,7 +708,7 @@ async function resolveLocalLoginProfileDir(
   const localAppDataWsl = isWindowsMountedPath(localAppData)
     ? localAppData
     : await convertWindowsPathToWsl(localAppData);
-  const slug = sanitizeProfileLabel(profilePath.basename(resolved) || "browser-profile");
+  const slug = sanitizeProfileLabel(path.posix.basename(resolved) || "browser-profile");
   const hash = crypto.createHash("sha1").update(resolved).digest("hex").slice(0, 10);
   const mapped = path.posix.join(
     localAppDataWsl.replaceAll("\\", "/"),
