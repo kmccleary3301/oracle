@@ -2,6 +2,7 @@
 import { createHash, sign as signPayload } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   hashReleaseEvidence,
   releaseEvidenceSigningPayload,
@@ -297,7 +298,7 @@ async function main(args = process.argv.slice(2)): Promise<number> {
   }
   return 0;
 }
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     process.exitCode = await main();
   } catch (error) {

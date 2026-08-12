@@ -695,7 +695,11 @@ export async function createOracleDaemonServer(
             }
           } else {
             const runningJob = await store.readJob(jobId);
-            if (runningJob && runningJob.status !== "cancel_requested") {
+            if (
+              runningJob &&
+              runningJob.status !== "cancel_requested" &&
+              !isTerminalStatus(runningJob.status)
+            ) {
               await store.transitionJob({
                 id: jobId,
                 expectedStatus: runningJob.status,

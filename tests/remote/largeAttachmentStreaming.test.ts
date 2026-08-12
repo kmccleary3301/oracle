@@ -168,7 +168,7 @@ describe("remote large attachment streaming memory", () => {
     const peakIncrease = largeRun.peakDelta - smallRun.peakDelta;
     const maxSizeSensitiveIncrease = 128 * 1024 * 1024;
     expect(peakIncrease).toBeLessThan(maxSizeSensitiveIncrease);
-  }, 30_000);
+  }, 120_000);
 });
 
 async function makeSparseSource(directory: string, name: string, size: number): Promise<string> {

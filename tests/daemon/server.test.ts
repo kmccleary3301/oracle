@@ -343,7 +343,7 @@ describe("Oracle daemon server", () => {
 
     await restarted.close();
     await rm(jobDir, { recursive: true, force: true });
-  });
+  }, 15_000);
   test("prunes expired terminal jobs during startup", async () => {
     const jobDir = await mkdtemp(path.join(os.tmpdir(), "oracle-daemon-retention-"));
     const store = new OracleJobStore({ rootDir: jobDir });

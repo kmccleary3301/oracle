@@ -6,7 +6,11 @@ import { fileURLToPath } from "node:url";
 
 const CURRENT_VERSION = "2.0.0-current";
 const PREVIOUS_VERSION = "1.0.0-previous";
-const NPM_COMMAND = process.platform === "win32" ? "npm.cmd" : "npm";
+const NPM_COMMAND = process.platform === "win32" ? process.execPath : "npm";
+const NPM_ARGUMENT_PREFIX =
+  process.platform === "win32"
+    ? [resolve(process.execPath, "..", "node_modules", "npm", "bin", "npm-cli.js")]
+    : [];
 
 function run(command, args, options = {}) {
   try {
@@ -25,6 +29,9 @@ function run(command, args, options = {}) {
       stderr: String(error?.stderr ?? ""),
     };
   }
+}
+function runNpm(args, options = {}) {
+  return run(NPM_COMMAND, [...NPM_ARGUMENT_PREFIX, ...args], options);
 }
 
 function writeFixture(root, version, mode) {
@@ -88,7 +95,7 @@ if (process.env.ORACLE_ROLLBACK_INJECT_FAILURE === "1") {
 }
 
 function packFixture(root, destination) {
-  const packed = run(NPM_COMMAND, ["pack", "--pack-destination", destination], { cwd: root });
+  const packed = runNpm(["pack", "--pack-destination", destination], { cwd: root });
   if (packed.status !== 0) throw new Error(`npm pack failed: ${packed.stderr}`);
   const match = packed.stdout.trim().split(/\r?\n/).at(-1)?.trim();
   if (!match || !match.endsWith(".tgz"))
@@ -97,13 +104,9 @@ function packFixture(root, destination) {
 }
 
 function install(app, tarball) {
-  const result = run(
-    NPM_COMMAND,
-    ["install", "--ignore-scripts", "--no-audit", "--no-fund", tarball],
-    {
-      cwd: app,
-    },
-  );
+  const result = runNpm(["install", "--ignore-scripts", "--no-audit", "--no-fund", tarball], {
+    cwd: app,
+  });
   if (result.status !== 0) throw new Error(`npm install failed: ${result.stderr}`);
 }
 
@@ -139,7 +142,7 @@ export async function runPackagedRollbackSmoke() {
     writeFixture(previous, PREVIOUS_VERSION, "previous");
     const currentTarball = packFixture(current, tarballs);
     const previousTarball = packFixture(previous, tarballs);
-    const init = run("npm", ["init", "-y"], { cwd: app });
+    const init = runNpm(["init", "-y"], { cwd: app });
     if (init.status !== 0) throw new Error(`npm init failed: ${init.stderr}`);
 
     install(app, currentTarball);

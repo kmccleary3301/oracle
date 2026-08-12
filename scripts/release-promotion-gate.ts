@@ -2,6 +2,7 @@
 import { createHash, createPublicKey, verify as verifySignature } from "node:crypto";
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 export const RELEASE_EVIDENCE_SCHEMA_VERSION = 1 as const;
 export const REQUIRED_PLATFORMS = ["macos", "linux", "windows"] as const;
@@ -1038,4 +1039,5 @@ async function main(args = process.argv.slice(2)): Promise<number> {
   else process.stdout.write(output);
   return result.passed ? 0 : 1;
 }
-if (import.meta.url === `file://${process.argv[1]}`) process.exitCode = await main();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
+  process.exitCode = await main();

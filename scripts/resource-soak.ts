@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { pathToFileURL } from "node:url";
 import { launch } from "chrome-launcher";
 import { computeAdaptivePollPlan, type AdaptivePollState } from "../src/jobs/adaptivePolling.js";
 import { connectToChrome } from "../src/browser/chromeLifecycle.js";
@@ -550,7 +551,7 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
   return 0;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((error: unknown) => {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;

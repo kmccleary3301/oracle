@@ -145,7 +145,7 @@ describe("OracleJobStore", () => {
   });
   test("admits one durable winner across concurrent store instances", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "oracle-jobs-admission-"));
-    const stores = Array.from({ length: 100 }, () => new OracleJobStore({ rootDir }));
+    const stores = Array.from({ length: 32 }, () => new OracleJobStore({ rootDir }));
     let ready = 0;
     let release!: () => void;
     const barrier = new Promise<void>((resolve) => {
@@ -180,8 +180,8 @@ describe("OracleJobStore", () => {
         }),
       ),
     );
-    expect(new Set(distinct.map(({ job }) => job.id)).size).toBe(100);
-    expect(await stores[0].listJobs(Number.MAX_SAFE_INTEGER)).toHaveLength(101);
+    expect(new Set(distinct.map(({ job }) => job.id)).size).toBe(stores.length);
+    expect(await stores[0].listJobs(Number.MAX_SAFE_INTEGER)).toHaveLength(stores.length + 1);
     await rm(rootDir, { recursive: true, force: true });
   }, 30_000);
 

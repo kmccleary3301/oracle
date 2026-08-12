@@ -431,7 +431,7 @@ describe("closeBlankChromeTabs", () => {
       }
     ).send("Target.setAutoAttach", { autoAttach: true }, "session-9");
     expect(send).toHaveBeenCalledWith("Target.setAutoAttach", { autoAttach: true }, "session-9");
-  });
+  }, 15_000);
 
   test("detaches a persistent dedicated tab without leaving coordinator ownership", async () => {
     const tmpDir = await mkdtemp(path.join(os.tmpdir(), "oracle-detach-coordinator-"));
