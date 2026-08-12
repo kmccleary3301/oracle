@@ -76,6 +76,8 @@ jobs:
           --source-ref "${{ github.ref }}"
           --commit "${{ github.sha }}"
           --output ".release-evidence/platform-${{ matrix.platform }}.json"
+      - name: Stage platform manifest for attestation
+        run: node -e "require('node:fs').copyFileSync('.release-evidence/platform-${{ matrix.platform }}.json', 'platform-${{ matrix.platform }}.json')"
       - name: Upload platform evidence
         uses: actions/upload-artifact@v6
         with:
@@ -86,4 +88,4 @@ jobs:
       - name: Attest platform manifest with GitHub OIDC
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: ${{ github.workspace }}/.release-evidence/platform-${{ matrix.platform }}.json
+          subject-path: platform-${{ matrix.platform }}.json
