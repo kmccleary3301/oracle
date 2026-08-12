@@ -695,7 +695,8 @@ async function resolveLocalLoginProfileDir(
   config: ReturnType<typeof resolveBrowserConfig>,
   logger: BrowserLogger,
 ): Promise<string> {
-  const resolved = path.resolve(requestedProfileDir);
+  const profilePath = isWsl() ? path.posix : path;
+  const resolved = profilePath.resolve(requestedProfileDir);
   if (!(await shouldUseWindowsLocalProfileDir(config))) {
     return resolved;
   }
@@ -707,9 +708,14 @@ async function resolveLocalLoginProfileDir(
   const localAppDataWsl = isWindowsMountedPath(localAppData)
     ? localAppData
     : await convertWindowsPathToWsl(localAppData);
-  const slug = sanitizeProfileLabel(path.basename(resolved) || "browser-profile");
+  const slug = sanitizeProfileLabel(profilePath.basename(resolved) || "browser-profile");
   const hash = crypto.createHash("sha1").update(resolved).digest("hex").slice(0, 10);
-  const mapped = path.join(localAppDataWsl, "Oracle", "browser-profiles", `${slug}-${hash}`);
+  const mapped = path.posix.join(
+    localAppDataWsl.replaceAll("\\", "/"),
+    "Oracle",
+    "browser-profiles",
+    `${slug}-${hash}`,
+  );
   logger(
     `WSL detected with Windows Chrome; using Windows-local login profile ${mapped} for DevTools compatibility.`,
   );

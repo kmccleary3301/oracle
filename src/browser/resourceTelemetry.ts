@@ -296,7 +296,7 @@ export function createPlatformProcessProvider(
     async listProcesses() {
       if (platform === "win32") {
         const script = [
-          "$ErrorActionPreference='SilentlyContinue'",
+          "$ErrorActionPreference='SilentlyContinue';",
           "Get-CimInstance Win32_Process | ForEach-Object {",
           "$p=Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue;",
           "[PSCustomObject]@{ProcessId=$_.ProcessId;ParentProcessId=$_.ParentProcessId;CreationDate=$_.CreationDate;CommandLine=$_.CommandLine;WorkingSetBytes=$_.WorkingSetSize;CpuTime100ns=if($p){[int64](($p.UserProcessorTime+$p.PrivilegedProcessorTime).TotalMilliseconds*10000)}else{$null}}",

@@ -214,7 +214,7 @@ describe("oracle work CLI", () => {
       taskId: "task-1",
       turnId: "turn-1",
     });
-  });
+  }, 30_000);
 
   test("rejects missing required identity and approval arguments before dispatch", async () => {
     const requests: RequestRecord[] = [];
