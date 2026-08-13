@@ -30,10 +30,15 @@ import {
   terminateVerifiedOwnedChromeTree,
   type BrowserResourceWatchdog,
 } from "./resourceWatchdog.js";
+import {
+  startDetachedBrowserResourceWatchdog,
+  type DetachedBrowserResourceWatchdog,
+} from "./resourceWatchdogDetached.js";
 export interface MonitoredLaunchedChrome extends LaunchedChrome {
   host?: string;
   resourceExhaustion?: Promise<never>;
   stopResourceWatchdog?: () => void;
+  stopDetachedResourceWatchdog?: () => Promise<void>;
 }
 
 export async function launchChrome(
@@ -101,6 +106,7 @@ export async function launchChrome(
   const monitored = Object.assign(launcher, {
     host: connectHost ?? "127.0.0.1",
   }) as MonitoredLaunchedChrome;
+  let detachedWatchdog: DetachedBrowserResourceWatchdog | null = null;
   if (!connectHost) {
     if (typeof launcher.pid !== "number") {
       await killOwnedChrome(false);
@@ -109,7 +115,7 @@ export async function launchChrome(
         { stage: "browser-resource-limit", reason: "root_pid_unavailable" },
       );
     }
-    let watchdog: BrowserResourceWatchdog;
+    let watchdog: BrowserResourceWatchdog | null = null;
     try {
       watchdog = await startOwnedChromeResourceWatchdog({
         rootPid: launcher.pid,
@@ -132,9 +138,25 @@ export async function launchChrome(
           await killOwnedChrome(true);
         },
       });
+      detachedWatchdog = await startDetachedBrowserResourceWatchdog({
+        rootPid: launcher.pid,
+        profilePath: userDataDir,
+        logger,
+        config: {
+          pollIntervalMs: config.resourceMonitorIntervalMs,
+          rssSoftBytes: config.resourceRssSoftLimitBytes,
+          rssHardBytes: config.resourceRssHardLimitBytes,
+          rssResumeBytes: config.resourceRssResumeLimitBytes,
+        },
+      });
     } catch (error) {
+      watchdog?.stop();
+      await detachedWatchdog?.stop();
       await killOwnedChrome(false);
       throw error;
+    }
+    if (!watchdog) {
+      throw new Error("Oracle failed to initialize the owned Chrome resource watchdog.");
     }
     logger(
       `[browser-resource] Monitoring owned Chrome every ${config.resourceMonitorIntervalMs}ms; ` +
@@ -143,11 +165,17 @@ export async function launchChrome(
     );
     monitored.resourceExhaustion = watchdog.exhaustion;
     monitored.stopResourceWatchdog = () => {
-      watchdog.stop();
+      watchdog?.stop();
       clearResourceGate();
     };
+    monitored.stopDetachedResourceWatchdog = async () => {
+      const active = detachedWatchdog;
+      detachedWatchdog = null;
+      await active?.stop();
+    };
     monitored.kill = async () => {
-      watchdog.stop();
+      watchdog?.stop();
+      await monitored.stopDetachedResourceWatchdog?.();
       await killOwnedChrome(true);
     };
   }
@@ -160,6 +188,7 @@ export async function launchChrome(
 export interface LocalChromeResourceMonitor {
   resourceExhaustion: Promise<never>;
   stopResourceWatchdog: () => void;
+  stopDetachedResourceWatchdog?: () => Promise<void>;
 }
 
 export interface MonitorLocalChromeProcessInput {
@@ -217,6 +246,24 @@ export async function monitorLocalChromeProcess(
       clearResourceGate();
     },
   });
+  let detachedWatchdog: DetachedBrowserResourceWatchdog | null = null;
+  try {
+    detachedWatchdog = await startDetachedBrowserResourceWatchdog({
+      rootPid: pid,
+      profilePath: profileDir,
+      logger,
+      config: {
+        pollIntervalMs: config.resourceMonitorIntervalMs,
+        rssSoftBytes: config.resourceRssSoftLimitBytes,
+        rssHardBytes: config.resourceRssHardLimitBytes,
+        rssResumeBytes: config.resourceRssResumeLimitBytes,
+      },
+    });
+  } catch (error) {
+    watchdog.stop();
+    clearResourceGate();
+    throw error;
+  }
   logger(
     `[browser-resource] Monitoring adopted Chrome pid ${pid} every ` +
       `${config.resourceMonitorIntervalMs}ms; soft ` +
@@ -228,6 +275,11 @@ export async function monitorLocalChromeProcess(
     stopResourceWatchdog: () => {
       watchdog.stop();
       clearResourceGate();
+    },
+    stopDetachedResourceWatchdog: async () => {
+      const active = detachedWatchdog;
+      detachedWatchdog = null;
+      await active?.stop();
     },
   };
 }

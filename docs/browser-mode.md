@@ -277,7 +277,7 @@ For live concurrency smoke, the most stable path is one already-running signed-i
 
 ### Local Chrome memory guard
 
-Oracle samples the full OS process tree for every local Chrome it launches or adopts. New browser work pauses when process-tree RSS reaches the 4 GiB soft watermark and resumes below 3 GiB. At the 6 GiB hard watermark, Oracle stops only an owned Chrome whose PID, start token, profile path, command, and generation still match; ambiguous identity fails closed without killing an unrelated browser. Remote Chrome is detached rather than terminated.
+Oracle samples the full OS process tree for every local Chrome it launches or adopts. New browser work pauses when process-tree RSS reaches the 4 GiB soft watermark and resumes below 3 GiB. At the 6 GiB hard watermark, Oracle stops only an owned Chrome whose PID, start token, profile path, command, and generation still match; ambiguous identity fails closed without killing an unrelated browser. A detached, identity-checked watchdog remains with a local Chrome until that Chrome exits, so a controller crash cannot leave an owned browser unbounded. Remote Chrome is detached rather than terminated.
 
 Tune the sample interval and watermarks with `browser.resourceMonitorIntervalMs`, `browser.resourceRssSoftLimitBytes`, `browser.resourceRssHardLimitBytes`, and `browser.resourceRssResumeLimitBytes` in `~/.oracle/config.json`, or the corresponding advanced CLI flags shown by `oracle --help --verbose`. Byte thresholds must satisfy `resume < soft < hard`. These controls complement the tab ceiling: the tab limit bounds renderer count, while the RSS guard catches renderer, GPU, utility, and browser-process growth.
 
