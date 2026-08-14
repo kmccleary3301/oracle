@@ -17,6 +17,7 @@
 - Browser: re-enable `--browser-headless`, normalize Chrome's headless user-agent before ChatGPT navigation, and document persistent-profile authentication for unattended runs.
 - Browser: sample every locally owned Chrome process tree once per second and fail closed at a 6 GiB RSS hard limit, with PID start-token/profile/generation validation before automatic shutdown.
 - Browser: keep an identity-checked detached RSS watchdog with every local Chrome until intentional cleanup, so a controller crash cannot leave an owned browser growing without a hard memory cap.
+- Release: refresh the long-lived resource-soak DevTools connection at bounded cycle intervals so transient CDP socket lifetime failures cannot invalidate an otherwise healthy soak.
 - Security: bind every consequential browser action to its locally computed approval identity, restrict request-level Chrome endpoints to trusted configuration, contain durable job paths, release terminal admission quota, prune retained jobs, and enforce trusted MCP download roots and byte ceilings.
 - Browser: restore project discovery on the overhauled ChatGPT sidebar by reading the browser-authenticated paginated project feed and recognizing button-based project rows when the endpoint is unavailable.
 - Browser: release coordinator ownership when a persistent terminal-login tab is detached, allowing the next CLI command to reuse the authenticated Chrome profile without a false contradictory-owner failure.

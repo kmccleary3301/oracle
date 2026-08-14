@@ -36,6 +36,7 @@ const TARGET_CLOSE_ATTEMPTS = 20;
 const TARGET_CLOSE_DELAY_MS = 50;
 const CLEANUP_ATTEMPTS = 50;
 const CLEANUP_DELAY_MS = 100;
+const CDP_CONNECTION_REFRESH_CYCLES = 256;
 const MAX_CYCLE_TARGETS = 1;
 const MiB = 1024 ** 2;
 
@@ -311,8 +312,9 @@ export async function runResourceSoak(
     browser = browserClient;
     const baseline = await dependencies.listTargets("127.0.0.1", chromePort);
     baselineInventory = baseline;
-
     while (Date.now() - startedAt < options.durationMs || samples.length === 0) {
+      const activeBrowser = browser;
+      if (!activeBrowser) throw new Error("Chrome soak browser connection was not available.");
       const runtime = new CoordinatorRuntime(
         { host: "127.0.0.1", port: chromePort },
         {
@@ -329,7 +331,7 @@ export async function runResourceSoak(
       try {
         const operation = cycle % 2 === 0 ? "chatgpt_create_session" : "chatgpt_work_start";
         lease = await runtime.reserve({ role: "polling", ownerJobId: operation });
-        const created = await browserClient.Target.createTarget({ url: "about:blank" });
+        const created = await activeBrowser.Target.createTarget({ url: "about:blank" });
         targetId = created.targetId;
         if (!targetId) throw new Error("Chrome returned no target id.");
         await lease.bind(targetId, "about:blank");
@@ -357,7 +359,7 @@ export async function runResourceSoak(
         assertLiveChromeSample(sample, rootPid);
         samples.push({ ...sample, processes: [] });
 
-        await browserClient.Target.closeTarget({ targetId });
+        await activeBrowser.Target.closeTarget({ targetId });
         const absentInventory = await waitForTarget(
           dependencies.listTargets,
           "127.0.0.1",
@@ -400,10 +402,14 @@ export async function runResourceSoak(
         }).state;
         cycle += 1;
         if (Date.now() - startedAt >= options.durationMs) break;
+        if (cycle % CDP_CONNECTION_REFRESH_CYCLES === 0) {
+          await activeBrowser.close().catch(() => undefined);
+          browser = await dependencies.connect(chromePort, "127.0.0.1");
+        }
         await dependencies.wait(options.sampleIntervalMs);
       } catch (error) {
-        if (targetId && browser) {
-          await browserClient.Target.closeTarget({ targetId }).catch(() => undefined);
+        if (targetId && activeBrowser) {
+          await activeBrowser.Target.closeTarget({ targetId }).catch(() => undefined);
           await waitForTarget(
             dependencies.listTargets,
             "127.0.0.1",
