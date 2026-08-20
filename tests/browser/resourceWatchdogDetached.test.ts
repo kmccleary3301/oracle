@@ -14,6 +14,7 @@ const tempDirectories: string[] = [];
 
 afterEach(async () => {
   spawnMock.mockReset();
+  vi.unstubAllEnvs();
   await Promise.all(
     tempDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
   );
@@ -69,6 +70,29 @@ describe("detached browser resource watchdog", () => {
     markChildExited(child);
     await monitor.stop();
     await expect(stat(monitor.lockPath)).rejects.toThrow();
+  });
+
+  test("does not expose the watchdog to GitHub Actions orphan cleanup", async () => {
+    vi.stubEnv("RUNNER_TRACKING_ID", "tracked-job");
+    const child = mockSpawnedChild(process.pid);
+    const profilePath = await makeProfilePath();
+
+    const monitor = await startDetachedBrowserResourceWatchdog({
+      rootPid: process.pid,
+      profilePath,
+      logger: vi.fn<(message: string) => void>(),
+    });
+
+    const [, , spawnOptions] = spawnMock.mock.calls[0] as [
+      string,
+      string[],
+      { env?: NodeJS.ProcessEnv },
+    ];
+    expect(process.env.RUNNER_TRACKING_ID).toBe("tracked-job");
+    expect(spawnOptions.env ?? process.env).not.toHaveProperty("RUNNER_TRACKING_ID");
+
+    markChildExited(child);
+    await monitor.stop();
   });
 
   test("shares an active watcher for the same Chrome root instead of spawning a duplicate", async () => {

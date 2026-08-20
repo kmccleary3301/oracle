@@ -8,13 +8,13 @@ on:
   workflow_dispatch:
     inputs:
       lane:
-        description: "Promotion runs claim evidence only after the required soak duration; smoke is explicitly unclaimed."
+        description: "Promotion runs the bounded platform proof; extended runs the optional eight-hour assurance soak."
         required: true
         default: promotion
         type: choice
-        options: [promotion, smoke]
+        options: [promotion, extended]
       duration_ms:
-        description: "Soak duration in milliseconds (promotion requires 28800000)."
+        description: "Extended assurance soak duration in milliseconds."
         required: true
         default: "28800000"
         type: string
@@ -83,12 +83,12 @@ jobs:
           subject-path: platform-${{ matrix.platform }}.json
 
   soak:
-    name: Eight-hour soak evidence
-    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.lane == 'promotion')
+    name: Optional extended soak assurance
+    if: github.event_name == 'workflow_dispatch' && inputs.lane == 'extended'
     runs-on: [self-hosted, macOS, ARM64, release-evidence-soak]
     timeout-minutes: 540
     env:
-      SOAK_DURATION_MS: ${{ github.event_name == 'schedule' && '28800000' || inputs.duration_ms }}
+      SOAK_DURATION_MS: ${{ inputs.duration_ms }}
       REQUIRED_SOAK_DURATION_MS: "28800000"
     steps:
       - uses: actions/checkout@v7

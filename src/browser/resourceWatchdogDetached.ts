@@ -154,6 +154,12 @@ function waitForSpawn(child: ChildProcess): Promise<void> {
   return resolvers.promise;
 }
 
+function detachedWatchdogEnvironment(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  delete env.RUNNER_TRACKING_ID;
+  return env;
+}
+
 export async function startDetachedBrowserResourceWatchdog(
   options: DetachedBrowserResourceWatchdogOptions,
 ): Promise<DetachedBrowserResourceWatchdog> {
@@ -219,6 +225,7 @@ export async function startDetachedBrowserResourceWatchdog(
     const child = spawn(process.execPath, workerArgs, {
       detached: true,
       stdio: "ignore",
+      env: detachedWatchdogEnvironment(),
     });
     await waitForSpawn(child);
     child.unref();

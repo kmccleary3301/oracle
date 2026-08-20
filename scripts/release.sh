@@ -19,6 +19,7 @@ run() { echo ">> $*"; "$@"; }
 phase_promotion_gate() {
   banner "Promotion evidence gate"
   local evidence_dir="${RELEASE_EVIDENCE_DIR:-.release-evidence}"
+  local proof_mode="${RELEASE_PROOF_MODE:-bounded}"
   local required_runs="${RELEASE_REQUIRED_SOAK_RUNS:-3}"
   local required_duration="${RELEASE_REQUIRED_SOAK_DURATION_MS:-28800000}"
   local max_age="${RELEASE_EVIDENCE_MAX_AGE_MS:-172800000}"
@@ -43,6 +44,7 @@ phase_promotion_gate() {
   fi
   local gate_args=(
     --evidence-dir "$evidence_dir"
+    --mode "$proof_mode"
     --required-soak-runs "$required_runs"
     --required-soak-duration-ms "$required_duration"
     --max-age-ms "$max_age"

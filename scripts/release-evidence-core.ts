@@ -13,8 +13,10 @@ export const MAXIMUM_SOAK_SAMPLE_GAP_MS = 15_000;
 export type RequiredPlatform = (typeof REQUIRED_PLATFORMS)[number];
 export type TrustedProvenanceKeys = Readonly<Record<string, string>> | readonly string[] | string;
 export type JsonRecord = Record<string, unknown>;
+export type ReleaseProofMode = "bounded" | "extended";
 
 export interface ReleasePromotionGateOptions {
+  mode?: ReleaseProofMode;
   nowMs?: number;
   maxAgeMs?: number;
   requiredSoakRuns?: number;
@@ -35,6 +37,8 @@ export interface ReleasePromotionGateResult {
   passed: boolean;
   reasonCodes: string[];
   evidence: {
+    mode: ReleaseProofMode;
+    extendedAssuranceEvaluated: boolean;
     requiredPlatforms: readonly RequiredPlatform[];
     observedPlatforms: string[];
     requiredSoakRuns: number;

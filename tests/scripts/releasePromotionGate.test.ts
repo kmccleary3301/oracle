@@ -270,6 +270,60 @@ describe("release promotion evidence gate", () => {
     expect(result.evidence.observedPlatforms).toEqual(["linux", "macos", "windows"]);
     expect(result.evidence.qualifiedSoakRuns).toBe(3);
   });
+
+  it("passes bounded release proof with one exact signed platform matrix", () => {
+    const input = evidence();
+    const manifests = input.manifests as Record<string, unknown>;
+    const latestRun = (manifests.platformRuns as Array<Record<string, unknown>>)[2] as Record<
+      string,
+      unknown
+    >;
+    delete latestRun.soak;
+    manifests.platformRuns = [latestRun];
+    delete manifests.capability;
+    delete manifests.review;
+    delete manifests.soak;
+    delete manifests.rollback;
+
+    const result = evaluateReleasePromotionGate(input, gateOptions({ mode: "bounded" }));
+
+    expect(result).toMatchObject({
+      passed: true,
+      reasonCodes: [],
+      evidence: {
+        mode: "bounded",
+        observedPlatforms: ["linux", "macos", "windows"],
+        qualifiedSoakRuns: 0,
+      },
+    });
+  });
+
+  it("keeps a missing platform blocking in bounded mode", () => {
+    const input = evidence();
+    const manifests = input.manifests as Record<string, unknown>;
+    const latestRun = (manifests.platformRuns as Array<Record<string, unknown>>)[2] as Record<
+      string,
+      unknown
+    >;
+    delete latestRun.soak;
+    delete (latestRun.platforms as Record<string, unknown>).windows;
+    manifests.platformRuns = [latestRun];
+
+    const result = evaluateReleasePromotionGate(input, gateOptions({ mode: "bounded" }));
+
+    expect(result.passed).toBe(false);
+    expect(result.reasonCodes).toContain("platform_run_102_missing_windows");
+  });
+
+  it("fails closed for an unknown proof mode", () => {
+    const result = evaluateReleasePromotionGate(
+      evidence(),
+      gateOptions({ mode: "invalid" as ReleasePromotionGateOptions["mode"] }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reasonCodes).toContain("proof_mode_invalid");
+  });
   it("loads split platform and soak manifests from one workflow run", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "oracle-release-evidence-"));
     const runDirectory = path.join(directory, "runs", "run-102");

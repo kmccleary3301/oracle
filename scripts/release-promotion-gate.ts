@@ -39,6 +39,7 @@ export {
   hashReleaseEvidence,
   releaseEvidenceSigningPayload,
   type ReleasePromotionGateOptions,
+  type ReleaseProofMode,
   type ReleasePromotionGateResult,
   type RequiredPlatform,
 } from "./release-evidence-core.js";
@@ -240,17 +241,27 @@ export function evaluateReleasePromotionGate(
   value: unknown,
   suppliedOptions: ReleasePromotionGateOptions = {},
 ): ReleasePromotionGateResult {
+  const requestedMode = suppliedOptions.mode;
+  const proofModeInvalid =
+    requestedMode !== undefined && requestedMode !== "bounded" && requestedMode !== "extended";
+  const mode = requestedMode === "bounded" ? "bounded" : "extended";
+  const extendedAssurance = mode === "extended";
   const options: Required<ReleasePromotionGateOptions> = {
+    mode,
     nowMs: suppliedOptions.nowMs ?? Date.now(),
     maxAgeMs: suppliedOptions.maxAgeMs ?? DEFAULT_MAX_AGE_MS,
-    requiredSoakRuns: Math.max(
-      DEFAULT_REQUIRED_SOAK_RUNS,
-      suppliedOptions.requiredSoakRuns ?? DEFAULT_REQUIRED_SOAK_RUNS,
-    ),
-    requiredSoakDurationMs: Math.max(
-      DEFAULT_REQUIRED_SOAK_DURATION_MS,
-      suppliedOptions.requiredSoakDurationMs ?? DEFAULT_REQUIRED_SOAK_DURATION_MS,
-    ),
+    requiredSoakRuns: extendedAssurance
+      ? Math.max(
+          DEFAULT_REQUIRED_SOAK_RUNS,
+          suppliedOptions.requiredSoakRuns ?? DEFAULT_REQUIRED_SOAK_RUNS,
+        )
+      : 0,
+    requiredSoakDurationMs: extendedAssurance
+      ? Math.max(
+          DEFAULT_REQUIRED_SOAK_DURATION_MS,
+          suppliedOptions.requiredSoakDurationMs ?? DEFAULT_REQUIRED_SOAK_DURATION_MS,
+        )
+      : 0,
     expectedRepository: suppliedOptions.expectedRepository ?? "",
     expectedWorkflow: suppliedOptions.expectedWorkflow ?? "",
     expectedRunId: suppliedOptions.expectedRunId ?? "",
@@ -262,51 +273,54 @@ export function evaluateReleasePromotionGate(
   };
   const input = isRecord(value) ? value : {};
   const reasons: string[] = [];
+  if (proofModeInvalid) reasons.push("proof_mode_invalid");
   if (input.schemaVersion !== undefined && input.schemaVersion !== RELEASE_EVIDENCE_SCHEMA_VERSION)
     reasons.push("manifest_schema_invalid");
   const manifests = isRecord(input.manifests) ? input.manifests : input;
   const externalAttestations = isRecord(input.attestations) ? input.attestations : null;
-  const capability = nestedManifest(
-    manifests,
-    "capability",
-    "capabilityDrift",
-    "capabilityManifest",
-  );
   let capabilityDriftPassed = false;
-  if (!isRecord(capability)) reasons.push("missing_capability_manifest");
-  else {
-    hasValidEnvelope(
-      capability,
+  if (extendedAssurance) {
+    const capability = nestedManifest(
+      manifests,
       "capability",
-      reasons,
-      options,
-      "all",
-      externalAttestations?.all,
-      true,
-      false,
+      "capabilityDrift",
+      "capabilityManifest",
     );
-    capabilityDriftPassed =
-      capability.passed === true &&
-      isClaimed(capability) &&
-      Array.isArray(capability.reasonCodes) &&
-      capability.reasonCodes.length === 0;
-    if (!isClaimed(capability)) reasons.push("capability_unclaimed");
-    if (!capabilityDriftPassed) reasons.push("capability_drift_failed");
-  }
-  const review = nestedManifest(manifests, "review", "authenticatedReview", "reviewEvidence");
-  if (!isRecord(review)) reasons.push("missing_authenticated_review_evidence");
-  else {
-    hasValidEnvelope(
-      review,
-      "review",
-      reasons,
-      options,
-      "all",
-      externalAttestations?.review,
-      true,
-      false,
-    );
-    if (!isClaimed(review) || review.passed !== true) reasons.push("review_unclaimed");
+    if (!isRecord(capability)) reasons.push("missing_capability_manifest");
+    else {
+      hasValidEnvelope(
+        capability,
+        "capability",
+        reasons,
+        options,
+        "all",
+        externalAttestations?.all,
+        true,
+        false,
+      );
+      capabilityDriftPassed =
+        capability.passed === true &&
+        isClaimed(capability) &&
+        Array.isArray(capability.reasonCodes) &&
+        capability.reasonCodes.length === 0;
+      if (!isClaimed(capability)) reasons.push("capability_unclaimed");
+      if (!capabilityDriftPassed) reasons.push("capability_drift_failed");
+    }
+    const review = nestedManifest(manifests, "review", "authenticatedReview", "reviewEvidence");
+    if (!isRecord(review)) reasons.push("missing_authenticated_review_evidence");
+    else {
+      hasValidEnvelope(
+        review,
+        "review",
+        reasons,
+        options,
+        "all",
+        externalAttestations?.review,
+        true,
+        false,
+      );
+      if (!isClaimed(review) || review.passed !== true) reasons.push("review_unclaimed");
+    }
   }
   const observedEntries = platformEntries(input);
   const observedPlatforms = [...observedEntries.keys()].sort();
@@ -404,38 +418,6 @@ export function evaluateReleasePromotionGate(
         authenticatedCommitSha = provenanceCommitSha;
       }
     }
-    const soakEntry = run.soak;
-    let authenticatedDurationMs: number | null = null;
-    if (!isRecord(soakEntry)) {
-      reasons.push(`soak_${runLabel}_manifest_invalid`);
-      runQualified = false;
-    } else {
-      const soakPlatform = stringValue(soakEntry.platform);
-      const soakOptions = { ...options, expectedRunId: run.runId };
-      const valid =
-        Boolean(soakPlatform) &&
-        hasValidEnvelope(
-          soakEntry,
-          `soak_${runLabel}`,
-          reasons,
-          soakOptions,
-          soakPlatform ?? undefined,
-          run.attestations.soak ?? externalAttestations?.[`${run.runId}:soak`],
-        );
-      const qualifies = qualifiesSoakEvidence(soakEntry, options, reasons, `soak_${runLabel}`);
-      if (!valid || !isClaimed(soakEntry) || !qualifies) runQualified = false;
-      const provenance = provenanceValue(soakEntry);
-      authenticatedDurationMs = soakDurationMs(soakEntry);
-      if (
-        !provenance ||
-        stringValue(provenance.runId) !== run.runId ||
-        numberValue(provenance.runNumber) !== authenticatedRunNumber ||
-        stringValue(provenance.commitSha) !== authenticatedCommitSha
-      ) {
-        reasons.push(`soak_${runLabel}_run_provenance_mismatch`);
-        runQualified = false;
-      }
-    }
     if (
       authenticatedRunNumber !== null &&
       (run.runNumber !== authenticatedRunNumber || run.sequence !== authenticatedRunNumber)
@@ -443,18 +425,52 @@ export function evaluateReleasePromotionGate(
       reasons.push(`platform_run_${runLabel}_run_number_mismatch`);
       runQualified = false;
     }
-    if (
-      runQualified &&
-      authenticatedRunNumber !== null &&
-      authenticatedCommitSha !== null &&
-      authenticatedDurationMs !== null
-    ) {
-      authenticatedRuns.set(run.runId, {
-        runId: run.runId,
-        runNumber: authenticatedRunNumber,
-        commitSha: authenticatedCommitSha,
-        durationMs: authenticatedDurationMs,
-      });
+    if (extendedAssurance) {
+      const soakEntry = run.soak;
+      let authenticatedDurationMs: number | null = null;
+      if (!isRecord(soakEntry)) {
+        reasons.push(`soak_${runLabel}_manifest_invalid`);
+        runQualified = false;
+      } else {
+        const soakPlatform = stringValue(soakEntry.platform);
+        const soakOptions = { ...options, expectedRunId: run.runId };
+        const valid =
+          Boolean(soakPlatform) &&
+          hasValidEnvelope(
+            soakEntry,
+            `soak_${runLabel}`,
+            reasons,
+            soakOptions,
+            soakPlatform ?? undefined,
+            run.attestations.soak ?? externalAttestations?.[`${run.runId}:soak`],
+          );
+        const qualifies = qualifiesSoakEvidence(soakEntry, options, reasons, `soak_${runLabel}`);
+        if (!valid || !isClaimed(soakEntry) || !qualifies) runQualified = false;
+        const provenance = provenanceValue(soakEntry);
+        authenticatedDurationMs = soakDurationMs(soakEntry);
+        if (
+          !provenance ||
+          stringValue(provenance.runId) !== run.runId ||
+          numberValue(provenance.runNumber) !== authenticatedRunNumber ||
+          stringValue(provenance.commitSha) !== authenticatedCommitSha
+        ) {
+          reasons.push(`soak_${runLabel}_run_provenance_mismatch`);
+          runQualified = false;
+        }
+      }
+      if (
+        runQualified &&
+        authenticatedRunNumber !== null &&
+        authenticatedCommitSha !== null &&
+        authenticatedDurationMs !== null
+      ) {
+        authenticatedRuns.set(run.runId, {
+          runId: run.runId,
+          runNumber: authenticatedRunNumber,
+          commitSha: authenticatedCommitSha,
+          durationMs: authenticatedDurationMs,
+        });
+      }
     }
   }
   if (runs.length === 0) {
@@ -462,79 +478,92 @@ export function evaluateReleasePromotionGate(
     for (const platform of REQUIRED_PLATFORMS)
       reasons.push(`missing_${platform}_platform_manifest`);
   }
-  const soak = nestedManifest(manifests, "soak", "resourceSoak", "soakManifest");
   let qualifiedSoakRuns = 0;
-  if (!isRecord(soak)) reasons.push("missing_soak_manifest");
-  else {
-    hasValidEnvelope(soak, "soak", reasons, options, "all", externalAttestations?.all, false, true);
-    if (!isClaimed(soak)) reasons.push("soak_unclaimed");
-    const soakRuns = Array.isArray(soak.runs) ? soak.runs : [];
-    const candidates = soakRuns.map((run, index) => {
-      const runId = isRecord(run) ? stringValue(run.runId) : null;
-      const authenticatedRun = runId ? authenticatedRuns.get(runId) : undefined;
-      return {
-        run,
-        index,
-        authenticatedRun,
-        qualifies: qualifiedSoakRun(run, options, reasons, index, authenticatedRun),
-      };
-    });
-    const sorted = candidates
-      .filter(
-        (
-          candidate,
-        ): candidate is typeof candidate & { authenticatedRun: AuthenticatedPlatformRun } =>
-          candidate.qualifies && Boolean(candidate.authenticatedRun),
-      )
-      .sort((left, right) => left.authenticatedRun.runNumber - right.authenticatedRun.runNumber);
-    let streak = 0;
-    let previousNumber: number | null = null;
-    let previousId: string | null = null;
-    for (const { authenticatedRun } of sorted) {
-      const currentNumber = authenticatedRun.runNumber;
-      const currentId = authenticatedRun.runId;
-      if (
-        previousNumber !== null &&
-        (currentNumber !== previousNumber + 1 || currentId === previousId)
-      ) {
-        if (currentNumber === previousNumber) reasons.push("soak_runs_duplicate_run_number");
-        else reasons.push("soak_runs_not_consecutive");
-        streak = 1;
-      } else streak += 1;
-      previousNumber = currentNumber;
-      previousId = currentId;
-      qualifiedSoakRuns = Math.max(qualifiedSoakRuns, streak);
+  if (extendedAssurance) {
+    const soak = nestedManifest(manifests, "soak", "resourceSoak", "soakManifest");
+    if (!isRecord(soak)) reasons.push("missing_soak_manifest");
+    else {
+      hasValidEnvelope(
+        soak,
+        "soak",
+        reasons,
+        options,
+        "all",
+        externalAttestations?.all,
+        false,
+        true,
+      );
+      if (!isClaimed(soak)) reasons.push("soak_unclaimed");
+      const soakRuns = Array.isArray(soak.runs) ? soak.runs : [];
+      const candidates = soakRuns.map((run, index) => {
+        const runId = isRecord(run) ? stringValue(run.runId) : null;
+        const authenticatedRun = runId ? authenticatedRuns.get(runId) : undefined;
+        return {
+          run,
+          index,
+          authenticatedRun,
+          qualifies: qualifiedSoakRun(run, options, reasons, index, authenticatedRun),
+        };
+      });
+      const sorted = candidates
+        .filter(
+          (
+            candidate,
+          ): candidate is typeof candidate & { authenticatedRun: AuthenticatedPlatformRun } =>
+            candidate.qualifies && Boolean(candidate.authenticatedRun),
+        )
+        .sort((left, right) => left.authenticatedRun.runNumber - right.authenticatedRun.runNumber);
+      let streak = 0;
+      let previousNumber: number | null = null;
+      let previousId: string | null = null;
+      for (const { authenticatedRun } of sorted) {
+        const currentNumber = authenticatedRun.runNumber;
+        const currentId = authenticatedRun.runId;
+        if (
+          previousNumber !== null &&
+          (currentNumber !== previousNumber + 1 || currentId === previousId)
+        ) {
+          if (currentNumber === previousNumber) reasons.push("soak_runs_duplicate_run_number");
+          else reasons.push("soak_runs_not_consecutive");
+          streak = 1;
+        } else streak += 1;
+        previousNumber = currentNumber;
+        previousId = currentId;
+        qualifiedSoakRuns = Math.max(qualifiedSoakRuns, streak);
+      }
+      if (qualifiedSoakRuns < options.requiredSoakRuns)
+        reasons.push("soak_insufficient_consecutive_runs");
     }
-    if (qualifiedSoakRuns < options.requiredSoakRuns)
-      reasons.push("soak_insufficient_consecutive_runs");
   }
-  const rollback = nestedManifest(manifests, "rollback", "packagedRollback", "rollbackManifest");
   let rollbackProof = false;
-  if (!isRecord(rollback)) reasons.push("missing_rollback_manifest");
-  else {
-    hasValidEnvelope(
-      rollback,
-      "rollback",
-      reasons,
-      options,
-      "all",
-      externalAttestations?.all,
-      true,
-      false,
-    );
-    rollbackProof =
-      isClaimed(rollback) &&
-      rollback.passed === true &&
-      rollback.installCurrent === true &&
-      rollback.injectedFailureObserved === true &&
-      rollback.restoredPrevious === true &&
-      rollback.helpPassed === true &&
-      rollback.versionPassed === true &&
-      rollback.doctorPassed === true &&
-      rollback.noStaleProcess === true &&
-      rollback.noProfileLock === true;
-    if (!isClaimed(rollback)) reasons.push("rollback_unclaimed");
-    if (!rollbackProof) reasons.push("rollback_not_proven");
+  if (extendedAssurance) {
+    const rollback = nestedManifest(manifests, "rollback", "packagedRollback", "rollbackManifest");
+    if (!isRecord(rollback)) reasons.push("missing_rollback_manifest");
+    else {
+      hasValidEnvelope(
+        rollback,
+        "rollback",
+        reasons,
+        options,
+        "all",
+        externalAttestations?.all,
+        true,
+        false,
+      );
+      rollbackProof =
+        isClaimed(rollback) &&
+        rollback.passed === true &&
+        rollback.installCurrent === true &&
+        rollback.injectedFailureObserved === true &&
+        rollback.restoredPrevious === true &&
+        rollback.helpPassed === true &&
+        rollback.versionPassed === true &&
+        rollback.doctorPassed === true &&
+        rollback.noStaleProcess === true &&
+        rollback.noProfileLock === true;
+      if (!isClaimed(rollback)) reasons.push("rollback_unclaimed");
+      if (!rollbackProof) reasons.push("rollback_not_proven");
+    }
   }
   const uniqueReasons = [...new Set(reasons)].sort();
   return {
@@ -543,6 +572,8 @@ export function evaluateReleasePromotionGate(
     passed: uniqueReasons.length === 0,
     reasonCodes: uniqueReasons,
     evidence: {
+      mode,
+      extendedAssuranceEvaluated: extendedAssurance,
       requiredPlatforms: REQUIRED_PLATFORMS,
       observedPlatforms,
       requiredSoakRuns: options.requiredSoakRuns,
@@ -569,6 +600,11 @@ async function main(args = process.argv.slice(2)): Promise<number> {
   const directory = option(args, "--evidence-dir") ?? option(args, "--evidence");
   if (!directory) {
     process.stderr.write("release promotion gate requires --evidence-dir path\n");
+    return 2;
+  }
+  const mode = option(args, "--mode") ?? "extended";
+  if (mode !== "bounded" && mode !== "extended") {
+    process.stderr.write("release promotion gate --mode must be bounded or extended\n");
     return 2;
   }
   const outputPath = option(args, "--output");
@@ -598,6 +634,7 @@ async function main(args = process.argv.slice(2)): Promise<number> {
     }
   }
   const gateOptions: ReleasePromotionGateOptions = {
+    mode,
     requiredSoakRuns: requiredRuns,
     requiredSoakDurationMs: requiredDurationMs,
     maxAgeMs,

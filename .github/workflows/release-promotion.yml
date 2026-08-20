@@ -7,6 +7,12 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
+      proof_mode:
+        description: "Bounded is the ship gate; extended additionally requires the deferred soak/review/rollback assurance bundle."
+        required: false
+        default: bounded
+        type: choice
+        options: [bounded, extended]
       evidence_run_id:
         description: "Completed nightly evidence workflow run to consume."
         required: true
@@ -29,6 +35,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       EVIDENCE_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.evidence_run_id || github.event.workflow_run.id }}
       SUPPLEMENTAL_EVIDENCE_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.supplemental_evidence_run_id || '' }}
+      RELEASE_PROOF_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.proof_mode || 'bounded' }}
       EVIDENCE_REPOSITORY: ${{ github.repository }}
       EVIDENCE_WORKFLOW: ${{ github.repository }}/.github/workflows/nightly-release-evidence.yml
       RELEASE_EVIDENCE_PUBLIC_KEY: ${{ secrets.RELEASE_EVIDENCE_PUBLIC_KEY }}
@@ -71,7 +78,7 @@ jobs:
             gh run download "$SUPPLEMENTAL_EVIDENCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name release-supplemental-evidence --dir .release-evidence
           fi
           gh run list --repo "$GITHUB_REPOSITORY" --workflow "Nightly release evidence" --commit "$EVIDENCE_COMMIT" --status success --limit 30 --json databaseId,number,headSha,conclusion,workflowName,headBranch,createdAt \
-            | jq -c --arg commit "$EVIDENCE_COMMIT" '[.[] | select(.workflowName == "Nightly release evidence" and .conclusion == "success" and .headSha == $commit)] | sort_by(.number) | .[]' \
+            | jq -c --arg commit "$EVIDENCE_COMMIT" --arg mode "$RELEASE_PROOF_MODE" --arg selected "$EVIDENCE_RUN_ID" '[.[] | select(.workflowName == "Nightly release evidence" and .conclusion == "success" and .headSha == $commit and ($mode != "bounded" or (.databaseId | tostring) == $selected))] | sort_by(.number) | .[]' \
             > .release-evidence/run-list.json
           test -s .release-evidence/run-list.json
           while IFS= read -r run; do
@@ -82,8 +89,10 @@ jobs:
               "release-platform-evidence-macos-$run_id"
               "release-platform-evidence-linux-$run_id"
               "release-platform-evidence-windows-$run_id"
-              "release-soak-evidence-$run_id"
             )
+            if [[ "$RELEASE_PROOF_MODE" == "extended" ]]; then
+              required+=("release-soak-evidence-$run_id")
+            fi
             complete=true
             for artifact in "${required[@]}"; do
               if ! jq -e --arg name "$artifact" '.artifacts | any(.name == $name and .expired == false)' <<<"$artifacts" >/dev/null; then
@@ -99,10 +108,14 @@ jobs:
             for platform in macos linux windows; do
               gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name "release-platform-evidence-$platform-$run_id" --dir "$run_dir"
             done
-            gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name "release-soak-evidence-$run_id" --dir "$run_dir"
+            if [[ "$RELEASE_PROOF_MODE" == "extended" ]]; then
+              gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name "release-soak-evidence-$run_id" --dir "$run_dir"
+            fi
             jq -n --arg runId "$run_id" --argjson runNumber "$run_number" --arg commit "$EVIDENCE_COMMIT" --arg sourceRef "$EVIDENCE_SOURCE_REF" --arg workflow "$EVIDENCE_WORKFLOW" --arg repository "$EVIDENCE_REPOSITORY" --arg generatedAt "$(jq -r '.createdAt' <<<"$run")" '{runId:$runId,runNumber:$runNumber,commitSha:$commit,sourceRef:$sourceRef,workflow:$workflow,repository:$repository,sequence:$runNumber,generatedAt:$generatedAt}' > "$run_dir/run-metadata.json"
           done < .release-evidence/run-list.json
-          find .release-evidence/runs -type f -name 'soak-evidence.json' -print -quit | grep -q .
+          if [[ "$RELEASE_PROOF_MODE" == "extended" ]]; then
+            find .release-evidence/runs -type f -name 'soak-evidence.json' -print -quit | grep -q .
+          fi
           test -f ".release-evidence/runs/run-$EVIDENCE_RUN_ID/run-metadata.json"
       - name: Verify every evidence manifest with pinned GitHub attestation
         shell: bash
@@ -123,6 +136,7 @@ jobs:
             jq -n --argjson verification "$verification" --arg subjectPath "soak-evidence.json" --arg subjectDigest "$subject_digest" --arg repository "$EVIDENCE_REPOSITORY" --arg signerWorkflow "$EVIDENCE_WORKFLOW" --arg sourceRef "$EVIDENCE_SOURCE_REF" --arg sourceCommit "$EVIDENCE_COMMIT" --arg runId "$(jq -r '.runId' "$run_dir/run-metadata.json")" '{verified:true,verification:$verification,subjectPath:$subjectPath,subjectDigest:$subjectDigest,pinned:{repository:$repository,signerWorkflow:$signerWorkflow,sourceRef:$sourceRef,sourceCommit:$sourceCommit,runId:$runId}}' > "$run_dir/attestation-soak.json"
           done < <(find .release-evidence/runs -type f -name 'soak-evidence.json' -print)
       - name: Aggregate distinct consecutive run evidence
+        if: env.RELEASE_PROOF_MODE == 'extended'
         shell: bash
         run: |
           set -euo pipefail
@@ -134,7 +148,7 @@ jobs:
       - name: Run fail-closed promotion gate
         run: |
           set -euo pipefail
-          gate_args=(release:promotion-gate --evidence-dir .release-evidence --required-soak-runs 3 --required-soak-duration-ms 28800000 --max-age-ms 172800000 --commit "$EVIDENCE_COMMIT" --repository "$EVIDENCE_REPOSITORY" --workflow "$EVIDENCE_WORKFLOW" --run-id "$EVIDENCE_RUN_ID" --source-ref "$EVIDENCE_SOURCE_REF" --output .release-evidence/promotion-gate.json)
+          gate_args=(release:promotion-gate --mode "$RELEASE_PROOF_MODE" --evidence-dir .release-evidence --required-soak-runs 3 --required-soak-duration-ms 28800000 --max-age-ms 172800000 --commit "$EVIDENCE_COMMIT" --repository "$EVIDENCE_REPOSITORY" --workflow "$EVIDENCE_WORKFLOW" --run-id "$EVIDENCE_RUN_ID" --source-ref "$EVIDENCE_SOURCE_REF" --output .release-evidence/promotion-gate.json)
           if [[ -n "$SUPPLEMENTAL_EVIDENCE_RUN_ID" ]]; then
             gate_args+=(--supplemental-run-id "$SUPPLEMENTAL_EVIDENCE_RUN_ID")
           fi

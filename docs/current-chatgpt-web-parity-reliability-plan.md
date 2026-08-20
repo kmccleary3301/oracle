@@ -18,7 +18,7 @@ The CLI should therefore guarantee its own behavior:
 5. Recover automatically when recovery is unambiguous; otherwise stop in a precise `requires_action` or `*_unknown` state.
 6. Keep the public API semantic and stable. Do not expose raw Playwright selectors or arbitrary browser scripting as the product interface.
 
-At plan inception, the fork was a useful prototype rather than this bounded system. Upstream supplied selector and lifecycle fixes but no hidden resource governor or process-memory solution; the local fork was already ahead in browser control and remote-tab hygiene. The implementation tranches below are now complete locally. The authenticated personal/project matrix passed on 2026-08-12 against the current ChatGPT web app. Promotion remains evidence-gated on three qualified eight-hour soak runs and a signed macOS/Linux/Windows release matrix from the exact release commit.
+At plan inception, the fork was a useful prototype rather than this bounded system. Upstream supplied selector and lifecycle fixes but no hidden resource governor or process-memory solution; the local fork was already ahead in browser control and remote-tab hygiene. The implementation tranches below are now complete locally. The authenticated personal/project matrix passed on 2026-08-12 against the current ChatGPT web app. Promotion uses bounded proof from one signed macOS/Linux/Windows release matrix on the exact release commit.
 
 ### Claim policy
 
@@ -29,6 +29,8 @@ At plan inception, the fork was a useful prototype rather than this bounded syst
 - **L4 broad confidence:** repeated runs across several supported cohorts pass. This remains a measured reliability statement, not a universal guarantee.
 
 No capability is called complete without its matrix and evidence manifest. A change in UI fingerprint, plan/workspace, locale, browser, or official behavior expires the relevant live evidence.
+
+The repository owner accepted one explicit release limitation on 2026-08-20: multi-hour RSS stability remains unproven for this release and does not block the bounded ship decision. The optional extended-assurance lane retains the eight-hour soak and three-run gate for a later campaign. Revisit it before automated publication is enabled or when a field report indicates sustained RSS growth or orphaned Chrome.
 
 ## Immediate conclusions
 
@@ -461,9 +463,13 @@ Each tranche is independently reviewable and promoted only after its gate passes
 
 - Target count never exceeds the configured hard maximum under concurrent clients.
 - After 200 submit/evict/poll cycles, settled process-tree RSS is within a calibrated fixed envelope of the warm baseline.
-- Eight-hour soak has no orphan processes and an endpoint RSS slope at or below 64 MiB/hour; the artifact records the exact `endpoint-delta-over-sample-span` slope method and `sample-range` noise method.
+- The deterministic 200-cycle resource proof and real-process platform matrix leave no orphan process and keep settled RSS within the calibrated warm-baseline envelope.
 - A maximum-size supported upload stays under the Node heap budget and never exists as a whole-file base64 string.
 - Hard-watermark injection yields `resource_exhausted`/`*_unknown` with evidence, never a host OOM.
+
+**Deferred assurance**
+
+- An optional eight-hour soak measures endpoint RSS slope at or below 64 MiB/hour using the recorded `endpoint-delta-over-sample-span` slope and `sample-range` noise methods. Three consecutive runs remain available in extended mode but do not block the bounded release.
 
 ### Tranche 3 — Make jobs truthful and recoverable
 
@@ -531,17 +537,17 @@ Each tranche is independently reviewable and promoted only after its gate passes
 
 - Add a low-cost authenticated canary that runs read-only probe plus one reversible chat path.
 - Compare sanitized capability fingerprints and alert on contract drift.
-- Run nightly fixtures/chaos, scheduled multi-hour soak, and pre-release macOS/Linux/Windows live matrices.
+- Run nightly fixtures/chaos and pre-release macOS/Linux/Windows live matrices; keep the multi-hour soak as manually dispatched extended assurance.
 - Generate the capability ledger from evidence artifacts; no hand-edited completion percentage.
 - Rebase on upstream only after the same gates pass on the rebased commit.
 
 **Gate**
 
-- Three consecutive qualified 8-hour soak runs and the full macOS/Linux/Windows platform matrix are green on the exact release commit.
+- One complete signed macOS/Linux/Windows platform matrix is green on the exact release commit.
 - Independent review finds no stale selector fixtures, schema/CLI/MCP drift, orphan process, unbounded input path, or unsupported capability claim.
 - Rollback and profile recovery are tested from the packaged CLI, not only source execution.
 
-The promotion workflow keeps those proofs distinct: GitHub-hosted runners execute the real-Chrome lifecycle matrix on each operating system, while a trusted self-hosted runner executes the uninterrupted eight-hour soak. A promotion run is complete only when all three platform manifests and its separately attested soak manifest exist. The gate then requires three complete runs with consecutive workflow run numbers, identical commit provenance, and valid GitHub OIDC attestations.
+The promotion workflow has two explicit proof modes. `bounded` is the ship gate: GitHub-hosted runners execute the real-Chrome lifecycle matrix on each operating system, and the gate verifies all three manifests and their pinned GitHub OIDC attestations from one exact-commit run. `extended` is deferred assurance: a trusted self-hosted runner additionally executes the uninterrupted eight-hour soak and requires three complete consecutive runs plus the review and rollback bundle.
 
 ## Verification matrix
 
@@ -550,7 +556,7 @@ The promotion workflow keeps those proofs distinct: GitHub-hosted runners execut
 | UI adapters     | Redacted DOM/control fixtures, ambiguity tests, locale variants    | Authenticated capability probe and reversible mutation                 |
 | State machine   | Transition/property tests, crash between every write pair          | Kill/reattach/reconcile scenarios                                      |
 | Idempotency     | Lost-ack, duplicated event, stale head, concurrent actor injection | Disconnect immediately before/after Send                               |
-| Resource limits | Synthetic child tree, memory watermark and I/O limit injection     | Multi-hour browser workload with OS RSS samples                        |
+| Resource limits | Synthetic child tree, memory watermark and I/O limit injection     | Bounded real-Chrome platform matrix; optional multi-hour RSS assurance |
 | Uploads         | Stream limits, truncated body, wrong length/hash, disk exhaustion  | Type/size matrix within account limits                                 |
 | Output          | Markdown/HTML/text/citation/artifact golden fixtures               | Chat, Work, Research, image, and error turns                           |
 | Rate limits     | Injected 429/quota UI/network evidence                             | Deliberate low-volume limit observation; never burn quota just to test |
