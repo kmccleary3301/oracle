@@ -1,51 +1,4 @@
-export function parseDuration(input: string, fallback: number): number {
-  if (!input) {
-    return fallback;
-  }
-  const trimmed = input.trim();
-  if (!trimmed) {
-    return fallback;
-  }
-  const lowercase = trimmed.toLowerCase();
-  if (/^[0-9]+$/.test(lowercase)) {
-    return Number(lowercase);
-  }
-  const normalized = lowercase.replace(/\s+/g, "");
-  const singleMatch = /^([0-9]+)(ms|s|m|h)$/i.exec(normalized);
-  if (singleMatch && singleMatch[0].length === normalized.length) {
-    const value = Number(singleMatch[1]);
-    return convertUnit(value, singleMatch[2]);
-  }
-  const multiDuration = /([0-9]+)(ms|h|m|s)/g;
-  let total = 0;
-  let lastIndex = 0;
-  let match: RegExpExecArray | null = multiDuration.exec(normalized);
-  while (match !== null) {
-    total += convertUnit(Number(match[1]), match[2]);
-    lastIndex = multiDuration.lastIndex;
-    match = multiDuration.exec(normalized);
-  }
-  if (total > 0 && lastIndex === normalized.length) {
-    return total;
-  }
-  return fallback;
-}
-
-function convertUnit(value: number, unitRaw: string | undefined): number {
-  const unit = unitRaw?.toLowerCase();
-  switch (unit) {
-    case "ms":
-      return value;
-    case "s":
-      return value * 1000;
-    case "m":
-      return value * 60_000;
-    case "h":
-      return value * 3_600_000;
-    default:
-      return value;
-  }
-}
+export { parseDuration } from "../duration.js";
 
 export function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -101,8 +54,10 @@ export function formatBytes(size: number): string {
 }
 
 /**
- * Normalizes a ChatGPT URL, ensuring it is absolute, uses http/https, and trims whitespace.
- * Falls back to the provided default when input is empty/undefined.
+ * Normalizes a ChatGPT URL for local browser workflows.
+ *
+ * This intentionally remains permissive: local browser invocations may use
+ * operator-configured URLs outside the remote service's trust boundary.
  */
 export function normalizeChatgptUrl(raw: string | null | undefined, fallback: string): string {
   const candidate = raw?.trim();
@@ -121,6 +76,84 @@ export function normalizeChatgptUrl(raw: string | null | undefined, fallback: st
     throw new Error(`Invalid ChatGPT URL protocol: "${parsed.protocol}". Use http or https.`);
   }
   // Preserve user-provided path/query; URL#toString will normalize trailing slashes appropriately.
+  return parsed.toString();
+}
+
+/**
+ * The remote service's default trust boundary. Additional origins are
+ * operator supplied, never request supplied, and are restricted to HTTPS
+ * OpenAI/ChatGPT origins.
+ */
+export const DEFAULT_REMOTE_CHATGPT_ORIGINS = ["https://chatgpt.com"] as const;
+
+function normalizeRemoteChatgptOrigin(value: string): string {
+  const candidate = value.trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    throw new Error("Invalid remote ChatGPT origin configuration.");
+  }
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.username ||
+    parsed.password ||
+    parsed.pathname !== "/" ||
+    parsed.search ||
+    parsed.hash ||
+    !parsed.hostname
+  ) {
+    throw new Error("Invalid remote ChatGPT origin configuration.");
+  }
+  const hostname = parsed.hostname.toLowerCase();
+  if (hostname !== "chatgpt.com" && !hostname.endsWith(".openai.com")) {
+    throw new Error("Invalid remote ChatGPT origin configuration.");
+  }
+  return parsed.origin;
+}
+
+export function normalizeRemoteChatgptOrigins(additionalOrigins: readonly string[] = []): string[] {
+  const origins = new Set<string>();
+  for (const origin of [...DEFAULT_REMOTE_CHATGPT_ORIGINS, ...additionalOrigins]) {
+    if (typeof origin !== "string") {
+      throw new Error("Invalid remote ChatGPT origin configuration.");
+    }
+    origins.add(normalizeRemoteChatgptOrigin(origin));
+  }
+  return [...origins];
+}
+
+/**
+ * Normalizes and validates a URL before a remote browser is allowed to use it.
+ * The URL may select a path/query on an explicitly trusted origin, but cannot
+ * carry credentials or a fragment. Origin comparison uses URL's canonical
+ * serialization, so unapproved ports and host spellings are rejected.
+ */
+export function normalizeRemoteChatgptUrl(
+  raw: string | null | undefined,
+  fallback: string,
+  allowedOrigins: readonly string[] = DEFAULT_REMOTE_CHATGPT_ORIGINS,
+): string {
+  const normalizedOrigins = new Set(
+    allowedOrigins.map((origin) => normalizeRemoteChatgptOrigin(origin)),
+  );
+  const candidate = raw?.trim();
+  const normalized = normalizeChatgptUrl(candidate || fallback, fallback);
+  let parsed: URL;
+  try {
+    parsed = new URL(normalized);
+  } catch {
+    throw new Error("Invalid remote ChatGPT URL.");
+  }
+  if (
+    !/^https?:$/i.test(parsed.protocol) ||
+    parsed.username ||
+    parsed.password ||
+    parsed.hash ||
+    !normalizedOrigins.has(parsed.origin)
+  ) {
+    throw new Error("Invalid remote ChatGPT URL.");
+  }
   return parsed.toString();
 }
 

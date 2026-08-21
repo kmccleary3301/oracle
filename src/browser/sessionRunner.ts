@@ -2,12 +2,28 @@ import chalk from "chalk";
 import type { RunOracleOptions } from "../oracle.js";
 import { formatTokenCount } from "../oracle/runUtils.js";
 import { formatFinishLine } from "../oracle/finishLine.js";
-import type { BrowserSessionConfig, BrowserRuntimeMetadata } from "../sessionStore.js";
+import type {
+  BrowserModelSelectionEvidence,
+  BrowserRunWarning,
+  BrowserSessionConfig,
+  BrowserRuntimeMetadata,
+  SessionArtifact,
+} from "../sessionStore.js";
 import { runBrowserMode } from "../browserMode.js";
 import type { BrowserRunResult } from "../browserMode.js";
 import { assembleBrowserPrompt } from "./prompt.js";
 import { BrowserAutomationError } from "../oracle/errors.js";
-import type { BrowserLogger } from "./types.js";
+import type { BrowserArchiveResult, BrowserLogger } from "./types.js";
+import {
+  appendArtifacts,
+  saveBrowserTranscriptArtifact,
+  saveDeepResearchReportArtifact,
+} from "./artifacts.js";
+import {
+  formatBrowserModelSelectionEvidence,
+  formatBrowserModelTarget,
+  resolveBrowserModelDisplayName,
+} from "./modelDisplay.js";
 
 export interface BrowserExecutionResult {
   usage: {
@@ -18,7 +34,11 @@ export interface BrowserExecutionResult {
   };
   elapsedMs: number;
   runtime: BrowserRuntimeMetadata;
+  archive?: BrowserArchiveResult;
+  modelSelection?: BrowserModelSelectionEvidence;
+  warnings?: BrowserRunWarning[];
   answerText: string;
+  artifacts?: SessionArtifact[];
 }
 
 interface RunBrowserSessionArgs {
@@ -31,7 +51,83 @@ interface RunBrowserSessionArgs {
 export interface BrowserSessionRunnerDeps {
   assemblePrompt?: typeof assembleBrowserPrompt;
   executeBrowser?: typeof runBrowserMode;
-  persistRuntimeHint?: (runtime: BrowserRuntimeMetadata) => Promise<void> | void;
+  persistRuntimeHint?: (
+    runtime: BrowserRuntimeMetadata,
+    modelSelection?: BrowserModelSelectionEvidence,
+  ) => Promise<void> | void;
+}
+
+const LARGE_PRO_FAST_INPUT_TOKEN_THRESHOLD = 25_000;
+const LARGE_PRO_FAST_ELAPSED_MS_THRESHOLD = 120_000;
+
+function buildUnavailableModelSelectionEvidence(
+  browserConfig: BrowserSessionConfig,
+): BrowserModelSelectionEvidence | undefined {
+  if (!browserConfig.desiredModel) {
+    return undefined;
+  }
+  return {
+    requestedModel: browserConfig.desiredModel,
+    resolvedLabel: null,
+    strategy: browserConfig.modelStrategy,
+    status: "unavailable",
+    verified: false,
+    source: "config",
+    capturedAt: new Date().toISOString(),
+  };
+}
+
+function isRequestedProBrowserRun(
+  runOptions: RunOracleOptions,
+  browserConfig: BrowserSessionConfig,
+  evidence?: BrowserModelSelectionEvidence,
+): boolean {
+  const candidates = [
+    runOptions.model,
+    browserConfig.desiredModel,
+    evidence?.requestedModel,
+    evidence?.resolvedLabel,
+  ];
+  return candidates.some((value) => typeof value === "string" && /\bpro\b/i.test(value));
+}
+
+export function buildBrowserRunWarningsForTest(args: {
+  runOptions: RunOracleOptions;
+  browserConfig: BrowserSessionConfig;
+  inputTokens: number;
+  elapsedMs: number;
+  modelSelection?: BrowserModelSelectionEvidence;
+}): BrowserRunWarning[] {
+  return buildBrowserRunWarnings(args);
+}
+
+function buildBrowserRunWarnings(args: {
+  runOptions: RunOracleOptions;
+  browserConfig: BrowserSessionConfig;
+  inputTokens: number;
+  elapsedMs: number;
+  modelSelection?: BrowserModelSelectionEvidence;
+}): BrowserRunWarning[] {
+  if (
+    !isRequestedProBrowserRun(args.runOptions, args.browserConfig, args.modelSelection) ||
+    args.inputTokens < LARGE_PRO_FAST_INPUT_TOKEN_THRESHOLD ||
+    args.elapsedMs >= LARGE_PRO_FAST_ELAPSED_MS_THRESHOLD
+  ) {
+    return [];
+  }
+  return [
+    {
+      code: "browser-pro-fast-large-run",
+      severity: "warning",
+      message: `Large browser Pro run completed quickly (${(args.elapsedMs / 1000).toFixed(0)}s for ~${args.inputTokens.toLocaleString()} input tokens); verify the stored model selection evidence before claiming Pro Extended output.`,
+      details: {
+        inputTokens: args.inputTokens,
+        elapsedMs: args.elapsedMs,
+        requestedModel: args.modelSelection?.requestedModel ?? args.browserConfig.desiredModel,
+        resolvedLabel: args.modelSelection?.resolvedLabel ?? null,
+      },
+    },
+  ];
 }
 
 export async function runBrowserSessionExecution(
@@ -77,10 +173,19 @@ export async function runBrowserSessionExecution(
       ),
     );
   }
-  const headerLine = `Launching browser mode (${runOptions.model}) with ~${promptArtifacts.estimatedInputTokens.toLocaleString()} tokens.`;
+  const launchModel = formatBrowserModelTarget({
+    model: runOptions.model,
+    desiredModel: browserConfig.desiredModel,
+    modelStrategy: browserConfig.modelStrategy,
+  });
+  const headerLine = `Launching browser mode (${launchModel}) with ~${promptArtifacts.estimatedInputTokens.toLocaleString()} tokens.`;
   const automationLogger: BrowserLogger = ((message?: string) => {
     if (typeof message !== "string") return;
-    const shouldAlwaysPrint = message.startsWith("[browser] ") && /fallback|retry/i.test(message);
+    const shouldAlwaysPrint =
+      message.startsWith("[browser] ") &&
+      /archive|fallback|follow-up|retry|thinking|waiting for chatgpt|browser slot|browser control|browser guidance|model selection|model picker/i.test(
+        message,
+      );
     if (!runOptions.verbose && !shouldAlwaysPrint) return;
     log(message);
   }) as BrowserLogger;
@@ -93,6 +198,9 @@ export async function runBrowserSessionExecution(
     log(chalk.dim("Chrome automation does not stream output; this may take a minute..."));
   }
   const persistRuntimeHint = deps.persistRuntimeHint ?? (() => {});
+  const executionBrowserConfig = runOptions.browserResumeConversationUrl
+    ? { ...browserConfig, resumeConversationUrl: runOptions.browserResumeConversationUrl }
+    : browserConfig;
   let browserResult: BrowserRunResult;
   try {
     browserResult = await executeBrowser({
@@ -104,15 +212,24 @@ export async function runBrowserSessionExecution(
             attachments: promptArtifacts.fallback.attachments,
           }
         : undefined,
-      config: browserConfig,
+      config: executionBrowserConfig,
       log: automationLogger,
       heartbeatIntervalMs: runOptions.heartbeatIntervalMs,
       verbose: runOptions.verbose,
-      runtimeHintCb: async (runtime) => {
-        await persistRuntimeHint({
+      sessionId: runOptions.sessionId,
+      generateImagePath: runOptions.generateImage,
+      outputPath: runOptions.outputPath,
+      followUpPrompts: runOptions.browserFollowUps,
+      runtimeHintCb: async (runtime, modelSelection) => {
+        const runtimeWithController = {
           ...runtime,
           controllerPid: runtime.controllerPid ?? process.pid,
-        });
+        };
+        if (modelSelection) {
+          await persistRuntimeHint(runtimeWithController, modelSelection);
+        } else {
+          await persistRuntimeHint(runtimeWithController);
+        }
       },
     });
   } catch (error) {
@@ -122,12 +239,38 @@ export async function runBrowserSessionExecution(
     const message = error instanceof Error ? error.message : "Browser automation failed.";
     throw new BrowserAutomationError(message, { stage: "execute-browser" }, error);
   }
+  const modelSelection =
+    browserResult.modelSelection ?? buildUnavailableModelSelectionEvidence(browserConfig);
+  if (modelSelection) {
+    log(
+      `[browser] Model selection evidence: ${formatBrowserModelSelectionEvidence(modelSelection, runOptions.model)}`,
+    );
+  }
+  const warnings = buildBrowserRunWarnings({
+    runOptions,
+    browserConfig,
+    inputTokens: promptArtifacts.estimatedInputTokens,
+    elapsedMs: browserResult.tookMs,
+    modelSelection,
+  });
+  for (const warning of warnings) {
+    log(chalk.yellow(`[browser] ${warning.message}`));
+  }
   if (!runOptions.silent) {
     log(chalk.bold("Answer:"));
     log(browserResult.answerMarkdown || browserResult.answerText || chalk.dim("(no text output)"));
     log("");
   }
   const answerText = browserResult.answerMarkdown || browserResult.answerText || "";
+  const savedArtifacts = await ensureSessionArtifacts({
+    sessionId: runOptions.sessionId,
+    prompt: promptArtifacts.composerText,
+    answerMarkdown: answerText,
+    conversationUrl: browserResult.tabUrl,
+    browserConfig,
+    existingArtifacts: browserResult.artifacts,
+    logger: automationLogger,
+  });
   const usage = {
     inputTokens: promptArtifacts.estimatedInputTokens,
     outputTokens: browserResult.answerTokens,
@@ -149,7 +292,7 @@ export async function runBrowserSessionExecution(
   })();
   const { line1, line2 } = formatFinishLine({
     elapsedMs: browserResult.tookMs,
-    model: `${runOptions.model}[browser]`,
+    model: `${resolveBrowserModelDisplayName({ model: runOptions.model, evidence: modelSelection })}[browser]`,
     tokensPart,
     detailParts: [
       runOptions.file && runOptions.file.length > 0 ? `files=${runOptions.file.length}` : null,
@@ -163,17 +306,61 @@ export async function runBrowserSessionExecution(
     usage,
     elapsedMs: browserResult.tookMs,
     runtime: {
+      browserTransport: browserResult.browserTransport,
       chromePid: browserResult.chromePid,
       chromePort: browserResult.chromePort,
       chromeHost: browserResult.chromeHost,
+      chromeBrowserWSEndpoint: browserResult.chromeBrowserWSEndpoint,
+      chromeProfileRoot: browserResult.chromeProfileRoot,
       userDataDir: browserResult.userDataDir,
       chromeTargetId: browserResult.chromeTargetId,
       tabUrl: browserResult.tabUrl,
-      conversationId: browserResult.tabUrl
-        ? browserResult.tabUrl.match(/\/c\/([a-zA-Z0-9-]+)/)?.[1]
-        : undefined,
+      conversationId: browserResult.conversationId,
+      promptSubmitted: browserResult.promptSubmitted,
       controllerPid: browserResult.controllerPid ?? process.pid,
     },
+    archive: browserResult.archive,
+    modelSelection,
+    warnings,
     answerText,
+    artifacts: savedArtifacts,
   };
+}
+
+export async function ensureSessionArtifacts(params: {
+  sessionId?: string;
+  prompt: string;
+  answerMarkdown: string;
+  conversationUrl?: string;
+  browserConfig: BrowserSessionConfig;
+  existingArtifacts?: SessionArtifact[];
+  logger: BrowserLogger;
+}): Promise<SessionArtifact[] | undefined> {
+  if (!params.sessionId || !params.answerMarkdown.trim()) {
+    return params.existingArtifacts;
+  }
+  let artifacts = params.existingArtifacts;
+  const hasReport = artifacts?.some((artifact) => artifact.kind === "deep-research-report");
+  if (params.browserConfig.researchMode === "deep" && !hasReport) {
+    const report = await saveDeepResearchReportArtifact({
+      sessionId: params.sessionId,
+      reportMarkdown: params.answerMarkdown,
+      conversationUrl: params.conversationUrl,
+      logger: params.logger,
+    }).catch(() => null);
+    artifacts = appendArtifacts(artifacts, [report]);
+  }
+  const hasTranscript = artifacts?.some((artifact) => artifact.kind === "transcript");
+  if (!hasTranscript) {
+    const transcript = await saveBrowserTranscriptArtifact({
+      sessionId: params.sessionId,
+      prompt: params.prompt,
+      answerMarkdown: params.answerMarkdown,
+      conversationUrl: params.conversationUrl,
+      artifacts,
+      logger: params.logger,
+    }).catch(() => null);
+    artifacts = appendArtifacts(artifacts, [transcript]);
+  }
+  return artifacts;
 }

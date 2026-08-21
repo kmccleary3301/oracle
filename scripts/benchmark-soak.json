@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "mode": "soak",
+  "sampleIntervalMs": 5000,
+  "runDurationMs": 28800000,
+  "scenarios": [
+    {
+      "id": "submit-evict-poll-cycle",
+      "kind": "chat",
+      "operation": "create",
+      "iterations": 200,
+      "concurrency": 2,
+      "inputShape": "short",
+      "faults": []
+    },
+    {
+      "id": "followup-cycle",
+      "kind": "chat",
+      "operation": "followup",
+      "iterations": 200,
+      "concurrency": 1,
+      "inputShape": "short",
+      "faults": []
+    }
+  ]
+}

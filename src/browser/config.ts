@@ -1,29 +1,61 @@
-import { CHATGPT_URL, DEFAULT_MODEL_STRATEGY, DEFAULT_MODEL_TARGET } from "./constants.js";
+import {
+  CHATGPT_URL,
+  DEEP_RESEARCH_DEFAULT_TIMEOUT_MS,
+  DEFAULT_MODEL_STRATEGY,
+  DEFAULT_MODEL_TARGET,
+} from "./constants.js";
 import { normalizeBrowserModelStrategy } from "./modelStrategy.js";
+import { DEFAULT_BROWSER_RESOURCE_WATCHDOG_CONFIG } from "./resourceWatchdog.js";
+const DEFAULT_MAX_CONCURRENT_CHATGPT_TABS = 3;
+
+function normalizeMaxConcurrentTabs(value: unknown): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_CONCURRENT_CHATGPT_TABS;
+}
 import type { BrowserAutomationConfig, ResolvedBrowserConfig } from "./types.js";
-import { isTemporaryChatUrl, normalizeChatgptUrl } from "./utils.js";
+import { normalizeChatgptUrl } from "./utils.js";
 import os from "node:os";
 import path from "node:path";
 import { DEFAULT_REMOTE_CHROME_MAX_TABS } from "./remoteChromeTabs.js";
+
+export const DEFAULT_CHATGPT_COOKIE_NAMES = [
+  "__Secure-next-auth.session-token",
+  "__Secure-next-auth.session-token.0",
+  "__Secure-next-auth.session-token.1",
+  "_account",
+  "cf_clearance",
+  "__cf_bm",
+  "_cfuvid",
+  "CF_Authorization",
+  "__cflb",
+];
 
 export const DEFAULT_BROWSER_CONFIG: ResolvedBrowserConfig = {
   chromeProfile: null,
   chromePath: null,
   chromeCookiePath: null,
+  attachRunning: false,
+  browserTabRef: null,
   url: CHATGPT_URL,
   chatgptUrl: CHATGPT_URL,
   timeoutMs: 90 * 60_000,
   debugPort: null,
   inputTimeoutMs: 60_000,
+  attachmentTimeoutMs: 45_000,
   assistantRecheckDelayMs: 0,
   assistantRecheckTimeoutMs: 180_000,
   reuseChromeWaitMs: 10_000,
   profileLockTimeoutMs: 300_000,
+  maxConcurrentTabs: DEFAULT_MAX_CONCURRENT_CHATGPT_TABS,
   autoReattachDelayMs: 0,
   autoReattachIntervalMs: 0,
   autoReattachTimeoutMs: 180_000,
+  resourceMonitorIntervalMs: DEFAULT_BROWSER_RESOURCE_WATCHDOG_CONFIG.pollIntervalMs,
+  resourceRssSoftLimitBytes: DEFAULT_BROWSER_RESOURCE_WATCHDOG_CONFIG.rssSoftBytes,
+  resourceRssHardLimitBytes: DEFAULT_BROWSER_RESOURCE_WATCHDOG_CONFIG.rssHardBytes,
+  resourceRssResumeLimitBytes: DEFAULT_BROWSER_RESOURCE_WATCHDOG_CONFIG.rssResumeBytes,
   cookieSync: true,
-  cookieNames: null,
+  cookieNames: DEFAULT_CHATGPT_COOKIE_NAMES,
   cookieSyncWaitMs: 0,
   inlineCookies: null,
   inlineCookiesSource: null,
@@ -35,10 +67,15 @@ export const DEFAULT_BROWSER_CONFIG: ResolvedBrowserConfig = {
   debug: false,
   allowCookieErrors: false,
   remoteChrome: null,
+  remoteChromeBrowserWSEndpoint: null,
+  remoteChromeProfileRoot: null,
   remoteChromeMaxTabs: DEFAULT_REMOTE_CHROME_MAX_TABS,
   manualLogin: false,
   manualLoginProfileDir: null,
   manualLoginCookieSync: false,
+  researchMode: "off",
+  archiveConversations: "auto",
+  resumeConversationUrl: null,
   sandboxArtifactsOutputDir: null,
   thinkingFallback: "allow",
 };
@@ -52,6 +89,9 @@ export function resolveBrowserConfig(
   const envAllowCookieErrors =
     (process.env.ORACLE_BROWSER_ALLOW_COOKIE_ERRORS ?? "").trim().toLowerCase() === "true" ||
     (process.env.ORACLE_BROWSER_ALLOW_COOKIE_ERRORS ?? "").trim() === "1";
+  const envMaxConcurrentTabs = parseMaxConcurrentTabs(
+    process.env.ORACLE_BROWSER_MAX_CONCURRENT_TABS,
+  );
   const rawUrl = config?.chatgptUrl ?? config?.url ?? DEFAULT_BROWSER_CONFIG.url;
   const normalizedUrl = normalizeChatgptUrl(
     rawUrl ?? DEFAULT_BROWSER_CONFIG.url,
@@ -63,32 +103,27 @@ export function resolveBrowserConfig(
     normalizeBrowserModelStrategy(config?.modelStrategy) ??
     DEFAULT_BROWSER_CONFIG.modelStrategy ??
     DEFAULT_MODEL_STRATEGY;
-  if (
-    modelStrategy === "select" &&
-    isTemporaryChatUrl(normalizedUrl) &&
-    /\bpro\b/i.test(desiredModel)
-  ) {
-    throw new Error(
-      "Temporary Chat mode does not expose Pro models in the ChatGPT model picker. " +
-        'Remove "temporary-chat=true" from your browser URL, or use a non-Pro model label (e.g. "GPT-5.2").',
-    );
-  }
   const isWindows = process.platform === "win32";
   const manualLogin =
     config?.manualLogin ?? (isWindows ? true : DEFAULT_BROWSER_CONFIG.manualLogin);
   const cookieSyncDefault = isWindows ? false : DEFAULT_BROWSER_CONFIG.cookieSync;
-  const resolvedProfileDir =
-    config?.manualLoginProfileDir ??
-    process.env.ORACLE_BROWSER_PROFILE_DIR ??
-    path.join(os.homedir(), ".oracle", "browser-profile");
+  const resolvedProfileDir = resolveManualLoginProfileDir(
+    config?.manualLoginProfileDir,
+    process.env.ORACLE_BROWSER_PROFILE_DIR,
+  );
+  const researchMode = normalizeResearchMode(config?.researchMode);
+  const archiveConversations = normalizeArchiveMode(config?.archiveConversations);
+  const defaultTimeoutMs =
+    researchMode === "deep" ? DEEP_RESEARCH_DEFAULT_TIMEOUT_MS : DEFAULT_BROWSER_CONFIG.timeoutMs;
   return {
     ...DEFAULT_BROWSER_CONFIG,
     ...config,
     url: normalizedUrl,
     chatgptUrl: normalizedUrl,
-    timeoutMs: config?.timeoutMs ?? DEFAULT_BROWSER_CONFIG.timeoutMs,
+    timeoutMs: config?.timeoutMs ?? defaultTimeoutMs,
     debugPort: config?.debugPort ?? debugPortEnv ?? DEFAULT_BROWSER_CONFIG.debugPort,
     inputTimeoutMs: config?.inputTimeoutMs ?? DEFAULT_BROWSER_CONFIG.inputTimeoutMs,
+    attachmentTimeoutMs: config?.attachmentTimeoutMs ?? DEFAULT_BROWSER_CONFIG.attachmentTimeoutMs,
     assistantRecheckDelayMs:
       config?.assistantRecheckDelayMs ?? DEFAULT_BROWSER_CONFIG.assistantRecheckDelayMs,
     assistantRecheckTimeoutMs:
@@ -96,11 +131,22 @@ export function resolveBrowserConfig(
     reuseChromeWaitMs: config?.reuseChromeWaitMs ?? DEFAULT_BROWSER_CONFIG.reuseChromeWaitMs,
     profileLockTimeoutMs:
       config?.profileLockTimeoutMs ?? DEFAULT_BROWSER_CONFIG.profileLockTimeoutMs,
+    maxConcurrentTabs: normalizeMaxConcurrentTabs(
+      config?.maxConcurrentTabs ?? envMaxConcurrentTabs ?? DEFAULT_BROWSER_CONFIG.maxConcurrentTabs,
+    ),
     autoReattachDelayMs: config?.autoReattachDelayMs ?? DEFAULT_BROWSER_CONFIG.autoReattachDelayMs,
     autoReattachIntervalMs:
       config?.autoReattachIntervalMs ?? DEFAULT_BROWSER_CONFIG.autoReattachIntervalMs,
     autoReattachTimeoutMs:
       config?.autoReattachTimeoutMs ?? DEFAULT_BROWSER_CONFIG.autoReattachTimeoutMs,
+    resourceMonitorIntervalMs:
+      config?.resourceMonitorIntervalMs ?? DEFAULT_BROWSER_CONFIG.resourceMonitorIntervalMs,
+    resourceRssSoftLimitBytes:
+      config?.resourceRssSoftLimitBytes ?? DEFAULT_BROWSER_CONFIG.resourceRssSoftLimitBytes,
+    resourceRssHardLimitBytes:
+      config?.resourceRssHardLimitBytes ?? DEFAULT_BROWSER_CONFIG.resourceRssHardLimitBytes,
+    resourceRssResumeLimitBytes:
+      config?.resourceRssResumeLimitBytes ?? DEFAULT_BROWSER_CONFIG.resourceRssResumeLimitBytes,
     cookieSync: config?.cookieSync ?? cookieSyncDefault,
     cookieNames: config?.cookieNames ?? DEFAULT_BROWSER_CONFIG.cookieNames,
     cookieSyncWaitMs: config?.cookieSyncWaitMs ?? DEFAULT_BROWSER_CONFIG.cookieSyncWaitMs,
@@ -114,12 +160,22 @@ export function resolveBrowserConfig(
     chromeProfile: config?.chromeProfile ?? DEFAULT_BROWSER_CONFIG.chromeProfile,
     chromePath: config?.chromePath ?? DEFAULT_BROWSER_CONFIG.chromePath,
     chromeCookiePath: config?.chromeCookiePath ?? DEFAULT_BROWSER_CONFIG.chromeCookiePath,
+    attachRunning: config?.attachRunning ?? DEFAULT_BROWSER_CONFIG.attachRunning,
+    browserTabRef: config?.browserTabRef ?? DEFAULT_BROWSER_CONFIG.browserTabRef,
     debug: config?.debug ?? DEFAULT_BROWSER_CONFIG.debug,
     allowCookieErrors:
       config?.allowCookieErrors ?? envAllowCookieErrors ?? DEFAULT_BROWSER_CONFIG.allowCookieErrors,
+    remoteChromeBrowserWSEndpoint:
+      config?.remoteChromeBrowserWSEndpoint ?? DEFAULT_BROWSER_CONFIG.remoteChromeBrowserWSEndpoint,
+    remoteChromeProfileRoot:
+      config?.remoteChromeProfileRoot ?? DEFAULT_BROWSER_CONFIG.remoteChromeProfileRoot,
     remoteChromeMaxTabs: config?.remoteChromeMaxTabs ?? DEFAULT_BROWSER_CONFIG.remoteChromeMaxTabs,
     thinkingTime: config?.thinkingTime,
     thinkingFallback: config?.thinkingFallback ?? DEFAULT_BROWSER_CONFIG.thinkingFallback,
+    researchMode,
+    archiveConversations,
+    resumeConversationUrl:
+      config?.resumeConversationUrl ?? DEFAULT_BROWSER_CONFIG.resumeConversationUrl,
     manualLogin,
     manualLoginProfileDir: manualLogin ? resolvedProfileDir : null,
     manualLoginCookieSync:
@@ -129,6 +185,14 @@ export function resolveBrowserConfig(
   };
 }
 
+function normalizeResearchMode(value: unknown): "off" | "deep" {
+  return value === "deep" ? "deep" : "off";
+}
+
+function normalizeArchiveMode(value: unknown): "auto" | "always" | "never" {
+  return value === "always" || value === "never" ? value : "auto";
+}
+
 function parseDebugPort(raw?: string | null): number | null {
   if (!raw) return null;
   const value = Number.parseInt(raw, 10);
@@ -136,4 +200,23 @@ function parseDebugPort(raw?: string | null): number | null {
     return null;
   }
   return value;
+}
+
+function parseMaxConcurrentTabs(raw?: string | null): number | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const value = Number(trimmed);
+  if (!Number.isInteger(value) || value <= 0) {
+    return null;
+  }
+  return value;
+}
+
+function resolveManualLoginProfileDir(...candidates: Array<string | null | undefined>): string {
+  for (const candidate of candidates) {
+    const profileDir = candidate?.trim();
+    if (profileDir) return profileDir;
+  }
+  return path.join(os.homedir(), ".oracle", "browser-profile");
 }

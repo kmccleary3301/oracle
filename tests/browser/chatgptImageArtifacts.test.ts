@@ -5,6 +5,7 @@ import {
   dedupeGeneratedImageRecords,
   extractGeneratedImageFileId,
   isLikelyChatgptGeneratedImageUrl,
+  snapshotChatgptPage,
 } from "../../src/browser/chatgpt/imageArtifacts.ts";
 import type { ChatgptImageDomRecord } from "../../src/browser/chatgpt/types.ts";
 
@@ -102,5 +103,42 @@ describe("ChatGPT generated image artifact helpers", () => {
       "file_0000000020f871f78710b9237d400647",
     ]);
     expect(images.map((image) => image.duplicateNodeCount)).toEqual([6, 3, 3, 3, 3, 3, 3]);
+  });
+  test("does not treat sidebar conversations containing model as the model menu", async () => {
+    const sidebarButton = {
+      innerText: "",
+      textContent: "",
+      getAttribute: (name: string) =>
+        name === "aria-label" ? "Open conversation options for Best Video Gen Models" : null,
+      closest: () => ({}),
+    };
+    const document = {
+      title: "ChatGPT",
+      readyState: "complete",
+      images: [],
+      body: { innerText: "" },
+      querySelector: () => null,
+      querySelectorAll: (selector: string) =>
+        selector.includes('button[aria-label*="model" i]') ? [sidebarButton] : [],
+    };
+    const Runtime = {
+      evaluate: async ({ expression }: { expression: string }) => ({
+        result: {
+          value: Function(
+            "document",
+            "location",
+            `return ${expression}`,
+          )(document, {
+            href: "https://chatgpt.com/",
+            pathname: "/",
+          }),
+        },
+      }),
+    };
+
+    await expect(snapshotChatgptPage(Runtime as never)).resolves.toMatchObject({
+      hasModelMenu: false,
+      modelMenuLabel: "",
+    });
   });
 });

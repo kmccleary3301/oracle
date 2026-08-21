@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "kind": "authenticated-workspace-matrix",
+  "capturedAt": "2026-08-12T18:22:20.901Z",
+  "evidence": {
+    "source": "live",
+    "sessionCookie": "present",
+    "accountSelector": {
+      "status": "ok",
+      "capability": "observed"
+    },
+    "personalDefault": {
+      "status": "ok",
+      "pageIdentity": "chatgpt_app",
+      "authState": "logged_in",
+      "capabilityStatus": "ok",
+      "modes": ["chat", "search", "work"],
+      "models": ["gpt-4o"],
+      "effort": ["pro"],
+      "uploads": {
+        "file": true,
+        "image": true,
+        "multiple": true
+      }
+    },
+    "configuredProjectWorkspace": {
+      "configured": true,
+      "attempted": true,
+      "status": "ok",
+      "pageIdentity": "chatgpt_app",
+      "authState": "logged_in",
+      "capabilityStatus": "ok"
+    },
+    "projects": {
+      "list": {
+        "status": "ok",
+        "count": 24,
+        "attempted": true
+      },
+      "get": {
+        "status": "ok",
+        "attempted": true,
+        "source": "configured"
+      }
+    },
+    "surfaces": {
+      "research": {
+        "status": "unsupported",
+        "reason": "unsupported_ui",
+        "operation": "status"
+      },
+      "files": {
+        "status": "ok",
+        "operation": "control"
+      },
+      "images": {
+        "status": "ok",
+        "operation": "status",
+        "entryCount": 0
+      }
+    }
+  },
+  "fixtureEvidence": [
+    {
+      "case": "missing_project_url",
+      "status": "covered",
+      "testPath": "tests/live/browser-fast-live.test.ts"
+    },
+    {
+      "case": "disconnect",
+      "status": "covered",
+      "testPath": "tests/browser/cdpLiveness.test.ts"
+    },
+    {
+      "case": "stale_revision",
+      "status": "covered",
+      "testPath": "tests/browser/projectLifecycle.test.ts"
+    },
+    {
+      "case": "unsupported_ui",
+      "status": "covered",
+      "testPath": "tests/browser/projectLifecycle.test.ts"
+    }
+  ]
+}

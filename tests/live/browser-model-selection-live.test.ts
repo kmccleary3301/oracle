@@ -40,27 +40,22 @@ function normalizeLabel(label: string): string {
   return label.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
+function isMissingChatGptSessionError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /ChatGPT session not detected|Login button detected|login appears missing/i.test(message);
+}
+
 const CASES = [
   {
-    name: "auto",
-    desiredModel: "GPT-5.2",
-    expected: ["5.2"],
-  },
-  {
-    name: "thinking",
-    desiredModel: "GPT-5.2 Thinking",
-    expected: ["5.2", "thinking"],
-  },
-  {
-    name: "instant",
-    desiredModel: "GPT-5.2 Instant",
-    expected: ["5.2", "instant"],
+    name: "pro",
+    desiredModel: "Pro",
+    expected: ["pro"],
   },
 ];
 
 (LIVE ? describe : describe.skip)("ChatGPT browser live model selection", () => {
   test(
-    "selects GPT-5.2 variants reliably",
+    "selects the current bare Pro picker row reliably",
     async () => {
       if (!(await hasChatGptCookies())) return;
       // Learned: serialize live browser tests to avoid Chrome profile contention.
@@ -100,6 +95,12 @@ const CASES = [
               break;
             } catch (error) {
               const message = error instanceof Error ? error.message : String(error);
+              if (isMissingChatGptSessionError(error)) {
+                console.warn(
+                  "Skipping ChatGPT browser model selection live test (stale ChatGPT session cookie).",
+                );
+                return;
+              }
               if (message.includes("Unable to find model option")) {
                 console.warn(
                   `Skipping ${entry.name} model selection (not available for this account): ${message}`,

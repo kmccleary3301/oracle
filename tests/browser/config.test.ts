@@ -1,16 +1,50 @@
-import { describe, expect, test } from "vitest";
-import { resolveBrowserConfig } from "../../src/browser/config.js";
-import { CHATGPT_URL } from "../../src/browser/constants.js";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import os from "node:os";
+import path from "node:path";
+import { DEFAULT_CHATGPT_COOKIE_NAMES, resolveBrowserConfig } from "../../src/browser/config.js";
+import { CHATGPT_URL, DEEP_RESEARCH_DEFAULT_TIMEOUT_MS } from "../../src/browser/constants.js";
 
 describe("resolveBrowserConfig", () => {
+  const originalProfileDir = process.env.ORACLE_BROWSER_PROFILE_DIR;
+  const originalMaxTabs = process.env.ORACLE_BROWSER_MAX_CONCURRENT_TABS;
+
+  beforeEach(() => {
+    // Isolate from the caller's environment: a developer/CI export of the max-tabs
+    // override must not leak into tests that assert built-in defaults. afterEach
+    // below still restores the caller's original value once the suite finishes.
+    delete process.env.ORACLE_BROWSER_MAX_CONCURRENT_TABS;
+  });
+
+  afterEach(() => {
+    if (originalProfileDir === undefined) {
+      delete process.env.ORACLE_BROWSER_PROFILE_DIR;
+    } else {
+      process.env.ORACLE_BROWSER_PROFILE_DIR = originalProfileDir;
+    }
+    if (originalMaxTabs === undefined) {
+      delete process.env.ORACLE_BROWSER_MAX_CONCURRENT_TABS;
+    } else {
+      process.env.ORACLE_BROWSER_MAX_CONCURRENT_TABS = originalMaxTabs;
+    }
+  });
+
   test("returns defaults when config missing", () => {
     const resolved = resolveBrowserConfig(undefined);
     expect(resolved.url).toBe(CHATGPT_URL);
     const isWindows = process.platform === "win32";
     expect(resolved.cookieSync).toBe(!isWindows);
+    expect(resolved.cookieNames).toEqual(DEFAULT_CHATGPT_COOKIE_NAMES);
     expect(resolved.headless).toBe(false);
     expect(resolved.manualLogin).toBe(isWindows);
     expect(resolved.profileLockTimeoutMs).toBe(300_000);
+    expect(resolved.attachmentTimeoutMs).toBe(45_000);
+    expect(resolved.maxConcurrentTabs).toBe(3);
+    expect(resolved.resourceMonitorIntervalMs).toBe(1_000);
+    expect(resolved.resourceRssSoftLimitBytes).toBe(4 * 1024 ** 3);
+    expect(resolved.resourceRssHardLimitBytes).toBe(6 * 1024 ** 3);
+    expect(resolved.resourceRssResumeLimitBytes).toBe(3 * 1024 ** 3);
+    expect(resolved.researchMode).toBe("off");
+    expect(resolved.archiveConversations).toBe("auto");
   });
 
   test("applies overrides", () => {
@@ -18,32 +52,98 @@ describe("resolveBrowserConfig", () => {
       url: "https://example.com",
       timeoutMs: 123,
       inputTimeoutMs: 456,
+      attachmentTimeoutMs: 789,
       cookieSync: false,
       headless: true,
       desiredModel: "Custom",
       chromeProfile: "Profile 1",
       chromePath: "/Applications/Chrome",
+      browserTabRef: "current",
       sandboxArtifactsOutputDir: "/tmp/oracle-artifacts",
       debug: true,
+      maxConcurrentTabs: 5,
+      resourceMonitorIntervalMs: 250,
+      resourceRssSoftLimitBytes: 200,
+      resourceRssHardLimitBytes: 300,
+      resourceRssResumeLimitBytes: 100,
+      researchMode: "deep",
+      archiveConversations: "never",
     });
     expect(resolved.url).toBe("https://example.com/");
     expect(resolved.timeoutMs).toBe(123);
     expect(resolved.inputTimeoutMs).toBe(456);
+    expect(resolved.attachmentTimeoutMs).toBe(789);
     expect(resolved.cookieSync).toBe(false);
     expect(resolved.headless).toBe(true);
     expect(resolved.desiredModel).toBe("Custom");
     expect(resolved.chromeProfile).toBe("Profile 1");
     expect(resolved.chromePath).toBe("/Applications/Chrome");
+    expect(resolved.browserTabRef).toBe("current");
     expect(resolved.sandboxArtifactsOutputDir).toBe("/tmp/oracle-artifacts");
     expect(resolved.debug).toBe(true);
+    expect(resolved.maxConcurrentTabs).toBe(5);
+    expect(resolved.resourceMonitorIntervalMs).toBe(250);
+    expect(resolved.resourceRssSoftLimitBytes).toBe(200);
+    expect(resolved.resourceRssHardLimitBytes).toBe(300);
+    expect(resolved.resourceRssResumeLimitBytes).toBe(100);
+    expect(resolved.researchMode).toBe("deep");
+    expect(resolved.archiveConversations).toBe("never");
   });
 
-  test("rejects temporary chat URLs when desiredModel is Pro", () => {
-    expect(() =>
+  test("allows temporary chat URLs when desiredModel is Pro", () => {
+    const resolved = resolveBrowserConfig({
+      url: "https://chatgpt.com/?temporary-chat=true",
+      desiredModel: "GPT-5.2 Pro",
+    });
+
+    expect(resolved.url).toBe("https://chatgpt.com/?temporary-chat=true");
+    expect(resolved.desiredModel).toBe("GPT-5.2 Pro");
+    expect(resolved.modelStrategy).toBe("select");
+  });
+
+  test("resolves manual-login profile dirs from config, env, and default", () => {
+    process.env.ORACLE_BROWSER_PROFILE_DIR = "/tmp/env-profile";
+
+    expect(
       resolveBrowserConfig({
-        url: "https://chatgpt.com/?temporary-chat=true",
-        desiredModel: "GPT-5.2 Pro",
-      }),
-    ).toThrow(/Temporary Chat/i);
+        manualLogin: true,
+        manualLoginProfileDir: " /tmp/config-profile ",
+      }).manualLoginProfileDir,
+    ).toBe("/tmp/config-profile");
+
+    expect(resolveBrowserConfig({ manualLogin: true }).manualLoginProfileDir).toBe(
+      "/tmp/env-profile",
+    );
+
+    process.env.ORACLE_BROWSER_PROFILE_DIR = "   ";
+    expect(resolveBrowserConfig({ manualLogin: true }).manualLoginProfileDir).toBe(
+      path.join(os.homedir(), ".oracle", "browser-profile"),
+    );
+
+    expect(resolveBrowserConfig({ manualLogin: false }).manualLoginProfileDir).toBeNull();
+  });
+
+  test("resolves maxConcurrentTabs from config, env, and default", () => {
+    process.env.ORACLE_BROWSER_MAX_CONCURRENT_TABS = "5";
+    expect(resolveBrowserConfig({ maxConcurrentTabs: 2 }).maxConcurrentTabs).toBe(2);
+    expect(resolveBrowserConfig(undefined).maxConcurrentTabs).toBe(5);
+
+    process.env.ORACLE_BROWSER_MAX_CONCURRENT_TABS = "0";
+    expect(resolveBrowserConfig(undefined).maxConcurrentTabs).toBe(3);
+
+    process.env.ORACLE_BROWSER_MAX_CONCURRENT_TABS = "not-a-number";
+    expect(resolveBrowserConfig(undefined).maxConcurrentTabs).toBe(3);
+
+    for (const malformed of ["5junk", "2.5", "1e2"]) {
+      process.env.ORACLE_BROWSER_MAX_CONCURRENT_TABS = malformed;
+      expect(resolveBrowserConfig(undefined).maxConcurrentTabs).toBe(3);
+    }
+  });
+
+  test("uses the longer Deep Research timeout unless explicitly overridden", () => {
+    expect(resolveBrowserConfig({ researchMode: "deep" }).timeoutMs).toBe(
+      DEEP_RESEARCH_DEFAULT_TIMEOUT_MS,
+    );
+    expect(resolveBrowserConfig({ researchMode: "deep", timeoutMs: 123 }).timeoutMs).toBe(123);
   });
 });

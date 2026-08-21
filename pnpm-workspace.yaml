@@ -1,0 +1,10 @@
+overrides:
+  devtools-protocol: 0.0.1673900
+  hono: 4.13.0
+  "@hono/node-server": 2.1.0
+  fast-uri: 4.1.2
+  protobufjs: 8.7.1
+  vite: 8.2.0
+
+onlyBuiltDependencies:
+  - esbuild

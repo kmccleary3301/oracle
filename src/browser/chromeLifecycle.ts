@@ -1,14 +1,23 @@
 import { rm } from "node:fs/promises";
-import { readFileSync } from "node:fs";
-import os from "node:os";
 import net from "node:net";
-import { execFile, spawn } from "node:child_process";
-import { promisify } from "node:util";
+import os from "node:os";
+import { spawn } from "node:child_process";
 import CDP from "chrome-remote-interface";
 import { launch, Launcher, type LaunchedChrome } from "chrome-launcher";
 import type { BrowserLogger, ResolvedBrowserConfig, ChromeClient } from "./types.js";
+import { BrowserAutomationError } from "../oracle/errors.js";
+import {
+  attachCoordinatorTarget,
+  clearCoordinatorResourceObservation,
+  finalizeCoordinatorTarget,
+  recordCoordinatorResourceObservation,
+  reserveCoordinatorTarget,
+} from "./coordinatorRuntime.js";
+import type { CoordinatorRuntimeOptions, CoordinatorTargetLease } from "./coordinatorRuntime.js";
+import type { BrowserCoordinatorTargetRole } from "./coordinatorStore.js";
 import { cleanupStaleProfileState } from "./profileState.js";
 import { delay } from "./utils.js";
+import { resolveWslChromeLaunchRoute } from "./wslHost.js";
 import {
   closeRemoteChromePageTarget,
   DEFAULT_REMOTE_CHROME_MAX_TABS,
@@ -16,41 +25,348 @@ import {
   pruneRemoteChromeTargets,
   recordRemoteChromeTarget,
 } from "./remoteChromeTabs.js";
-
-const execFileAsync = promisify(execFile);
+import {
+  startOwnedChromeResourceWatchdog,
+  terminateVerifiedOwnedChromeTree,
+  type BrowserResourceWatchdog,
+} from "./resourceWatchdog.js";
+import {
+  startDetachedBrowserResourceWatchdog,
+  type DetachedBrowserResourceWatchdog,
+} from "./resourceWatchdogDetached.js";
+export interface MonitoredLaunchedChrome extends LaunchedChrome {
+  host?: string;
+  resourceExhaustion?: Promise<never>;
+  stopResourceWatchdog?: () => void;
+  stopDetachedResourceWatchdog?: () => Promise<void>;
+}
 
 export async function launchChrome(
   config: ResolvedBrowserConfig,
   userDataDir: string,
   logger: BrowserLogger,
-) {
-  const connectHost = resolveRemoteDebugHost();
-  const debugBindAddress = connectHost && connectHost !== "127.0.0.1" ? "0.0.0.0" : connectHost;
+): Promise<MonitoredLaunchedChrome> {
+  const { connectHost, debugBindAddress, usePatchedLauncher } = resolveWslChromeLaunchRoute();
   const debugPort = config.debugPort ?? parseDebugPortEnv();
-  const chromeFlags = buildChromeFlags(config.headless ?? false, debugBindAddress);
-  const usePatchedLauncher = Boolean(connectHost && connectHost !== "127.0.0.1");
+  const chromeFlags = buildChromeFlags(
+    config.headless ?? false,
+    debugBindAddress,
+    config.hideWindow ?? false,
+  );
+  // copy-profile reuses a copied signed-in profile whose cookies are
+  // Keychain-encrypted, so it must launch with the real Keychain (not mocked):
+  // strip the keychain-mocking flags from both chrome-launcher's defaults and
+  // Oracle's set, and ignore the defaults so they aren't re-added.
+  const usingCopiedProfile = Boolean(config.copyProfileSource);
+  if (usingCopiedProfile && config.chromeProfile) {
+    chromeFlags.push(`--profile-directory=${config.chromeProfile}`);
+  }
+  const launchOptions = resolveChromeLaunchOptions(chromeFlags, usingCopiedProfile);
   const launcher = usePatchedLauncher
     ? await launchWithCustomHost({
-        chromeFlags,
+        chromeFlags: launchOptions.chromeFlags,
         chromePath: config.chromePath ?? undefined,
         userDataDir,
         host: connectHost ?? "127.0.0.1",
         requestedPort: debugPort ?? undefined,
+        ignoreDefaultFlags: launchOptions.ignoreDefaultFlags,
         logger,
       })
     : await launch({
         chromePath: config.chromePath ?? undefined,
-        chromeFlags,
+        chromeFlags: launchOptions.chromeFlags,
         userDataDir,
         handleSIGINT: false,
         port: debugPort ?? undefined,
+        ignoreDefaultFlags: launchOptions.ignoreDefaultFlags,
       });
+  const coordinatorEndpoint = { host: connectHost ?? "127.0.0.1", port: launcher.port };
+  const originalKill = launcher.kill.bind(launcher);
+  const clearResourceGate = (): void => {
+    if (connectHost) return;
+    try {
+      clearCoordinatorResourceObservation(coordinatorEndpoint);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger(`[browser-resource] Failed to clear coordinator resource gate: ${message}`);
+    }
+  };
+  const killOwnedChrome = async (reportFailure: boolean): Promise<void> => {
+    try {
+      await originalKill();
+    } catch (error) {
+      if (reportFailure) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger(`[browser-resource] Chrome shutdown failed: ${message}`);
+      }
+    } finally {
+      clearResourceGate();
+    }
+  };
+  const monitored = Object.assign(launcher, {
+    host: connectHost ?? "127.0.0.1",
+  }) as MonitoredLaunchedChrome;
+  let detachedWatchdog: DetachedBrowserResourceWatchdog | null = null;
+  if (!connectHost) {
+    if (typeof launcher.pid !== "number") {
+      await killOwnedChrome(false);
+      throw new BrowserAutomationError(
+        "Launched Chrome did not expose a root PID; Oracle closed the unmonitored browser.",
+        { stage: "browser-resource-limit", reason: "root_pid_unavailable" },
+      );
+    }
+    let watchdog: BrowserResourceWatchdog | null = null;
+    try {
+      watchdog = await startOwnedChromeResourceWatchdog({
+        rootPid: launcher.pid,
+        profilePath: userDataDir,
+        logger,
+        config: {
+          pollIntervalMs: config.resourceMonitorIntervalMs,
+          rssSoftBytes: config.resourceRssSoftLimitBytes,
+          rssHardBytes: config.resourceRssHardLimitBytes,
+          rssResumeBytes: config.resourceRssResumeLimitBytes,
+        },
+        onSample: async (sample, decision) => {
+          recordCoordinatorResourceObservation(coordinatorEndpoint, sample, {
+            ...decision,
+            phase: decision.phase === "resident_grace" ? "soft" : decision.phase,
+          });
+        },
+        onHardLimit: async (error) => {
+          logger(`[browser-resource] ${error.message}`);
+          await killOwnedChrome(true);
+        },
+      });
+      detachedWatchdog = await startDetachedBrowserResourceWatchdog({
+        rootPid: launcher.pid,
+        profilePath: userDataDir,
+        logger,
+        config: {
+          pollIntervalMs: config.resourceMonitorIntervalMs,
+          rssSoftBytes: config.resourceRssSoftLimitBytes,
+          rssHardBytes: config.resourceRssHardLimitBytes,
+          rssResumeBytes: config.resourceRssResumeLimitBytes,
+        },
+      });
+    } catch (error) {
+      watchdog?.stop();
+      await detachedWatchdog?.stop();
+      await killOwnedChrome(false);
+      throw error;
+    }
+    if (!watchdog) {
+      throw new Error("Oracle failed to initialize the owned Chrome resource watchdog.");
+    }
+    logger(
+      `[browser-resource] Monitoring owned Chrome every ${config.resourceMonitorIntervalMs}ms; ` +
+        `soft ${(config.resourceRssSoftLimitBytes / 1024 ** 2).toFixed(0)} MiB, ` +
+        `hard ${(config.resourceRssHardLimitBytes / 1024 ** 2).toFixed(0)} MiB.`,
+    );
+    monitored.resourceExhaustion = watchdog.exhaustion;
+    monitored.stopResourceWatchdog = () => {
+      watchdog?.stop();
+      clearResourceGate();
+    };
+    monitored.stopDetachedResourceWatchdog = async () => {
+      const active = detachedWatchdog;
+      detachedWatchdog = null;
+      await active?.stop();
+    };
+    monitored.kill = async () => {
+      watchdog?.stop();
+      await monitored.stopDetachedResourceWatchdog?.();
+      await killOwnedChrome(true);
+    };
+  }
   const pidLabel = typeof launcher.pid === "number" ? ` (pid ${launcher.pid})` : "";
   const hostLabel = connectHost ? ` on ${connectHost}` : "";
   logger(`Launched Chrome${pidLabel} on port ${launcher.port}${hostLabel}`);
-  return Object.assign(launcher, { host: connectHost ?? "127.0.0.1" }) as LaunchedChrome & {
-    host?: string;
+  return monitored;
+}
+
+export interface LocalChromeResourceMonitor {
+  resourceExhaustion: Promise<never>;
+  stopResourceWatchdog: () => void;
+  stopDetachedResourceWatchdog?: () => Promise<void>;
+}
+
+export interface MonitorLocalChromeProcessInput {
+  port: number;
+  pid: number;
+  profileDir: string;
+  config: ResolvedBrowserConfig;
+  logger: BrowserLogger;
+}
+
+export async function monitorLocalChromeProcess(
+  input: MonitorLocalChromeProcessInput,
+): Promise<LocalChromeResourceMonitor> {
+  const { port, pid, profileDir, config, logger } = input;
+  const endpoint = { host: "127.0.0.1", port };
+  const clearResourceGate = (): void => {
+    try {
+      clearCoordinatorResourceObservation(endpoint);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger(`[browser-resource] Failed to clear coordinator resource gate: ${message}`);
+    }
   };
+  const watchdog = await startOwnedChromeResourceWatchdog({
+    rootPid: pid,
+    profilePath: profileDir,
+    logger,
+    config: {
+      pollIntervalMs: config.resourceMonitorIntervalMs,
+      rssSoftBytes: config.resourceRssSoftLimitBytes,
+      rssHardBytes: config.resourceRssHardLimitBytes,
+      rssResumeBytes: config.resourceRssResumeLimitBytes,
+    },
+    onSample: async (sample, decision) => {
+      recordCoordinatorResourceObservation(endpoint, sample, {
+        ...decision,
+        phase: decision.phase === "resident_grace" ? "soft" : decision.phase,
+      });
+    },
+    onHardLimit: async (error, evidence) => {
+      logger(`[browser-resource] ${error.message}`);
+      if (!evidence) {
+        logger(
+          "[browser-resource] Adopted Chrome was not terminated because fresh process identity evidence was unavailable.",
+        );
+        return;
+      }
+      const result = await terminateVerifiedOwnedChromeTree(evidence);
+      if (!result.terminated) {
+        logger(
+          `[browser-resource] Verified Chrome cleanup was incomplete (${result.reason}); ` +
+            `remaining pids: ${result.remainingPids.join(",") || "unknown"}.`,
+        );
+      }
+      clearResourceGate();
+    },
+  });
+  let detachedWatchdog: DetachedBrowserResourceWatchdog | null = null;
+  try {
+    detachedWatchdog = await startDetachedBrowserResourceWatchdog({
+      rootPid: pid,
+      profilePath: profileDir,
+      logger,
+      config: {
+        pollIntervalMs: config.resourceMonitorIntervalMs,
+        rssSoftBytes: config.resourceRssSoftLimitBytes,
+        rssHardBytes: config.resourceRssHardLimitBytes,
+        rssResumeBytes: config.resourceRssResumeLimitBytes,
+      },
+    });
+  } catch (error) {
+    watchdog.stop();
+    clearResourceGate();
+    throw error;
+  }
+  logger(
+    `[browser-resource] Monitoring adopted Chrome pid ${pid} every ` +
+      `${config.resourceMonitorIntervalMs}ms; soft ` +
+      `${(config.resourceRssSoftLimitBytes / 1024 ** 2).toFixed(0)} MiB, hard ` +
+      `${(config.resourceRssHardLimitBytes / 1024 ** 2).toFixed(0)} MiB.`,
+  );
+  return {
+    resourceExhaustion: watchdog.exhaustion,
+    stopResourceWatchdog: () => {
+      watchdog.stop();
+      clearResourceGate();
+    },
+    stopDetachedResourceWatchdog: async () => {
+      const active = detachedWatchdog;
+      detachedWatchdog = null;
+      await active?.stop();
+    },
+  };
+}
+
+export async function monitorAdoptedLocalChrome(
+  chrome: LaunchedChrome,
+  config: ResolvedBrowserConfig,
+  userDataDir: string,
+  logger: BrowserLogger,
+): Promise<MonitoredLaunchedChrome> {
+  if (typeof chrome.pid !== "number") {
+    throw new BrowserAutomationError(
+      "Oracle refused to reuse Chrome because its root PID could not be verified for memory monitoring.",
+      { stage: "browser-resource-limit", reason: "root_pid_unavailable" },
+    );
+  }
+  const monitor = await monitorLocalChromeProcess({
+    port: chrome.port,
+    pid: chrome.pid,
+    profileDir: userDataDir,
+    config,
+    logger,
+  });
+  return Object.assign(chrome, {
+    host: "127.0.0.1",
+    ...monitor,
+  }) as MonitoredLaunchedChrome;
+}
+
+export async function positionChromeWindowOffscreen(
+  client: ChromeClient,
+  logger: BrowserLogger,
+): Promise<void> {
+  if (process.platform !== "darwin") {
+    logger("Window hiding is only supported on macOS");
+    return;
+  }
+  try {
+    const { windowId } = await client.Browser.getWindowForTarget();
+    await client.Browser.setWindowBounds({
+      windowId,
+      bounds: { left: -32_000, top: -32_000, windowState: "normal" },
+    });
+    logger("Chrome window positioned off-screen");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger(`Failed to position Chrome window off-screen: ${message}`);
+  }
+}
+
+export function normalizeHeadlessUserAgent(userAgent: string): string {
+  return userAgent.replace(/\bHeadlessChrome\//g, "Chrome/");
+}
+
+export async function configureHeadlessUserAgent(
+  Network: ChromeClient["Network"],
+  Runtime: ChromeClient["Runtime"],
+  logger: BrowserLogger,
+): Promise<void> {
+  if (!Network || typeof Network.setUserAgentOverride !== "function") {
+    return;
+  }
+  try {
+    const { result } = await Runtime.evaluate({
+      expression: "navigator.userAgent",
+      returnByValue: true,
+    });
+    const currentUserAgent = typeof result?.value === "string" ? result.value : "";
+    const userAgent = normalizeHeadlessUserAgent(currentUserAgent);
+    if (!userAgent || userAgent === currentUserAgent) {
+      return;
+    }
+    const platform = /Windows/i.test(currentUserAgent)
+      ? "Win32"
+      : /Linux/i.test(currentUserAgent)
+        ? "Linux x86_64"
+        : "MacIntel";
+    await Network.setUserAgentOverride({
+      userAgent,
+      acceptLanguage: "en-US,en;q=0.9",
+      platform,
+    });
+    logger("[browser] Normalized headless Chrome user-agent for ChatGPT anti-bot checks");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger(`[browser] Headless user-agent normalization unavailable: ${message}`);
+  }
 }
 
 export function registerTerminationHooks(
@@ -65,6 +381,12 @@ export function registerTerminationHooks(
     emitRuntimeHint?: () => Promise<void>;
     /** Preserve the profile directory even when Chrome is terminated. */
     preserveUserDataDir?: boolean;
+    /**
+     * Always terminate Chrome and delete `userDataDir` on signal, even when the run is
+     * in-flight — for throwaway copied profiles (`--copy-profile`) that must not be left
+     * on disk. Overrides the in-flight "leave running" behavior.
+     */
+    forceProfileCleanup?: boolean;
   },
 ): () => void {
   const signals: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGQUIT"];
@@ -76,10 +398,15 @@ export function registerTerminationHooks(
     }
     handling = true;
     const inFlight = opts?.isInFlight?.() ?? false;
-    const leaveRunning = keepBrowser || inFlight;
+    const forceCleanup = opts?.forceProfileCleanup ?? false;
+    const leaveRunning = (keepBrowser || inFlight) && !forceCleanup;
     if (leaveRunning) {
       logger(
         `Received ${signal}; leaving Chrome running${inFlight ? " (assistant response pending)" : ""}`,
+      );
+    } else if (forceCleanup && (keepBrowser || inFlight)) {
+      logger(
+        `Received ${signal}; terminating Chrome and removing the copied profile (copy-profile is not retained)`,
       );
     } else {
       logger(`Received ${signal}; terminating Chrome process`);
@@ -130,32 +457,6 @@ export function registerTerminationHooks(
   };
 }
 
-export async function hideChromeWindow(
-  chrome: LaunchedChrome,
-  logger: BrowserLogger,
-): Promise<void> {
-  if (process.platform !== "darwin") {
-    logger("Window hiding is only supported on macOS");
-    return;
-  }
-  if (!chrome.pid) {
-    logger("Unable to hide window: missing Chrome PID");
-    return;
-  }
-  const script = `tell application "System Events"
-    try
-      set visible of (first process whose unix id is ${chrome.pid}) to false
-    end try
-  end tell`;
-  try {
-    await execFileAsync("osascript", ["-e", script]);
-    logger("Chrome window hidden (Cmd-H)");
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    logger(`Failed to hide Chrome window: ${message}`);
-  }
-}
-
 export async function connectToChrome(
   port: number,
   logger: BrowserLogger,
@@ -171,8 +472,26 @@ export async function connectToRemoteChrome(
   port: number,
   logger: BrowserLogger,
   targetUrl?: string,
-  options?: { maxTabs?: number },
+  browserWSEndpoint?: string,
+  options?: {
+    approvalWaitMs?: number;
+    maxTabs?: number;
+    coordinator?: CoordinatorRuntimeOptions;
+    role?: BrowserCoordinatorTargetRole;
+  },
 ): Promise<RemoteChromeConnection> {
+  const coordinatorOptions = options?.coordinator;
+  const role = options?.role;
+  if (browserWSEndpoint) {
+    return await connectToRemoteChromeTarget(host, port, logger, {
+      browserWSEndpoint,
+      targetUrl: targetUrl ?? "about:blank",
+      closeTargetOnDispose: true,
+      approvalWaitMs: options?.approvalWaitMs,
+      coordinator: coordinatorOptions,
+      role,
+    });
+  }
   if (targetUrl) {
     await pruneRemoteChromeTargets(host, port, logger, {
       maxTabs: options?.maxTabs ?? DEFAULT_REMOTE_CHROME_MAX_TABS,
@@ -189,6 +508,8 @@ export async function connectToRemoteChrome(
         `Failed to attach to dedicated remote Chrome tab ${targetId} (${message}); falling back to first target.`,
       closeFailed: (targetId, message) =>
         `Failed to close unused remote Chrome tab ${targetId}: ${message}`,
+      coordinator: coordinatorOptions,
+      role,
     });
     if (targetConnection) {
       await recordRemoteChromeTarget(host, port, targetConnection.targetId, targetUrl).catch(
@@ -199,12 +520,30 @@ export async function connectToRemoteChrome(
           );
         },
       );
-      return { client: targetConnection.client, targetId: targetConnection.targetId };
+      return {
+        client: targetConnection.client,
+        targetId: targetConnection.targetId,
+        detach: targetConnection.detach,
+        close: async () => {
+          await targetConnection.client.close().catch(() => undefined);
+          await closeRemoteChromeTarget(host, port, targetConnection.targetId, logger, {
+            coordinator: coordinatorOptions,
+          });
+        },
+      };
     }
   }
   const fallbackClient = await CDP({ host, port });
   logger(`Connected to remote Chrome DevTools protocol at ${host}:${port}`);
-  return { client: fallbackClient };
+  return {
+    client: fallbackClient,
+    detach: async () => {
+      await fallbackClient.close().catch(() => undefined);
+    },
+    close: async () => {
+      await fallbackClient.close().catch(() => undefined);
+    },
+  };
 }
 
 export async function closeRemoteChromeTarget(
@@ -212,26 +551,48 @@ export async function closeRemoteChromeTarget(
   port: number,
   targetId: string | undefined,
   logger: BrowserLogger,
+  options?: { coordinator?: CoordinatorRuntimeOptions },
 ): Promise<void> {
   if (!targetId) {
     return;
   }
+  let confirmed = false;
   try {
     await closeRemoteChromePageTarget(host, port, targetId);
+    confirmed = await remoteTargetIsAbsent(host, port, targetId);
     if (logger.verbose) {
       logger(`Closed remote Chrome tab ${targetId}`);
     }
   } catch (error) {
+    confirmed = await remoteTargetIsAbsent(host, port, targetId);
     const message = error instanceof Error ? error.message : String(error);
     logger(`Failed to close remote Chrome tab ${targetId}: ${message}`);
   } finally {
+    await finalizeCoordinatorTarget(host, port, targetId, confirmed, options?.coordinator).catch(
+      () => undefined,
+    );
     await forgetRemoteChromeTarget(host, port, targetId).catch(() => undefined);
+  }
+}
+async function remoteTargetIsAbsent(
+  host: string,
+  port: number,
+  targetId: string,
+): Promise<boolean> {
+  try {
+    const targets = (await CDP.List({ host, port })) as Array<{ id?: string; targetId?: string }>;
+    return !targets.some((target) => (target.targetId ?? target.id) === targetId);
+  } catch {
+    return false;
   }
 }
 
 export interface RemoteChromeConnection {
   client: ChromeClient;
   targetId?: string;
+  browserWSEndpoint?: string;
+  detach: () => Promise<void>;
+  close: () => Promise<void>;
 }
 
 export interface IsolatedTabConnection {
@@ -246,36 +607,393 @@ interface TargetConnectMessages {
   closeFailed: (targetId: string, message: string) => string;
 }
 
+export interface RemoteTargetInfo {
+  targetId?: string;
+  type?: string;
+  url?: string;
+}
+
+export async function listRemoteChromeTargets(options: {
+  host: string;
+  port: number;
+  browserWSEndpoint?: string;
+}): Promise<RemoteTargetInfo[]> {
+  if (!options.browserWSEndpoint) {
+    const targets = await CDP.List({ host: options.host, port: options.port });
+    return targets as unknown as RemoteTargetInfo[];
+  }
+  const browser = await CDP({ target: options.browserWSEndpoint, local: true });
+  try {
+    const result = await browser.Target.getTargets();
+    return (result.targetInfos ?? []).map((target) => ({
+      targetId: target.targetId,
+      type: target.type,
+      url: target.url,
+    }));
+  } finally {
+    await browser.close().catch(() => undefined);
+  }
+}
+
+export async function connectToRemoteChromeTarget(
+  host: string,
+  port: number,
+  logger: BrowserLogger,
+  options: {
+    targetId?: string;
+    targetUrl?: string;
+    browserWSEndpoint?: string;
+    closeTargetOnDispose?: boolean;
+    approvalWaitMs?: number;
+    coordinator?: CoordinatorRuntimeOptions;
+    role?: BrowserCoordinatorTargetRole;
+  },
+): Promise<RemoteChromeConnection> {
+  let lease: CoordinatorTargetLease | undefined;
+  const coordinatorOptions = options.coordinator ?? {
+    ownerStartToken: `controller:${process.pid}`,
+  };
+  const createdByOracle = !options.targetId;
+  if (!options.browserWSEndpoint) {
+    if (options.targetId) {
+      lease = await attachCoordinatorTarget(host, port, options.targetId, {
+        ...coordinatorOptions,
+        role: options.role,
+      });
+    }
+    try {
+      const client = await CDP({ host, port, target: options.targetId });
+      return {
+        client,
+        targetId: options.targetId,
+        detach: async () => {
+          await client.close().catch(() => undefined);
+          await lease?.markLost();
+        },
+        close: async () => {
+          await client.close().catch(() => undefined);
+          await lease?.release();
+        },
+      };
+    } catch (error) {
+      await lease?.release();
+      throw error;
+    }
+  }
+
+  const browser = await connectToBrowserWebSocket(
+    host,
+    port,
+    options.browserWSEndpoint,
+    logger,
+    options.approvalWaitMs,
+  );
+  try {
+    if (options.targetId) {
+      lease = await attachCoordinatorTarget(host, port, options.targetId, {
+        ...coordinatorOptions,
+        role: options.role,
+      });
+    }
+    if (!options.targetId) {
+      lease = await reserveCoordinatorTarget(host, port, {
+        ...coordinatorOptions,
+        role: options.role,
+        url: options.targetUrl ?? "about:blank",
+      });
+    }
+    let targetId = options.targetId;
+    if (!targetId) {
+      const created = await browser.Target.createTarget({
+        url: options.targetUrl ?? "about:blank",
+      });
+      if (!created.targetId) {
+        await lease?.release();
+        throw new Error("Chrome returned no target id.");
+      }
+      targetId = created.targetId;
+      await lease?.bind(targetId, options.targetUrl ?? "about:blank");
+      logger(`Opened dedicated remote Chrome tab targeting ${options.targetUrl ?? "about:blank"}`);
+    }
+    const attached = await browser.Target.attachToTarget({ targetId, flatten: true });
+    const client = createSessionBoundChromeClient(browser, attached.sessionId);
+    return {
+      client,
+      targetId,
+      browserWSEndpoint: options.browserWSEndpoint,
+      detach: async () => {
+        await browser.Target.detachFromTarget({ sessionId: attached.sessionId }).catch(
+          () => undefined,
+        );
+        await lease?.markLost();
+        await browser.close().catch(() => undefined);
+      },
+      close: async () => {
+        await browser.Target.detachFromTarget({ sessionId: attached.sessionId }).catch(
+          () => undefined,
+        );
+        if (options.closeTargetOnDispose && targetId) {
+          const result = await browser.Target.closeTarget({ targetId }).catch(() => undefined);
+          await lease?.release({ confirmed: result?.success !== false });
+        } else {
+          await lease?.release();
+        }
+        await browser.close().catch(() => undefined);
+      },
+    };
+  } catch (error) {
+    await lease?.[createdByOracle ? "markLost" : "release"]();
+    await browser.close().catch(() => undefined);
+    throw error;
+  }
+}
+
+async function connectToBrowserWebSocket(
+  host: string,
+  port: number,
+  browserWSEndpoint: string,
+  logger: BrowserLogger,
+  approvalWaitMs?: number,
+): Promise<ChromeClient> {
+  if (!approvalWaitMs || approvalWaitMs <= 0) {
+    return (await CDP({ target: browserWSEndpoint, local: true })) as ChromeClient;
+  }
+
+  logger(`Waiting for Chrome remote debugging approval for ${host}:${port}...`);
+
+  const deadline = Date.now() + approvalWaitMs;
+  let lastApprovalError: unknown;
+  while (Date.now() < deadline) {
+    const remainingMs = Math.max(1, deadline - Date.now());
+    try {
+      return await Promise.race([
+        CDP({ target: browserWSEndpoint, local: true }) as Promise<ChromeClient>,
+        new Promise<never>((_, reject) => {
+          setTimeout(() => {
+            reject(new Error("__oracle_remote_debugging_approval_timeout__"));
+          }, remainingMs);
+        }),
+      ]);
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === "__oracle_remote_debugging_approval_timeout__"
+      ) {
+        break;
+      }
+      if (!isRemoteDebuggingApprovalError(error)) {
+        throw error;
+      }
+      lastApprovalError = error;
+      await delay(Math.min(500, Math.max(0, deadline - Date.now())));
+    }
+  }
+  const suffix =
+    lastApprovalError instanceof Error && lastApprovalError.message
+      ? ` Last Chrome response: ${lastApprovalError.message}`
+      : "";
+  throw new Error(
+    `Oracle waited ${formatApprovalWait(approvalWaitMs)} for Chrome remote debugging approval at ${host}:${port}. Allow the Chrome prompt or retry after toggling remote debugging.${suffix}`,
+  );
+}
+
+function isRemoteDebuggingApprovalError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /unexpected server response:\s*403|remote debugging|forbidden/i.test(message);
+}
+
+function formatApprovalWait(waitMs: number): string {
+  if (waitMs % 1000 === 0) {
+    return `${waitMs / 1000}s`;
+  }
+  return `${waitMs}ms`;
+}
+
+async function discardCreatedChromeTarget(
+  host: string,
+  port: number,
+  targetId: string,
+  lease: CoordinatorTargetLease,
+  logger: BrowserLogger,
+  closeFailed: (targetId: string, message: string) => string,
+): Promise<void> {
+  let closeError: unknown;
+  let closeConfirmed = false;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await CDP.Close({ host, port, id: targetId });
+      closeError = undefined;
+    } catch (error) {
+      closeError = error;
+    }
+    closeConfirmed = await remoteTargetIsAbsent(host, port, targetId);
+    if (closeConfirmed) break;
+    if (attempt < 2) await delay(50 * (attempt + 1));
+  }
+
+  let leaseError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      if (closeConfirmed) await lease.release({ confirmed: true });
+      else await lease.markLost();
+      leaseError = undefined;
+      break;
+    } catch (error) {
+      leaseError = error;
+      if (attempt < 2) await delay(50 * (attempt + 1));
+    }
+  }
+  if (closeConfirmed && !leaseError) return;
+
+  const closeMessage = closeConfirmed
+    ? "Chrome target closure was confirmed"
+    : closeError instanceof Error
+      ? closeError.message
+      : "Chrome target remained present after three close attempts";
+  const leaseMessage = leaseError
+    ? `; coordinator release failed: ${leaseError instanceof Error ? leaseError.message : String(leaseError)}`
+    : "";
+  const message = `${closeMessage}${leaseMessage}`;
+  logger(closeFailed(targetId, message));
+  throw new BrowserAutomationError(
+    `Failed to discard Chrome target ${targetId}: ${message}`,
+    {
+      stage: "browser-coordinator",
+      code: "target-cleanup-failed",
+      targetId,
+      closeConfirmed,
+      leaseReleased: !leaseError,
+    },
+    leaseError ?? closeError,
+  );
+}
+
 async function connectToNewTarget(
   host: string,
   port: number,
   url: string,
   logger: BrowserLogger,
-  messages: TargetConnectMessages,
-): Promise<{ client: ChromeClient; targetId: string } | null> {
+  messages: TargetConnectMessages & {
+    coordinator?: CoordinatorRuntimeOptions;
+    role?: BrowserCoordinatorTargetRole;
+  },
+): Promise<{
+  client: ChromeClient;
+  targetId: string;
+  detach: () => Promise<void>;
+} | null> {
+  const lease = await reserveCoordinatorTarget(host, port, {
+    ...(messages.coordinator ?? { ownerStartToken: `controller:${process.pid}` }),
+    role: messages.role,
+    url,
+  });
+  let targetId: string | undefined;
+  let discardAttempted = false;
   try {
     const target = await CDP.New({ host, port, url });
+    targetId = target.id;
+    if (!targetId) {
+      await lease.release();
+      logger(messages.openFailed("Chrome returned no target id"));
+      return null;
+    }
+    await lease.bind(targetId, url);
     try {
-      const client = await CDP({ host, port, target: target.id });
-      if (messages.opened) {
-        logger(messages.opened(target.id));
-      }
-      return { client, targetId: target.id };
+      const client = await CDP({ host, port, target: targetId });
+      if (messages.opened) logger(messages.opened(targetId));
+      return {
+        client,
+        targetId,
+        detach: async () => {
+          await client.close().catch(() => undefined);
+          await lease.markLost();
+        },
+      };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      logger(messages.attachFailed(target.id, message));
-      try {
-        await CDP.Close({ host, port, id: target.id });
-      } catch (closeError) {
-        const closeMessage = closeError instanceof Error ? closeError.message : String(closeError);
-        logger(messages.closeFailed(target.id, closeMessage));
-      }
+      logger(messages.attachFailed(targetId, message));
+      discardAttempted = true;
+      await discardCreatedChromeTarget(host, port, targetId, lease, logger, messages.closeFailed);
     }
   } catch (error) {
+    if (targetId && !discardAttempted) {
+      await discardCreatedChromeTarget(host, port, targetId, lease, logger, messages.closeFailed);
+    } else if (!targetId) {
+      await lease.release();
+    }
+    if (error instanceof BrowserAutomationError) throw error;
     const message = error instanceof Error ? error.message : String(error);
     logger(messages.openFailed(message));
   }
   return null;
+}
+
+function createSessionBoundChromeClient(browser: ChromeClient, sessionId: string): ChromeClient {
+  const browserWithEvents = browser as ChromeClient & {
+    on: (event: string, listener: (...args: unknown[]) => void) => void;
+    once: (event: string, listener: (...args: unknown[]) => void) => void;
+    off?: (event: string, listener: (...args: unknown[]) => void) => void;
+    removeListener: (event: string, listener: (...args: unknown[]) => void) => void;
+  };
+  const bindDomain = <T extends object>(domainName: string): T => {
+    const domain = (browser as unknown as Record<string, Record<string, unknown>>)[domainName] as
+      | Record<string, unknown>
+      | undefined;
+    const eventName = (name: string) => `${domainName}.${name}.${sessionId}`;
+    return new Proxy((domain ?? {}) as T, {
+      get(target, prop, receiver) {
+        if (prop === "on") {
+          return (name: string, listener: (...args: unknown[]) => void) => {
+            const domainEvent = (target as Record<string, unknown>)[name];
+            if (typeof domainEvent === "function") {
+              return (domainEvent as (...args: unknown[]) => unknown)(sessionId, listener);
+            }
+            browserWithEvents.on(eventName(name), listener);
+            return () => browserWithEvents.removeListener(eventName(name), listener);
+          };
+        }
+        if (prop === "off" || prop === "removeListener") {
+          return (name: string, listener: (...args: unknown[]) => void) => {
+            const off =
+              browserWithEvents.off ?? browserWithEvents.removeListener.bind(browserWithEvents);
+            off(eventName(name), listener);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        if (typeof value !== "function") {
+          return value;
+        }
+        return (...args: unknown[]) =>
+          (value as (...callArgs: unknown[]) => unknown)(...args, sessionId);
+      },
+    });
+  };
+
+  return {
+    ...browser,
+    // Raw `send` here is the browser-level send (not session-bound), so callers
+    // that issue Target.* via `send` must pass this page session id explicitly to
+    // stay scoped to this tab (e.g. Deep Research OOPIF auto-attach).
+    // chrome-remote-interface defines `send` on the client prototype, so object
+    // spread does not preserve it. Bind it explicitly for raw session commands.
+    send: typeof browser.send === "function" ? browser.send.bind(browser) : undefined,
+    oraclePageSessionId: sessionId,
+    Network: bindDomain("Network"),
+    Page: bindDomain("Page"),
+    Runtime: bindDomain("Runtime"),
+    Input: bindDomain("Input"),
+    DOM: bindDomain("DOM"),
+    Emulation: bindDomain("Emulation"),
+    on: browserWithEvents.on.bind(browserWithEvents),
+    once: browserWithEvents.once.bind(browserWithEvents),
+    off:
+      browserWithEvents.off?.bind(browserWithEvents) ??
+      browserWithEvents.removeListener.bind(browserWithEvents),
+    removeListener: browserWithEvents.removeListener.bind(browserWithEvents),
+    close: async () => {
+      await browser.Target.detachFromTarget({ sessionId }).catch(() => undefined);
+    },
+  } as ChromeClient;
 }
 
 export async function connectWithNewTab(
@@ -283,7 +1001,13 @@ export async function connectWithNewTab(
   logger: BrowserLogger,
   initialUrl?: string,
   host?: string,
-  options?: { fallbackToDefault?: boolean; retries?: number; retryDelayMs?: number },
+  options?: {
+    fallbackToDefault?: boolean;
+    retries?: number;
+    retryDelayMs?: number;
+    coordinator?: CoordinatorRuntimeOptions;
+    role?: BrowserCoordinatorTargetRole;
+  },
 ): Promise<IsolatedTabConnection> {
   const effectiveHost = host ?? "127.0.0.1";
   const url = initialUrl ?? "about:blank";
@@ -303,6 +1027,8 @@ export async function connectWithNewTab(
         `Failed to attach to isolated browser tab ${targetId} (${message}); ${fallbackLabel}`,
       closeFailed: (targetId, message) =>
         `Failed to close unused browser tab ${targetId}: ${message}`,
+      coordinator: options?.coordinator,
+      role: options?.role,
     });
     if (targetConnection) {
       return targetConnection;
@@ -326,18 +1052,197 @@ export async function closeTab(
   targetId: string,
   logger: BrowserLogger,
   host?: string,
-): Promise<void> {
+  options?: { coordinator?: CoordinatorRuntimeOptions },
+): Promise<boolean> {
   const effectiveHost = host ?? "127.0.0.1";
+  let confirmed = false;
   try {
     await CDP.Close({ host: effectiveHost, port, id: targetId });
-    logger(`Closed isolated browser tab (target=${targetId})`);
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      await delay(25);
+      let targets: Array<{ id?: string; targetId?: string }>;
+      try {
+        targets = (await CDP.List({ host: effectiveHost, port })) as Array<{
+          id?: string;
+          targetId?: string;
+        }>;
+      } catch {
+        continue;
+      }
+      if (!targets.some((target) => (target.targetId ?? target.id) === targetId)) {
+        confirmed = true;
+        logger(`Closed isolated browser tab (target=${targetId})`);
+        break;
+      }
+    }
+    if (!confirmed) logger(`Browser tab close was not confirmed (target=${targetId})`);
   } catch (error) {
+    confirmed = await remoteTargetIsAbsent(effectiveHost, port, targetId);
+    if (confirmed) logger(`Closed isolated browser tab (target=${targetId})`);
+    else {
+      const message = error instanceof Error ? error.message : String(error);
+      logger(`Failed to close browser tab ${targetId}: ${message}`);
+    }
+  }
+  await finalizeCoordinatorTarget(
+    effectiveHost,
+    port,
+    targetId,
+    confirmed,
+    options?.coordinator,
+  ).catch(() => undefined);
+  return confirmed;
+}
+
+export async function createChromePageTarget(
+  port: number,
+  logger: BrowserLogger,
+  host?: string,
+  options?: { coordinator?: CoordinatorRuntimeOptions; role?: BrowserCoordinatorTargetRole },
+): Promise<string | undefined> {
+  const effectiveHost = host ?? "127.0.0.1";
+  const lease = await reserveCoordinatorTarget(effectiveHost, port, {
+    ...(options?.coordinator ?? { ownerStartToken: `controller:${process.pid}` }),
+    role: options?.role,
+    url: "about:blank",
+  });
+  let createdTargetId: string | undefined;
+  try {
+    const created = (await CDP.New({
+      host: effectiveHost,
+      port,
+      url: "about:blank",
+    })) as { id?: string; targetId?: string };
+    createdTargetId = created.targetId ?? created.id;
+    if (!createdTargetId) {
+      await lease.release();
+      logger("Failed to create a replacement Chrome tab.");
+      return undefined;
+    }
+    await lease.bind(createdTargetId, "about:blank");
+    logger(`Opened replacement Chrome tab (target=${createdTargetId})`);
+    return createdTargetId;
+  } catch (error) {
+    if (createdTargetId) {
+      await discardCreatedChromeTarget(
+        effectiveHost,
+        port,
+        createdTargetId,
+        lease,
+        logger,
+        (targetId, message) => `Failed to close replacement Chrome tab ${targetId}: ${message}`,
+      );
+    } else {
+      await lease.release();
+    }
+    if (error instanceof BrowserAutomationError) throw error;
     const message = error instanceof Error ? error.message : String(error);
-    logger(`Failed to close browser tab ${targetId}: ${message}`);
+    logger(`Failed to create a replacement Chrome tab: ${message}`);
+    return undefined;
   }
 }
 
-function buildChromeFlags(headless: boolean, debugBindAddress?: string | null): string[] {
+export async function ensureChromePageTargetAfterClose(
+  port: number,
+  closingTargetId: string,
+  logger: BrowserLogger,
+  host?: string,
+  options?: { coordinator?: CoordinatorRuntimeOptions; role?: BrowserCoordinatorTargetRole },
+): Promise<string | undefined> {
+  const effectiveHost = host ?? "127.0.0.1";
+  try {
+    const targets = (await CDP.List({ host: effectiveHost, port })) as Array<{
+      id?: string;
+      targetId?: string;
+      type?: string;
+    }>;
+    const existingPageTargetId = targets
+      .filter((target) => target.type === "page")
+      .map((target) => target.targetId ?? target.id)
+      .find((targetId): targetId is string => Boolean(targetId) && targetId !== closingTargetId);
+    if (existingPageTargetId) {
+      return existingPageTargetId;
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger(`Failed to inspect Chrome tabs before closing ${closingTargetId}: ${message}`);
+  }
+  return await createChromePageTarget(port, logger, host, options);
+}
+
+export async function closeBlankChromeTabs(
+  port: number,
+  logger: BrowserLogger,
+  host?: string,
+  options?: {
+    excludeTargetIds?: Iterable<string | null | undefined>;
+    preserveOneBlank?: boolean;
+  },
+): Promise<void> {
+  const effectiveHost = host ?? "127.0.0.1";
+  const excluded = new Set(
+    [...(options?.excludeTargetIds ?? [])].filter(
+      (targetId): targetId is string => typeof targetId === "string" && targetId.length > 0,
+    ),
+  );
+  let targets: Array<{ id?: string; targetId?: string; type?: string; url?: string }>;
+  try {
+    targets = (await CDP.List({ host: effectiveHost, port })) as Array<{
+      id?: string;
+      targetId?: string;
+      type?: string;
+      url?: string;
+    }>;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger(`Failed to inspect blank Chrome tabs: ${message}`);
+    return;
+  }
+
+  const preservedBlankTargetId = options?.preserveOneBlank
+    ? targets
+        .filter(isBlankPageTarget)
+        .map((target) => target.targetId ?? target.id)
+        .filter((targetId): targetId is string => Boolean(targetId))
+        .sort()[0]
+    : undefined;
+  let closed = 0;
+  for (const target of targets) {
+    const targetId = target.targetId ?? target.id;
+    if (
+      !targetId ||
+      targetId === preservedBlankTargetId ||
+      excluded.has(targetId) ||
+      !isBlankPageTarget(target)
+    ) {
+      continue;
+    }
+    try {
+      await CDP.Close({ host: effectiveHost, port, id: targetId });
+      closed += 1;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger(`Failed to close blank Chrome tab ${targetId}: ${message}`);
+    }
+  }
+  if (closed > 0) {
+    logger(`Closed ${closed} blank Chrome tab${closed === 1 ? "" : "s"}.`);
+  }
+}
+
+function isBlankPageTarget(target: { type?: string; url?: string }): boolean {
+  if (target.type && target.type !== "page") {
+    return false;
+  }
+  const url = (target.url ?? "").trim().toLowerCase();
+  return url === "about:blank" || url === "chrome://newtab/" || url === "chrome://new-tab-page/";
+}
+
+function buildChromeFlags(
+  headless: boolean,
+  debugBindAddress?: string | null,
+  hideWindow = false,
+): string[] {
   const flags = [
     "--disable-background-networking",
     "--disable-background-timer-throttling",
@@ -355,6 +1260,12 @@ function buildChromeFlags(headless: boolean, debugBindAddress?: string | null): 
     "--disable-features=TranslateUI,AutomationControlled",
     "--mute-audio",
     "--window-size=1280,720",
+    // Chrome that *we* launch is pinned to English, so ChatGPT renders the labels
+    // our selectors were written against. This does not make English the only case
+    // to handle: --browser-attach-running and --remote-chrome never build these
+    // flags (see controlPlan.ts), so those runs inherit the user's own Chrome
+    // locale, and a ChatGPT account language setting can localize the UI even here.
+    // That is why the model/effort matchers must stay language-tolerant.
     "--lang=en-US",
     "--accept-lang=en-US,en",
   ];
@@ -369,9 +1280,50 @@ function buildChromeFlags(headless: boolean, debugBindAddress?: string | null): 
 
   if (headless) {
     flags.push("--headless=new");
+  } else if (hideWindow && process.platform === "darwin") {
+    // Cmd-H stops macOS Chrome from compositing the page, which can swallow
+    // trusted CDP clicks and retain the prompt as a draft. Keeping the window
+    // off-screen avoids desktop disruption while preserving normal rendering.
+    flags.push("--window-position=-32000,-32000");
+  }
+
+  // Opt-in only: container/CI Chromium often cannot use the sandbox. Callers must
+  // set ORACLE_CHROME_NO_SANDBOX=1 explicitly (never default this on).
+  if (process.env.ORACLE_CHROME_NO_SANDBOX === "1") {
+    flags.push("--no-sandbox", "--disable-dev-shm-usage");
   }
 
   return flags;
+}
+
+export function buildChromeFlagsForTest(
+  headless: boolean,
+  debugBindAddress?: string | null,
+  hideWindow = false,
+): string[] {
+  return buildChromeFlags(headless, debugBindAddress, hideWindow);
+}
+
+function resolveChromeLaunchOptions(
+  chromeFlags: string[],
+  usingCopiedProfile: boolean,
+): { chromeFlags: string[]; ignoreDefaultFlags: boolean } {
+  if (!usingCopiedProfile) {
+    return { chromeFlags, ignoreDefaultFlags: false };
+  }
+  return {
+    chromeFlags: [...Launcher.defaultFlags(), ...chromeFlags].filter(
+      (flag) => flag !== "--use-mock-keychain" && flag !== "--password-store=basic",
+    ),
+    ignoreDefaultFlags: true,
+  };
+}
+
+export function resolveChromeLaunchOptionsForTest(
+  chromeFlags: string[],
+  usingCopiedProfile: boolean,
+): { chromeFlags: string[]; ignoreDefaultFlags: boolean } {
+  return resolveChromeLaunchOptions(chromeFlags, usingCopiedProfile);
 }
 
 function parseDebugPortEnv(): number | null {
@@ -607,46 +1559,23 @@ async function waitForTcpPort(host: string, port: number, timeoutMs: number): Pr
   throw new Error(`Timed out waiting for TCP ${host}:${port}: ${lastError}`);
 }
 
-function resolveRemoteDebugHost(): string | null {
-  const override =
-    process.env.ORACLE_BROWSER_REMOTE_DEBUG_HOST?.trim() || process.env.WSL_HOST_IP?.trim();
-  if (override) {
-    return override;
-  }
-  if (!isWsl()) {
-    return null;
-  }
-  try {
-    const resolv = readFileSync("/etc/resolv.conf", "utf8");
-    for (const line of resolv.split("\n")) {
-      const match = line.match(/^nameserver\s+([0-9.]+)/);
-      if (match?.[1]) {
-        return match[1];
-      }
-    }
-  } catch {
-    // ignore; fall back to localhost
-  }
-  return null;
-}
-
 function isWsl(): boolean {
-  if (process.platform !== "linux") {
-    return false;
-  }
   if (process.env.WSL_DISTRO_NAME) {
     return true;
+  }
+  if (process.platform !== "linux") {
+    return false;
   }
   const release = os.release();
   return release.toLowerCase().includes("microsoft");
 }
-
 async function launchWithCustomHost({
   chromeFlags,
   chromePath,
   userDataDir,
   host,
   requestedPort,
+  ignoreDefaultFlags,
   logger,
 }: {
   chromeFlags: string[];
@@ -654,6 +1583,7 @@ async function launchWithCustomHost({
   userDataDir: string;
   host: string | null;
   requestedPort?: number;
+  ignoreDefaultFlags?: boolean;
   logger: BrowserLogger;
 }): Promise<LaunchedChrome & { host?: string }> {
   const launcher = new Launcher({
@@ -662,6 +1592,7 @@ async function launchWithCustomHost({
     userDataDir,
     handleSIGINT: false,
     port: requestedPort ?? undefined,
+    ignoreDefaultFlags,
   });
 
   if (host) {

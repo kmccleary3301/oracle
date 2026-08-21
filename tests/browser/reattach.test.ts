@@ -1,8 +1,8 @@
 import { describe, expect, test, vi } from "vitest";
-import { resumeBrowserSession, __test__ } from "../../src/browser/reattach.js";
+import { resumeBrowserSession, __test__, type ReattachDeps } from "../../src/browser/reattach.js";
 import type { BrowserLogger, ChromeClient } from "../../src/browser/types.js";
 
-type FakeTarget = { targetId?: string; type?: string; url?: string };
+type FakeTarget = { id?: string; targetId?: string; type?: string; url?: string };
 type FakeClient = {
   // biome-ignore lint/style/useNamingConvention: mirrors DevTools protocol domain names
   Runtime: {
@@ -14,6 +14,8 @@ type FakeClient = {
   };
   // biome-ignore lint/style/useNamingConvention: mirrors DevTools protocol domain names
   DOM: { enable: () => void };
+  // biome-ignore lint/style/useNamingConvention: mirrors DevTools protocol domain names
+  Page?: { enable: () => void };
   close: () => Promise<void> | void;
 };
 
@@ -41,6 +43,75 @@ describe("resumeBrowserSession", () => {
       }
       return { result: { value: null } };
     });
+    const close = vi.fn(async () => {});
+    const connect = vi.fn(
+      async () =>
+        ({
+          // biome-ignore lint/style/useNamingConvention: mirrors DevTools protocol domain names
+          Runtime: { enable: vi.fn(), evaluate },
+          // biome-ignore lint/style/useNamingConvention: mirrors DevTools protocol domain names
+          DOM: { enable: vi.fn() },
+          close,
+        }) satisfies FakeClient,
+    ) as unknown as (options?: unknown) => Promise<ChromeClient>;
+    const waitForAssistantResponse = vi.fn(async () => ({
+      text: "Hello PATH plan",
+      html: "",
+      meta: { messageId: "m1", turnId: "conversation-turn-1" },
+    }));
+    const captureAssistantMarkdown = vi.fn(async () => "markdown response");
+    const waitForConversationHydration = vi.fn(async () => 2);
+    const logger = vi.fn() as BrowserLogger;
+    logger.verbose = true;
+
+    const result = await resumeBrowserSession(runtime, { timeoutMs: 2000 }, logger, {
+      listTargets,
+      connect,
+      waitForAssistantResponse,
+      captureAssistantMarkdown,
+      waitForConversationHydration,
+    });
+
+    expect(result.answerMarkdown).toBe("markdown response");
+    expect(connect).toHaveBeenCalledWith(
+      expect.objectContaining({ host: "127.0.0.1", port: 51559, target: "target-1" }),
+    );
+    expect(waitForAssistantResponse).toHaveBeenCalled();
+    expect(captureAssistantMarkdown).toHaveBeenCalled();
+    expect(waitForConversationHydration).toHaveBeenCalledWith(expect.anything(), 2000, logger, {
+      requirePriorTurns: true,
+      requirePromptReady: false,
+      expectedConversationUrl: runtime.tabUrl,
+    });
+    expect(waitForConversationHydration.mock.invocationCallOrder[0]).toBeLessThan(
+      waitForAssistantResponse.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  test("uses prompt preview turn index when reattaching to an already-open answer", async () => {
+    const runtime = {
+      chromePort: 51559,
+      chromeHost: "127.0.0.1",
+      chromeTargetId: "target-1",
+      tabUrl: "https://chatgpt.com/c/abc",
+    };
+    const listTargets = vi.fn(
+      async () =>
+        [{ targetId: "target-1", type: "page", url: runtime.tabUrl }] satisfies FakeTarget[],
+    ) as unknown as () => Promise<FakeTarget[]>;
+    const evaluate = vi.fn(async ({ expression }: { expression: string }) => {
+      if (expression === "location.href") {
+        return { result: { value: runtime.tabUrl } };
+      }
+      if (expression === "1+1") {
+        return { result: { value: 2 } };
+      }
+      if (expression.includes("const needle =")) {
+        return { result: { value: 3 } };
+      }
+      return { result: { value: null } };
+    });
     const connect = vi.fn(
       async () =>
         ({
@@ -52,27 +123,101 @@ describe("resumeBrowserSession", () => {
         }) satisfies FakeClient,
     ) as unknown as (options?: unknown) => Promise<ChromeClient>;
     const waitForAssistantResponse = vi.fn(async () => ({
-      text: "Hello PATH plan",
+      text: "live reattach pro 123",
       html: "",
-      meta: { messageId: "m1", turnId: "conversation-turn-1" },
+      meta: { messageId: "m1", turnId: "conversation-turn-4" },
     }));
-    const captureAssistantMarkdown = vi.fn(async () => "markdown response");
+    const captureAssistantMarkdown = vi.fn(async () => "live reattach pro 123");
     const logger = vi.fn() as BrowserLogger;
-    logger.verbose = true;
 
-    const result = await resumeBrowserSession(runtime, { timeoutMs: 2000 }, logger, {
+    await resumeBrowserSession(runtime, { timeoutMs: 2000 }, logger, {
       listTargets,
       connect,
       waitForAssistantResponse,
       captureAssistantMarkdown,
+      waitForConversationHydration: vi.fn(async () => 2),
+      promptPreview: "live reattach pro 123",
     });
 
-    expect(result.answerMarkdown).toBe("markdown response");
-    expect(connect).toHaveBeenCalledWith(
-      expect.objectContaining({ host: "127.0.0.1", port: 51559, target: "target-1" }),
+    expect(waitForAssistantResponse).toHaveBeenCalledWith(expect.anything(), 2000, logger, 3);
+  });
+
+  test("uses Deep Research completion path when reattaching research sessions", async () => {
+    const runtime = {
+      chromePort: 51559,
+      chromeHost: "127.0.0.1",
+      chromeTargetId: "target-1",
+      tabUrl: "https://chatgpt.com/c/deep",
+    };
+    const listTargets = vi.fn(
+      async () =>
+        [
+          { targetId: "target-1", type: "page", url: runtime.tabUrl },
+          { targetId: "target-2", type: "page", url: "about:blank" },
+        ] satisfies FakeTarget[],
+    ) as unknown as () => Promise<FakeTarget[]>;
+    const evaluate = vi.fn(async ({ expression }: { expression: string }) => {
+      if (expression === "location.href") {
+        return { result: { value: runtime.tabUrl } };
+      }
+      if (expression === "1+1") {
+        return { result: { value: 2 } };
+      }
+      if (expression.includes("querySelectorAll")) {
+        return { result: { value: 3 } };
+      }
+      return { result: { value: null } };
+    });
+    const connect = vi.fn(
+      async () =>
+        ({
+          // biome-ignore lint/style/useNamingConvention: mirrors DevTools protocol domain names
+          Runtime: { enable: vi.fn(), evaluate },
+          // biome-ignore lint/style/useNamingConvention: mirrors DevTools protocol domain names
+          DOM: { enable: vi.fn() },
+          // biome-ignore lint/style/useNamingConvention: mirrors DevTools protocol domain names
+          Page: { enable: vi.fn() },
+          close: vi.fn(async () => {}),
+        }) satisfies FakeClient,
+    ) as unknown as (options?: unknown) => Promise<ChromeClient>;
+    const waitForAssistantResponse = vi.fn();
+    const captureAssistantMarkdown = vi.fn();
+    const waitForDeepResearchCompletion = vi.fn(async () => ({
+      text: "Deep report body",
+      html: "<p>Deep report body</p>",
+      meta: { turnId: null, messageId: null },
+    }));
+    const logger = vi.fn() as BrowserLogger;
+    logger.verbose = true;
+
+    const result = await resumeBrowserSession(
+      runtime,
+      { timeoutMs: 2000, researchMode: "deep" },
+      logger,
+      {
+        listTargets,
+        connect,
+        waitForAssistantResponse,
+        captureAssistantMarkdown,
+        waitForDeepResearchCompletion,
+        waitForConversationHydration: vi.fn(async () => 2),
+      },
     );
-    expect(waitForAssistantResponse).toHaveBeenCalled();
-    expect(captureAssistantMarkdown).toHaveBeenCalled();
+
+    expect(result.answerMarkdown).toBe("Deep report body");
+    expect(waitForDeepResearchCompletion).toHaveBeenCalledWith(
+      expect.objectContaining({ evaluate }),
+      logger,
+      2000,
+      2,
+      expect.any(Object),
+      expect.any(Object),
+      {
+        requireScopedTargetOwner: true,
+      },
+    );
+    expect(waitForAssistantResponse).not.toHaveBeenCalled();
+    expect(captureAssistantMarkdown).not.toHaveBeenCalled();
   });
 
   test("falls back to recovery when chrome port is missing", async () => {
@@ -91,23 +236,150 @@ describe("resumeBrowserSession", () => {
     expect(recoverSession).toHaveBeenCalled();
   });
 
-  test("falls back to recovery when existing chrome attach fails", async () => {
+  test("cleans a replacement Chrome when setup fails before response waiting", async () => {
+    const stopResourceWatchdog = vi.fn();
+    const kill = vi.fn(async () => undefined);
+    const fakeChrome = {
+      port: 51560,
+      pid: 321,
+      kill,
+      process: undefined,
+      resourceExhaustion: new Promise<never>(() => undefined),
+      stopResourceWatchdog,
+    } as unknown as Awaited<ReturnType<NonNullable<ReattachDeps["launch"]>>>;
+    const launch: NonNullable<ReattachDeps["launch"]> = vi.fn(async () => fakeChrome);
+    const connectNew: NonNullable<ReattachDeps["connectNew"]> = vi.fn(async () => {
+      throw new Error("CDP setup failed");
+    });
+    const logger = vi.fn() as BrowserLogger;
+
+    await expect(
+      resumeBrowserSession(
+        { tabUrl: "https://chatgpt.com/c/recover-me" },
+        { keepBrowser: false, cookieSync: false },
+        logger,
+        { launch, connectNew },
+      ),
+    ).rejects.toThrow("CDP setup failed");
+
+    expect(stopResourceWatchdog).toHaveBeenCalledOnce();
+    expect(kill).toHaveBeenCalledOnce();
+  });
+
+  test("tries live reattach from browser websocket metadata before falling back", async () => {
+    const runtime = {
+      chromeBrowserWSEndpoint: "ws://127.0.0.1:9222/devtools/browser/abc",
+      chromeProfileRoot: "/tmp/oracle-attach-running-profile",
+      tabUrl: "https://chatgpt.com/c/abc",
+      chromeTargetId: "target-2",
+    };
+    const listTargets = vi.fn(
+      async () =>
+        [
+          { targetId: "target-2", type: "page", url: "https://chatgpt.com/c/abc" },
+        ] satisfies FakeTarget[],
+    ) as unknown as () => Promise<FakeTarget[]>;
+    const evaluate = vi.fn(async ({ expression }: { expression: string }) => {
+      if (expression === "location.href") {
+        return { result: { value: runtime.tabUrl } };
+      }
+      if (expression === "1+1") {
+        return { result: { value: 2 } };
+      }
+      return { result: { value: null } };
+    });
+    const connect = vi.fn(
+      async () =>
+        ({
+          Runtime: { enable: vi.fn(), evaluate },
+          DOM: { enable: vi.fn() },
+          close: vi.fn(async () => {}),
+        }) satisfies FakeClient,
+    ) as unknown as (options?: unknown) => Promise<ChromeClient>;
+    const waitForAssistantResponse = vi.fn(async () => ({
+      text: "attached",
+      html: "",
+      meta: { messageId: "m1", turnId: "conversation-turn-1" },
+    }));
+    const captureAssistantMarkdown = vi.fn(async () => "attached-md");
+    const logger = vi.fn() as BrowserLogger;
+
+    const result = await resumeBrowserSession(
+      runtime,
+      { attachRunning: true, timeoutMs: 2_000 },
+      logger,
+      {
+        listTargets,
+        connect,
+        waitForAssistantResponse,
+        captureAssistantMarkdown,
+        waitForConversationHydration: vi.fn(async () => 2),
+      },
+    );
+
+    expect(result.answerMarkdown).toBe("attached-md");
+    expect(listTargets).toHaveBeenCalled();
+    expect(connect).toHaveBeenCalledWith(
+      expect.objectContaining({
+        target: "ws://127.0.0.1:9222/devtools/browser/abc",
+        local: true,
+      }),
+    );
+  });
+
+  test("closes the attached client before falling back to recovery", async () => {
     const runtime = {
       chromePort: 51559,
       chromeHost: "127.0.0.1",
+      chromeTargetId: "target-1",
+      tabUrl: "https://chatgpt.com/c/abc",
     };
     const listTargets = vi.fn(async () => {
-      throw new Error("no targets");
+      return [{ targetId: "target-1", type: "page", url: runtime.tabUrl }] satisfies FakeTarget[];
     }) as unknown as () => Promise<FakeTarget[]>;
+    const evaluate = vi.fn(async ({ expression }: { expression: string }) => {
+      if (expression === "location.href") {
+        return { result: { value: runtime.tabUrl } };
+      }
+      if (expression === "1+1") {
+        return { result: { value: 2 } };
+      }
+      return { result: { value: null } };
+    });
+    const close = vi.fn(async () => {});
+    const connect = vi.fn(
+      async () =>
+        ({
+          Runtime: { enable: vi.fn(), evaluate },
+          DOM: { enable: vi.fn() },
+          close,
+        }) satisfies FakeClient,
+    ) as unknown as (options?: unknown) => Promise<ChromeClient>;
+    const waitForAssistantResponse = vi.fn(async () => ({
+      text: "must not be captured from an unhydrated shell",
+      html: "",
+      meta: { messageId: "m1", turnId: "conversation-turn-1" },
+    }));
+    const waitForConversationHydration = vi.fn(async () => {
+      throw new Error("saved conversation did not hydrate");
+    });
     const recoverSession = vi.fn(async () => ({
       answerText: "fallback",
       answerMarkdown: "fallback-md",
     }));
     const logger = vi.fn() as BrowserLogger;
 
-    const result = await resumeBrowserSession(runtime, {}, logger, { listTargets, recoverSession });
+    const result = await resumeBrowserSession(runtime, {}, logger, {
+      listTargets,
+      connect,
+      waitForAssistantResponse,
+      waitForConversationHydration,
+      recoverSession,
+    });
 
     expect(result.answerText).toBe("fallback");
+    expect(close).toHaveBeenCalledOnce();
+    expect(waitForAssistantResponse).not.toHaveBeenCalled();
     expect(recoverSession).toHaveBeenCalled();
   });
 });
@@ -124,6 +396,11 @@ describe("reattach helpers", () => {
 
   test("extracts conversation id from a chat URL", () => {
     expect(extractConversationIdFromUrl("https://chatgpt.com/c/abc-123")).toBe("abc-123");
+    expect(
+      extractConversationIdFromUrl(
+        "https://chatgpt.com/c/WEB:32229414-5afa-4478-890c-9ca80aa82430",
+      ),
+    ).toBeUndefined();
     expect(extractConversationIdFromUrl("")).toBeUndefined();
   });
 
@@ -139,15 +416,45 @@ describe("reattach helpers", () => {
     );
   });
 
-  test("pickTarget prefers chromeTargetId, then tabUrl, then first page", () => {
+  test("pickTarget prefers a saved conversation over a stale target id", () => {
     const targets = [
       { targetId: "t-1", type: "page", url: "https://chatgpt.com/c/first" },
       { targetId: "t-2", type: "page", url: "https://chatgpt.com/c/second" },
       { targetId: "t-3", type: "page", url: "about:blank" },
     ];
     expect(pickTarget(targets, { chromeTargetId: "t-2" })).toEqual(targets[1]);
+    expect(
+      pickTarget(targets, {
+        chromeTargetId: "t-2",
+        tabUrl: "https://chatgpt.com/c/first",
+        conversationId: "first",
+      }),
+    ).toEqual(targets[0]);
     expect(pickTarget(targets, { tabUrl: "https://chatgpt.com/c/first" })).toEqual(targets[0]);
     expect(pickTarget(targets, {})).toEqual(targets[0]);
+  });
+
+  test("pickTarget keeps the saved target among duplicate conversation tabs", () => {
+    const targets = [
+      { targetId: "duplicate", type: "page", url: "https://chatgpt.com/c/same" },
+      { targetId: "submitted", type: "page", url: "https://chatgpt.com/c/same" },
+    ];
+
+    expect(
+      pickTarget(targets, {
+        chromeTargetId: "submitted",
+        conversationId: "same",
+      }),
+    ).toEqual(targets[1]);
+  });
+
+  test("pickTarget understands CDP list ids", () => {
+    const targets = [
+      { id: "page-1", type: "page", url: "https://chatgpt.com/c/first" },
+      { id: "page-2", type: "page", url: "about:blank" },
+    ];
+
+    expect(pickTarget(targets, { chromeTargetId: "page-1" })).toEqual(targets[0]);
   });
 
   test("openConversationFromSidebar passes conversationId and projects preference", async () => {

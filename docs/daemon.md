@@ -88,6 +88,15 @@ The daemon defaults to four open ChatGPT/about:blank tabs per remote Chrome
 endpoint. Override with `daemon.maxOpenChatgptTabs` or
 `ORACLE_MAX_OPEN_CHATGPT_TABS`.
 
+Admission is transactional across daemon processes. Configure global and
+per-principal limits with `daemon.maxQueuedJobs`,
+`daemon.maxQueuedPersistedInputBytes`, `daemon.maxPrincipalQueuedJobs`,
+`daemon.maxPrincipalQueuedInputBytes`, and
+`daemon.maxPrincipalAdmissionsPerWindow` (or their `ORACLE_*` environment
+counterparts). Terminal jobs release active queue capacity immediately.
+`daemon.jobRetentionDays` controls terminal record pruning at startup and while
+the daemon remains running.
+
 ## MCP
 
 When `ORACLE_DAEMON_CONNECTION` or `daemon.connectionPath` points at a running

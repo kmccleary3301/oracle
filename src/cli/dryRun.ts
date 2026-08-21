@@ -16,6 +16,8 @@ import type { BrowserAttachment } from "../browser/types.js";
 import type { BrowserSessionConfig } from "../sessionStore.js";
 import { buildTokenEstimateSuffix, formatAttachmentLabel } from "../browser/promptSummary.js";
 import { buildCookiePlan } from "../browser/policies.js";
+import { describeBrowserControlPlan, formatBrowserControlPlan } from "../browser/controlPlan.js";
+import { formatBrowserModelTarget } from "../browser/modelDisplay.js";
 import { hasPromptText, normalizePromptText } from "../oracle/promptText.js";
 
 interface DryRunDeps {
@@ -111,13 +113,33 @@ async function runBrowserDryRun(
   },
   deps: DryRunDeps,
 ): Promise<void> {
+  validateBrowserFollowUps(runOptions, browserConfig);
   const assemblePromptImpl = deps.assembleBrowserPromptImpl ?? assembleBrowserPrompt;
   const artifacts = await assemblePromptImpl(runOptions, { cwd });
   const suffix = buildTokenEstimateSuffix(artifacts);
-  const headerLine = `[dry-run] Oracle (${version}) would launch browser mode (${runOptions.model}) with ~${artifacts.estimatedInputTokens.toLocaleString()} tokens${suffix}.`;
+  const displayModel = formatBrowserModelTarget({
+    model: runOptions.model,
+    desiredModel: browserConfig?.desiredModel,
+    modelStrategy: browserConfig?.modelStrategy,
+  });
+  const headerLine = `[dry-run] Oracle (${version}) would launch browser mode (${displayModel}) with ~${artifacts.estimatedInputTokens.toLocaleString()} tokens${suffix}.`;
   log(chalk.cyan(headerLine));
+  logBrowserControlPlan(browserConfig, log, "dry-run");
+  logBrowserFollowUpSummary(runOptions.browserFollowUps, log, "dry-run");
   logBrowserCookieStrategy(browserConfig, log, "dry-run");
+  logBrowserArchivePolicy(browserConfig, log, "dry-run");
   logBrowserFileSummary(artifacts, log, "dry-run");
+}
+
+function logBrowserControlPlan(
+  browserConfig: BrowserSessionConfig | undefined,
+  log: (message: string) => void,
+  label: string,
+) {
+  const plan = describeBrowserControlPlan(browserConfig);
+  for (const line of formatBrowserControlPlan(plan, label)) {
+    log(chalk.dim(line));
+  }
 }
 
 function logBrowserCookieStrategy(
@@ -128,6 +150,15 @@ function logBrowserCookieStrategy(
   if (!browserConfig) return;
   const plan = buildCookiePlan(browserConfig);
   log(chalk.bold(`[${label}] ${plan.description}`));
+}
+
+function logBrowserArchivePolicy(
+  browserConfig: BrowserSessionConfig | undefined,
+  log: (message: string) => void,
+  label: string,
+) {
+  const mode = browserConfig?.archiveConversations ?? "auto";
+  log(chalk.dim(`[${label}] ChatGPT archive policy: ${mode}.`));
 }
 
 function logBrowserFileSummary(
@@ -169,20 +200,30 @@ export async function runBrowserPreview(
     version,
     previewMode,
     log,
+    browserConfig,
   }: {
     runOptions: RunOracleOptions;
     cwd: string;
     version: string;
     previewMode: PreviewMode;
     log: (message: string) => void;
+    browserConfig?: BrowserSessionConfig;
   },
   deps: DryRunDeps = {},
 ): Promise<void> {
+  validateBrowserFollowUps(runOptions, browserConfig);
   const assemblePromptImpl = deps.assembleBrowserPromptImpl ?? assembleBrowserPrompt;
   const artifacts = await assemblePromptImpl(runOptions, { cwd });
   const suffix = buildTokenEstimateSuffix(artifacts);
-  const headerLine = `[preview] Oracle (${version}) browser mode (${runOptions.model}) with ~${artifacts.estimatedInputTokens.toLocaleString()} tokens${suffix}.`;
+  const displayModel = formatBrowserModelTarget({
+    model: runOptions.model,
+    desiredModel: browserConfig?.desiredModel,
+    modelStrategy: browserConfig?.modelStrategy,
+  });
+  const headerLine = `[preview] Oracle (${version}) browser mode (${displayModel}) with ~${artifacts.estimatedInputTokens.toLocaleString()} tokens${suffix}.`;
   log(chalk.cyan(headerLine));
+  logBrowserControlPlan(browserConfig, log, "preview");
+  logBrowserFollowUpSummary(runOptions.browserFollowUps, log, "preview");
   logBrowserFileSummary(artifacts, log, "preview");
   if (previewMode === "json" || previewMode === "full") {
     const attachmentSummary = artifacts.attachments.map((attachment) => ({
@@ -198,6 +239,7 @@ export async function runBrowserPreview(
       inlineFileCount: artifacts.inlineFileCount,
       bundled: artifacts.bundled,
       tokenEstimate: artifacts.estimatedInputTokens,
+      browserFollowUps: runOptions.browserFollowUps ?? [],
     };
     log("");
     log(chalk.bold("Preview JSON"));
@@ -207,5 +249,34 @@ export async function runBrowserPreview(
     log("");
     log(chalk.bold("Composer Text"));
     log(artifacts.composerText || chalk.dim("(empty prompt)"));
+  }
+}
+
+function logBrowserFollowUpSummary(
+  followUps: string[] | undefined,
+  log: (message: string) => void,
+  label: string,
+): void {
+  const count = followUps?.filter((entry) => entry.trim().length > 0).length ?? 0;
+  if (count > 0) {
+    log(chalk.bold(`[${label}] Browser follow-ups: ${count} additional prompt(s).`));
+    log(
+      chalk.dim(
+        `[${label}] Multi-turn is explicit only: Oracle will send these prompts in order, but it never invents follow-ups automatically.`,
+      ),
+    );
+  }
+}
+
+function validateBrowserFollowUps(
+  runOptions: RunOracleOptions,
+  browserConfig: BrowserSessionConfig | undefined,
+): void {
+  const followUpCount =
+    runOptions.browserFollowUps?.filter((entry) => entry.trim().length > 0).length ?? 0;
+  if (followUpCount > 0 && browserConfig?.researchMode === "deep") {
+    throw new Error(
+      "Browser follow-ups are not supported with Deep Research mode. Put the full research plan into the initial prompt or run a normal browser consult for multi-turn review.",
+    );
   }
 }

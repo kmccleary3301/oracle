@@ -1,17 +1,40 @@
 import { z } from "zod";
-import { buildBrowserConfig } from "../cli/browserConfig.js";
-import { loadUserConfig } from "../config.js";
+import { resolveTrustedBrowserConfig } from "../browser/trustedBrowserConfig.js";
 import { resolveBrowserAttachments } from "../browser/attachmentResolver.js";
+import { closeRemoteChromeTarget, connectToRemoteChrome } from "../browser/chromeLifecycle.js";
 import { extractChatgptImagesFromConfiguredBrowser } from "../browser/chatgpt/imageArtifacts.js";
 import { extractChatgptSandboxArtifactsFromConfiguredBrowser } from "../browser/chatgpt/sandboxArtifacts.js";
+import {
+  editChatgptImage,
+  generateChatgptImage,
+  verifyChatgptImageModeFromConfiguredBrowser,
+} from "../browser/chatgpt/imageService.js";
+import {
+  createRuntimeWorkService,
+  type WorkApprovalResult,
+  type WorkSnapshot,
+} from "../browser/chatgpt/work.js";
 import { createChatgptSession, sendChatgptTurn } from "../browser/chatgpt/session.js";
+import type { ApprovalGrantAuthority } from "../browser/approvalToken.js";
 import { listRemoteChromePageTargets } from "../browser/remoteChromeTabs.js";
+import { navigateToChatGPT } from "../browser/actions/navigation.js";
 import type { BrowserModelStrategy, BrowserRunOptions } from "../browser/types.js";
-import { DEFAULT_MODEL } from "../oracle.js";
 import type { ThinkingTimeLevel } from "../oracle/types.js";
-import type { OracleDaemonJobHandler, OracleDaemonJobHandlerContext } from "./types.js";
+import type {
+  OracleDaemonJobHandler,
+  OracleDaemonJobHandlerContext,
+  OracleDaemonWorkInput,
+  OracleDaemonWorkOperation,
+  OracleDaemonWorkResult,
+} from "./types.js";
 
 const DEFAULT_CHATGPT_IMAGE_TURN_TIMEOUT_MS = 30 * 60_000;
+export interface ChatgptDaemonHandlerOptions {
+  approvalAuthority?: ApprovalGrantAuthority;
+  principal?: string;
+  session?: string;
+}
+
 const thinkingFallbackSchema = z
   .enum([
     "allow",
@@ -93,10 +116,52 @@ const recoverArtifactsInputSchema = z.object({
     .optional(),
 });
 
-export function createChatgptDaemonHandlers(): OracleDaemonJobHandler[] {
+const workStartInputSchema = z.object({
+  prompt: z.string().min(1),
+  conversationId: z.string().min(1).optional(),
+  taskId: z.string().min(1).optional(),
+  task: z.string().optional(),
+  deliverable: z.string().optional(),
+  deliverables: z.record(z.string(), z.unknown()).optional(),
+  remoteChrome: z.string().optional(),
+  timeoutMs: z.number().positive().optional(),
+  keepTab: z.boolean().optional().default(false),
+});
+
+const workStatusInputSchema = z.object({
+  conversationId: z.string().min(1),
+  taskId: z.string().min(1).optional(),
+  remoteChrome: z.string().optional(),
+  timeoutMs: z.number().positive().optional(),
+  keepTab: z.boolean().optional().default(false),
+});
+
+const workAnswerInputSchema = workStatusInputSchema.extend({
+  taskId: z.string().min(1),
+  questionId: z.string().min(1),
+  answer: z.string().min(1),
+  turnId: z.string().min(1).optional(),
+  expectedRevisionHash: z.string().min(1).optional(),
+});
+
+const workApproveInputSchema = workStatusInputSchema.extend({
+  taskId: z.string().min(1),
+  expectedRevisionHash: z.string().min(1),
+  approvalGrant: z.string().optional(),
+  dryRun: z.boolean().optional().default(false),
+});
+
+const workInterruptInputSchema = workStatusInputSchema.extend({
+  taskId: z.string().min(1),
+  turnId: z.string().min(1),
+});
+export function createChatgptDaemonHandlers(
+  options: ChatgptDaemonHandlerOptions = {},
+): OracleDaemonJobHandler[] {
   return [
     {
       kind: "chatgpt_generate_images",
+
       async run(context, input) {
         return await runImageJob(context, input, false);
       },
@@ -117,6 +182,12 @@ export function createChatgptDaemonHandlers(): OracleDaemonJobHandler[] {
       kind: "chatgpt_send_turn",
       async run(context, input) {
         return await runSendTurnJob(context, input);
+      },
+    },
+    {
+      kind: "chatgpt_work_start",
+      async run(context, input) {
+        return await runChatgptWorkOperation("start", input, context, options);
       },
     },
     {
@@ -240,6 +311,224 @@ export async function recoverChatgptJobArtifacts(input: unknown) {
         : "active-tab",
   });
 }
+export async function runChatgptWorkOperation(
+  operation: OracleDaemonWorkOperation,
+  input: unknown,
+  context?: OracleDaemonJobHandlerContext,
+  options: ChatgptDaemonHandlerOptions = {},
+): Promise<OracleDaemonWorkResult> {
+  const parsed = (
+    operation === "start"
+      ? workStartInputSchema.parse(input)
+      : operation === "answer"
+        ? workAnswerInputSchema.parse(input)
+        : operation === "approve"
+          ? workApproveInputSchema.parse(input)
+          : operation === "interrupt"
+            ? workInterruptInputSchema.parse(input)
+            : workStatusInputSchema.parse(input)
+  ) as OracleDaemonWorkInput;
+  const metadata = {
+    taskId: parsed.taskId,
+    task: parsed.task,
+    deliverable: parsed.deliverable,
+    deliverables: parsed.deliverables,
+  };
+  const config = await resolveDaemonBrowserConfig(parsed.remoteChrome);
+  if (!config.remoteChrome) {
+    return {
+      operation,
+      state: "unsupported",
+      accepted: false,
+      conversationId: parsed.conversationId ?? null,
+      conversationUrl: null,
+      questionId: parsed.questionId ?? null,
+      revisionHash: parsed.expectedRevisionHash ?? null,
+      reason: "remote-chrome-unavailable",
+      ...metadata,
+    };
+  }
+  const targetUrl = parsed.conversationId
+    ? `${config.chatgptUrl ?? config.url ?? "https://chatgpt.com"}/c/${parsed.conversationId}`
+    : (config.chatgptUrl ?? config.url ?? "https://chatgpt.com");
+  const logger = (message: string) => {
+    if (context) void context.log(message);
+  };
+  const connection = await connectToRemoteChrome(
+    config.remoteChrome.host,
+    config.remoteChrome.port,
+    logger,
+    targetUrl,
+    undefined,
+    { maxTabs: config.remoteChromeMaxTabs },
+  );
+  try {
+    const { Page, Runtime, Input } = connection.client;
+    await Promise.all([Page.enable(), Runtime.enable()]);
+    await navigateToChatGPT(Page, Runtime, targetUrl, logger);
+    const service = createRuntimeWorkService({
+      Runtime,
+      Input,
+      timeoutMs: parsed.timeoutMs ?? config.inputTimeoutMs ?? 60_000,
+      logger,
+      approvalAuthority: options.approvalAuthority,
+      principal: options.principal,
+      session: options.session,
+    });
+    if (context) {
+      await context.updateRuntime({
+        remoteChrome: `${config.remoteChrome.host}:${config.remoteChrome.port}`,
+        tabId: connection.targetId,
+      });
+    }
+    let result: OracleDaemonWorkResult;
+    if (operation === "start") {
+      if (context) await context.setPhase("submitting_prompt", "Submitting ChatGPT Work prompt.");
+      const started = await service.start({
+        prompt: parsed.prompt!,
+        conversationId: parsed.conversationId,
+        taskId: parsed.taskId,
+      });
+      result = {
+        operation,
+        state: started.state,
+        accepted: started.accepted,
+        conversationId: started.conversationId,
+        conversationUrl: started.conversationUrl,
+        ...metadata,
+        taskId: started.taskId ?? metadata.taskId,
+        turnId: started.turnId,
+        revisionHash: started.revisionHash,
+        deliverables: started.deliverables ?? metadata.deliverables,
+        provenance: started.provenance,
+      };
+    } else if (operation === "status") {
+      const snapshot = await service.status({
+        conversationId: parsed.conversationId!,
+        taskId: parsed.taskId,
+      });
+      result = workSnapshotResult(operation, snapshot, metadata);
+    } else if (operation === "answer") {
+      const answered = await service.answer({
+        conversationId: parsed.conversationId!,
+        taskId: parsed.taskId,
+        questionId: parsed.questionId,
+        answer: parsed.answer!,
+        turnId: parsed.turnId,
+        expectedRevisionHash: parsed.expectedRevisionHash,
+      });
+      result = {
+        operation,
+        state: answered.state,
+        accepted: answered.accepted,
+        reason: answered.reason,
+        conversationId: answered.conversationId,
+        questionId: parsed.questionId,
+        ...metadata,
+        taskId: answered.taskId ?? metadata.taskId,
+        turnId: answered.turnId,
+        revisionHash: answered.revisionHash,
+        deliverables: answered.deliverables ?? metadata.deliverables,
+        provenance: answered.provenance,
+      };
+    } else if (operation === "approve") {
+      const approved: WorkApprovalResult = await service.approve({
+        conversationId: parsed.conversationId!,
+        taskId: parsed.taskId,
+        expectedRevisionHash: parsed.expectedRevisionHash,
+        approvalGrant: parsed.approvalGrant,
+        dryRun: parsed.dryRun,
+      });
+      result = {
+        operation,
+        state: approved.state,
+        dryRun: approved.dryRun,
+        approvalChallenge: approved.approvalChallenge,
+        reason: approved.reason,
+        conversationId: approved.conversationId ?? parsed.conversationId!,
+        ...metadata,
+        taskId: approved.taskId ?? metadata.taskId,
+        revisionHash: approved.revisionHash ?? approved.plan?.revisionHash,
+        turnId: approved.turnId,
+        deliverables: approved.deliverables ?? metadata.deliverables,
+        provenance: approved.provenance,
+      };
+    } else {
+      const interrupted = await service.interrupt({
+        conversationId: parsed.conversationId!,
+        taskId: parsed.taskId,
+        turnId: parsed.turnId,
+      });
+      result = {
+        operation,
+        state: interrupted.state,
+        verified: interrupted.verified,
+        reason: interrupted.reason,
+        conversationId: interrupted.conversationId ?? parsed.conversationId!,
+        ...metadata,
+        taskId: interrupted.taskId ?? metadata.taskId,
+        turnId: interrupted.turnId ?? parsed.turnId,
+        revisionHash: interrupted.revisionHash,
+        deliverables: interrupted.deliverables ?? metadata.deliverables,
+        provenance: interrupted.provenance,
+      };
+    }
+    if (context) {
+      await context.updateRuntime({
+        conversationId: result.conversationId ?? undefined,
+        conversationUrl: result.conversationUrl ?? undefined,
+        work: {
+          state: result.state,
+          conversationId: result.conversationId ?? undefined,
+          taskId: result.taskId,
+          turnId: result.turnId ?? undefined,
+          revisionHash: result.revisionHash ?? undefined,
+          deliverables: result.deliverables,
+          provenance: result.provenance,
+        },
+      });
+    }
+    return result;
+  } finally {
+    try {
+      await connection.client.close();
+    } finally {
+      if (!parsed.keepTab) {
+        await closeRemoteChromeTarget(
+          config.remoteChrome.host,
+          config.remoteChrome.port,
+          connection.targetId,
+          logger,
+        );
+      }
+    }
+  }
+}
+
+function workSnapshotResult(
+  operation: OracleDaemonWorkOperation,
+  snapshot: WorkSnapshot,
+  metadata: OracleDaemonWorkInput,
+): OracleDaemonWorkResult {
+  return {
+    operation,
+    state: snapshot.state,
+    reason: snapshot.reason,
+    conversationId: snapshot.conversationId,
+    conversationUrl: snapshot.url || null,
+    taskId: snapshot.taskId ?? metadata.taskId,
+    questionId: snapshot.userQuestion?.id ?? null,
+    turnId: snapshot.turn?.id,
+    revisionHash:
+      snapshot.revisionHash ?? snapshot.turn?.revisionHash ?? snapshot.plan?.revisionHash,
+    plan: snapshot.plan ? { ...snapshot.plan } : undefined,
+    userQuestion: snapshot.userQuestion ? { ...snapshot.userQuestion } : undefined,
+    task: metadata.task,
+    deliverable: metadata.deliverable,
+    deliverables: snapshot.deliverables ?? metadata.deliverables,
+    provenance: snapshot.provenance,
+  };
+}
 
 async function runCreateSessionJob(context: OracleDaemonJobHandlerContext, input: unknown) {
   const parsed = createSessionJobInputSchema.parse(input);
@@ -267,10 +556,18 @@ async function runCreateSessionJob(context: OracleDaemonJobHandlerContext, input
         parsed.sandboxArtifactsOutputDir ?? config.sandboxArtifactsOutputDir,
     },
     runtimeHintCb: createRuntimeHintCallback(context),
+    beforeSend: () => context.markSubmission("submitting", { reasonCode: "submission_started" }),
+    onPromptSubmitted: () =>
+      context.markSubmission("accepted", { reasonCode: "submission_accepted" }),
     log: (message) => {
       void context.log(message);
     },
   });
+  if (result.status === "submitted") {
+    await context.markSubmission("accepted", { reasonCode: "submission_accepted" });
+  } else if (result.submitted) {
+    await context.markSubmission("submitted", { reasonCode: "submission_committed" });
+  }
   return serializeTurnResult(result);
 }
 
@@ -299,10 +596,18 @@ async function runSendTurnJob(context: OracleDaemonJobHandlerContext, input: unk
         parsed.sandboxArtifactsOutputDir ?? config.sandboxArtifactsOutputDir,
     },
     runtimeHintCb: createRuntimeHintCallback(context),
+    beforeSend: () => context.markSubmission("submitting", { reasonCode: "submission_started" }),
+    onPromptSubmitted: () =>
+      context.markSubmission("accepted", { reasonCode: "submission_accepted" }),
     log: (message) => {
       void context.log(message);
     },
   });
+  if (result.status === "submitted") {
+    await context.markSubmission("accepted", { reasonCode: "submission_accepted" });
+  } else if (result.submitted) {
+    await context.markSubmission("submitted", { reasonCode: "submission_committed" });
+  }
   return serializeTurnResult(result);
 }
 
@@ -318,28 +623,68 @@ async function runImageJob(
   await context.setPhase("uploading_attachments", "Resolving browser attachments.");
   const config = await resolveDaemonBrowserConfig(parsed.remoteChrome);
   const attachments = await resolveBrowserAttachments(parsed.files);
+  const sessionConfig = {
+    ...config,
+    url: parsed.projectUrl ?? config.url,
+    chatgptUrl: parsed.projectUrl ?? config.chatgptUrl,
+    modelStrategy: parsed.browserModelStrategy as BrowserModelStrategy,
+    desiredModel: parsed.browserModelLabel ?? config.desiredModel,
+    thinkingTime: (parsed.browserThinkingTime ?? config.thinkingTime) as
+      | ThinkingTimeLevel
+      | undefined,
+    thinkingFallback: parsed.thinkingFallback ?? config.thinkingFallback,
+  };
   await context.setPhase("submitting_prompt", "Submitting ChatGPT image turn.");
-  const generation = await createChatgptSession({
+  const serviceOptions = {
     prompt: parsed.prompt,
     attachments,
     timeoutMs: parsed.timeoutMs ?? DEFAULT_CHATGPT_IMAGE_TURN_TIMEOUT_MS,
     includeSnapshot: true,
-    config: {
-      ...config,
-      url: parsed.projectUrl ?? config.url,
-      chatgptUrl: parsed.projectUrl ?? config.chatgptUrl,
-      modelStrategy: parsed.browserModelStrategy as BrowserModelStrategy,
-      desiredModel: parsed.browserModelLabel ?? config.desiredModel,
-      thinkingTime: (parsed.browserThinkingTime ?? config.thinkingTime) as
-        | ThinkingTimeLevel
-        | undefined,
-      thinkingFallback: parsed.thinkingFallback ?? config.thinkingFallback,
-    },
-    runtimeHintCb: createRuntimeHintCallback(context),
-    log: (message) => {
-      void context.log(message);
-    },
-  });
+    config: sessionConfig,
+    requireVerifiedMode: true,
+    verifyMode: () =>
+      verifyChatgptImageModeFromConfiguredBrowser({
+        config: sessionConfig,
+        timeoutMs: parsed.timeoutMs,
+        log: (message) => void context.log(message),
+      }),
+    createSession: (session: Parameters<typeof createChatgptSession>[0]) =>
+      createChatgptSession({
+        ...session,
+        runtimeHintCb: createRuntimeHintCallback(context),
+        beforeSend: () =>
+          context.markSubmission("submitting", { reasonCode: "submission_started" }),
+        onPromptSubmitted: () =>
+          context.markSubmission("accepted", { reasonCode: "submission_accepted" }),
+        log: (message) => {
+          void context.log(message);
+        },
+      }),
+  } as const;
+  const operation = requireAttachments
+    ? await editChatgptImage(serviceOptions)
+    : await generateChatgptImage(serviceOptions);
+  if (
+    operation.state !== "completed" ||
+    !operation.value ||
+    typeof operation.value !== "object" ||
+    !("turn" in operation.value) ||
+    !Array.isArray(operation.outputs) ||
+    operation.outputs.length < 1
+  ) {
+    throw new Error(
+      `${operation.failure?.code ?? operation.state}: ${
+        operation.failure?.message ?? "ChatGPT image operation did not produce an image artifact."
+      }`,
+    );
+  }
+  const generation = (operation.value as { turn: Awaited<ReturnType<typeof createChatgptSession>> })
+    .turn;
+  if (generation.status === "submitted") {
+    await context.markSubmission("accepted", { reasonCode: "submission_accepted" });
+  } else if (generation.submitted) {
+    await context.markSubmission("submitted", { reasonCode: "submission_committed" });
+  }
   await context.updateRuntime({
     conversationUrl: generation.conversationUrl,
     remoteChrome:
@@ -372,7 +717,10 @@ async function runImageJob(
     | Awaited<ReturnType<typeof extractChatgptSandboxArtifactsFromConfiguredBrowser>>
     | undefined;
   if (generation.conversationUrl && parsed.artifactTypes.includes("sandbox")) {
-    await context.setPhase("extracting_sandbox_artifacts", "Extracting sandbox artifacts.");
+    await context.setPhase(
+      "extracting_sandbox_artifacts",
+      "Extracting generated sandbox artifacts.",
+    );
     sandboxExtraction = await extractChatgptSandboxArtifactsFromConfiguredBrowser({
       conversationUrl: generation.conversationUrl,
       outputDir: parsed.outputDir,
@@ -386,8 +734,13 @@ async function runImageJob(
       return undefined;
     });
   }
+  const images =
+    extraction && extraction.images.length > 0
+      ? extraction.images.map(({ domRecords: _domRecords, ...image }) => image)
+      : (operation.outputs ?? []);
   const detectedImageCount = Math.max(
     extraction?.images.length ?? 0,
+    operation.outputs?.length ?? 0,
     generation.newGeneratedImages?.length ?? 0,
     generation.generatedImages?.length ?? 0,
   );
@@ -400,10 +753,7 @@ async function runImageJob(
     uniqueGeneratedImageCount: detectedImageCount,
     generatedImageNodeCount: extraction?.page.generatedImageNodeCount ?? 0,
     outputDir: extraction?.outputDir,
-    images:
-      extraction && extraction.images.length > 0
-        ? extraction.images.map(({ domRecords: _domRecords, ...image }) => image)
-        : (generation.generatedImages?.map(({ domRecords: _domRecords, ...image }) => image) ?? []),
+    images,
     artifacts: extraction?.artifacts ?? [],
     sandboxArtifacts: sandboxExtraction?.sandboxArtifacts ?? generation.sandboxArtifacts ?? [],
     downloadedArtifacts:
@@ -415,14 +765,10 @@ async function runImageJob(
       sizeBytes: attachment.sizeBytes,
     })),
     warnings: [
+      ...operation.warnings,
       ...extractionWarnings,
       ...(extraction?.warnings ?? []),
       ...(sandboxExtraction?.warnings ?? []),
-      ...(detectedImageCount > 0
-        ? []
-        : [
-            "No generated image artifacts were detected in the completed turn. Ensure the current ChatGPT mode is the image model before relying on this job.",
-          ]),
     ],
   };
 }
@@ -442,17 +788,7 @@ function createRuntimeHintCallback(
   };
 }
 
-async function resolveDaemonBrowserConfig(remoteChrome?: string) {
-  const { config: userConfig } = await loadUserConfig();
-  const cliBrowserConfig = remoteChrome
-    ? await buildBrowserConfig({ model: DEFAULT_MODEL, remoteChrome })
-    : {};
-  return {
-    ...(userConfig.browser ?? {}),
-    ...cliBrowserConfig,
-    remoteChrome: cliBrowserConfig.remoteChrome ?? userConfig.browser?.remoteChrome ?? null,
-  };
-}
+const resolveDaemonBrowserConfig = resolveTrustedBrowserConfig;
 
 function serializeTurnResult(result: Awaited<ReturnType<typeof sendChatgptTurn>>) {
   return {

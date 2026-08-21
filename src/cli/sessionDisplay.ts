@@ -1,5 +1,6 @@
 import chalk from "chalk";
 import kleur from "kleur";
+import fs from "node:fs/promises";
 import type {
   SessionMetadata,
   SessionTransportMetadata,
@@ -12,6 +13,12 @@ import { sessionStore, wait } from "../sessionStore.js";
 import { formatTokenCount, formatTokenValue } from "../oracle/runUtils.js";
 import type { BrowserLogger } from "../browser/types.js";
 import { resumeBrowserSession } from "../browser/reattach.js";
+import { hasRecoverableChatGptConversation } from "../browser/reattachability.js";
+import {
+  appendArtifacts,
+  saveBrowserTranscriptArtifact,
+  saveDeepResearchReportArtifact,
+} from "../browser/artifacts.js";
 import { estimateTokenCount } from "../browser/utils.js";
 import {
   formatSessionTableHeader,
@@ -23,6 +30,12 @@ import {
   buildResponseOwnerIndex,
   resolveSessionLineage,
 } from "./sessionLineage.js";
+import { formatSessionExecutionLabel } from "./sessionLifecycle.js";
+import {
+  formatBrowserModelSelectionEvidence,
+  formatSessionBrowserModelWithRequestedKey,
+  resolveSessionBrowserModelDisplayName,
+} from "../browser/modelDisplay.js";
 
 const isTty = (): boolean => Boolean(process.stdout.isTTY);
 const dim = (text: string): string => (isTty() ? kleur.dim(text) : text);
@@ -43,6 +56,109 @@ function isProcessAlive(pid?: number): boolean {
     }
     return true;
   }
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function isDeepResearchBrowserSession(metadata: SessionMetadata): boolean {
+  return metadata.mode === "browser" && metadata.browser?.config?.researchMode === "deep";
+}
+
+const DEEP_RESEARCH_TOOL_CALL_MARKERS = [
+  "called tool",
+  "used tool",
+  "użyto narzędzia",
+  "narzędzie wywołane",
+];
+
+function isDeepResearchToolCallPlaceholder(answerText: string, outputTokens?: number): boolean {
+  const lines = answerText
+    .toLowerCase()
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  if (!lines[0] || !DEEP_RESEARCH_TOOL_CALL_MARKERS.includes(lines[0])) {
+    return false;
+  }
+  if (lines.length === 1) {
+    return outputTokens == null || outputTokens <= 8;
+  }
+  const wrapper = lines.slice(1).join(" ");
+  const structuralSignals = [
+    wrapper.includes("deep research app"),
+    /\bcall tool\b/.test(wrapper),
+    /\brequest\s*\{/.test(wrapper),
+    /\bresponse\s*\{/.test(wrapper),
+    /\bsession[_ ]id\b/.test(wrapper),
+  ].filter(Boolean).length;
+  return wrapper.includes("deep research app") && structuralSignals >= 2;
+}
+
+export function isDeepResearchPlaceholderCapture(
+  metadata: SessionMetadata,
+  logText: string,
+): boolean {
+  if (/\[reattach\][^\n]*\nAnswer:/i.test(logText)) {
+    return false;
+  }
+  const answer = trimBeforeFirstAnswer(logText).replace(/^Answer:\s*/i, "");
+  const modelUsage = metadata.models?.find((run) => run.model === metadata.model)?.usage;
+  const outputTokens = metadata.usage?.outputTokens ?? modelUsage?.outputTokens;
+  return isDeepResearchToolCallPlaceholder(answer, outputTokens);
+}
+
+async function writeReattachAnswer(
+  sessionId: string,
+  result: { answerText: string; answerMarkdown: string },
+  replaceExistingLog: boolean,
+): Promise<void> {
+  const body = result.answerMarkdown || result.answerText;
+  if (replaceExistingLog) {
+    const paths = await sessionStore.getPaths(sessionId);
+    await fs.writeFile(
+      paths.log,
+      `[reattach] replaced incomplete Deep Research capture from existing Chrome tab\nAnswer:\n${body}\n`,
+      "utf8",
+    );
+    return;
+  }
+  const logWriter = sessionStore.createLogWriter(sessionId);
+  logWriter.logLine("[reattach] captured assistant response from existing Chrome tab");
+  logWriter.logLine("Answer:");
+  logWriter.logLine(body);
+  logWriter.stream.end();
+}
+
+async function saveReattachBrowserArtifacts(
+  sessionId: string,
+  metadata: SessionMetadata,
+  result: { answerText: string; answerMarkdown: string },
+): Promise<SessionMetadata["artifacts"]> {
+  const body = result.answerMarkdown || result.answerText;
+  const conversationUrl = metadata.browser?.runtime?.tabUrl;
+  const logger = ((message: string) => console.log(dim(message))) as BrowserLogger;
+  const reportArtifact = isDeepResearchBrowserSession(metadata)
+    ? await saveDeepResearchReportArtifact({
+        sessionId,
+        reportMarkdown: body,
+        conversationUrl,
+        logger,
+      }).catch(() => null)
+    : null;
+  const prompt = (await readStoredPrompt(sessionId)) ?? metadata.promptPreview ?? "";
+  const transcriptArtifact = await saveBrowserTranscriptArtifact({
+    sessionId,
+    prompt,
+    answerMarkdown: body,
+    conversationUrl,
+    artifacts: appendArtifacts(undefined, [reportArtifact]),
+    logger,
+  }).catch(() => null);
+  return appendArtifacts(metadata.artifacts, [reportArtifact, transcriptArtifact]);
 }
 
 export interface ShowStatusOptions {
@@ -112,6 +228,8 @@ export interface AttachSessionOptions {
   renderMarkdown?: boolean;
   renderPrompt?: boolean;
   model?: string;
+  /** Propagate a terminal worker failure through the attached CLI process. */
+  propagateFailure?: boolean;
 }
 
 type LiveRenderState = {
@@ -157,18 +275,47 @@ export async function attachSession(
   const isVerbose = Boolean(process.env.ORACLE_VERBOSE_RENDER);
   const runtime = metadata.browser?.runtime;
   const controllerAlive = isProcessAlive(runtime?.controllerPid);
+  const workerAlive = isProcessAlive(metadata.lifecycle?.workerPid);
 
   const hasChromeDisconnect = metadata.response?.incompleteReason === "chrome-disconnected";
+  const hasIncompleteCapture = metadata.response?.incompleteReason === "incomplete-capture";
   const statusAllowsReattach =
-    metadata.status === "running" || (metadata.status === "error" && hasChromeDisconnect);
+    metadata.status === "running" ||
+    (metadata.status === "error" && (hasChromeDisconnect || hasIncompleteCapture));
   const hasFallbackSessionInfo = Boolean(
-    runtime?.chromePort || runtime?.tabUrl || runtime?.conversationId,
+    runtime?.chromePort ||
+    runtime?.chromeBrowserWSEndpoint ||
+    runtime?.chromeProfileRoot ||
+    runtime?.tabUrl ||
+    runtime?.conversationId,
+  );
+  const deepResearchPlaceholderCapture =
+    isDeepResearchBrowserSession(metadata) &&
+    hasFallbackSessionInfo &&
+    isDeepResearchPlaceholderCapture(
+      metadata,
+      await sessionStore.readLog(sessionId).catch(() => ""),
+    );
+  const completedDeepResearchPlaceholder =
+    metadata.status === "completed" && deepResearchPlaceholderCapture;
+  const hasRecoverableConversation = hasRecoverableChatGptConversation(runtime);
+  const hasLiveChromeFallback = Boolean(
+    (metadata.status === "running" || hasIncompleteCapture || completedDeepResearchPlaceholder) &&
+    (runtime?.chromePort || runtime?.chromeBrowserWSEndpoint || runtime?.chromeProfileRoot),
   );
   const canReattach =
-    statusAllowsReattach &&
+    (statusAllowsReattach || completedDeepResearchPlaceholder) &&
     metadata.mode === "browser" &&
     hasFallbackSessionInfo &&
-    (hasChromeDisconnect || (runtime?.controllerPid && !controllerAlive));
+    !workerAlive &&
+    (hasRecoverableConversation ||
+      runtime?.promptSubmitted ||
+      hasLiveChromeFallback ||
+      completedDeepResearchPlaceholder) &&
+    (hasChromeDisconnect ||
+      hasIncompleteCapture ||
+      completedDeepResearchPlaceholder ||
+      (runtime?.controllerPid && !controllerAlive));
 
   if (canReattach) {
     const portInfo = runtime?.chromePort ? `port ${runtime.chromePort}` : "unknown port";
@@ -193,11 +340,13 @@ export async function attachSession(
         { promptPreview: metadata.promptPreview },
       );
       const outputTokens = estimateTokenCount(result.answerMarkdown);
-      const logWriter = sessionStore.createLogWriter(sessionId);
-      logWriter.logLine("[reattach] captured assistant response from existing Chrome tab");
-      logWriter.logLine("Answer:");
-      logWriter.logLine(result.answerMarkdown || result.answerText);
-      logWriter.stream.end();
+      const artifacts = await saveReattachBrowserArtifacts(sessionId, metadata, result);
+      await writeReattachAnswer(
+        sessionId,
+        result,
+        completedDeepResearchPlaceholder ||
+          (hasIncompleteCapture && deepResearchPlaceholderCapture),
+      );
       if (metadata.model) {
         await sessionStore.updateModelRun(metadata.id, metadata.model, {
           status: "completed",
@@ -219,10 +368,14 @@ export async function attachSession(
           reasoningTokens: 0,
           totalTokens: outputTokens,
         },
+        errorMessage: undefined,
         browser: {
           config: metadata.browser?.config,
           runtime,
+          modelSelection: metadata.browser?.modelSelection,
+          warnings: metadata.browser?.warnings,
         },
+        artifacts,
         response: { status: "completed" },
         error: undefined,
         transport: undefined,
@@ -232,6 +385,28 @@ export async function attachSession(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.log(chalk.red(`Reattach failed: ${message}`));
+      if (completedDeepResearchPlaceholder) {
+        if (metadata.model) {
+          await sessionStore.updateModelRun(metadata.id, metadata.model, {
+            status: "error",
+            response: { status: "incomplete", incompleteReason: "incomplete-capture" },
+            error: {
+              category: "browser-automation",
+              message: `Deep Research capture incomplete: ${message}`,
+            },
+          });
+        }
+        await sessionStore.updateSession(sessionId, {
+          status: "error",
+          errorMessage: `Deep Research capture incomplete: ${message}`,
+          response: { status: "incomplete", incompleteReason: "incomplete-capture" },
+          error: {
+            category: "browser-automation",
+            message: `Deep Research capture incomplete: ${message}`,
+          },
+        });
+        metadata = (await sessionStore.readSession(sessionId)) ?? metadata;
+      }
     }
   }
   if (!options?.suppressMetadata) {
@@ -245,16 +420,51 @@ export async function attachSession(
     }
     console.log(`Created: ${metadata.createdAt}`);
     console.log(`Status: ${metadata.status}`);
+    if (metadata.lifecycle) {
+      const attached = metadata.lifecycle.attached ? "attached" : "detached";
+      console.log(`Execution: ${formatSessionExecutionLabel(metadata)} (${attached})`);
+      console.log(`Reattach: ${metadata.lifecycle.reattachCommand}`);
+    }
     if (metadata.models && metadata.models.length > 0) {
       console.log("Models:");
       for (const run of metadata.models) {
         const usage = run.usage
           ? ` tok=${formatTokenCount(run.usage.outputTokens ?? 0)}/${formatTokenCount(run.usage.totalTokens ?? 0)}`
           : "";
-        console.log(`- ${chalk.cyan(run.model)} — ${run.status}${usage}`);
+        const modelLabel =
+          (metadata.mode ?? metadata.options?.mode) === "browser"
+            ? formatSessionBrowserModelWithRequestedKey(metadata, run.model)
+            : run.model;
+        console.log(`- ${chalk.cyan(modelLabel)} — ${run.status}${usage}`);
       }
     } else if (metadata.model) {
-      console.log(`Model: ${metadata.model}`);
+      const modelLabel =
+        (metadata.mode ?? metadata.options?.mode) === "browser"
+          ? formatSessionBrowserModelWithRequestedKey(metadata)
+          : metadata.model;
+      console.log(`Model: ${modelLabel}`);
+    }
+    const browserEvidence = formatBrowserEvidence(metadata);
+    if (browserEvidence) {
+      console.log("Browser evidence:");
+      for (const line of browserEvidence) {
+        console.log(dim(`- ${line}`));
+      }
+    }
+    if (metadata.artifacts && metadata.artifacts.length > 0) {
+      console.log("Artifacts:");
+      for (const artifact of metadata.artifacts) {
+        const label = artifact.label ?? artifact.kind;
+        const size = artifact.sizeBytes ? ` (${formatBytes(artifact.sizeBytes)})` : "";
+        const checksum = artifact.sha256 ? ` sha256=${artifact.sha256.slice(0, 12)}…` : "";
+        const validation = artifact.validation
+          ? ` validation=${artifact.validation.ok ? "ok" : (artifact.validation.error ?? "failed")}`
+          : "";
+        const transfer = artifact.transfer?.status ? ` transfer=${artifact.transfer.status}` : "";
+        console.log(
+          `- ${chalk.cyan(label)} — ${artifact.path}${size}${checksum}${validation}${transfer}`,
+        );
+      }
     }
     const responseSummary = formatResponseMetadata(metadata.response);
     if (responseSummary) {
@@ -270,7 +480,8 @@ export async function attachSession(
     }
   }
 
-  const shouldTrimIntro = initialStatus === "completed" || initialStatus === "error";
+  const shouldTrimIntro =
+    initialStatus === "completed" || initialStatus === "partial" || initialStatus === "error";
   if (options?.renderPrompt !== false) {
     const prompt = await readStoredPrompt(sessionId);
     if (prompt) {
@@ -308,6 +519,9 @@ export async function attachSession(
     const summary = formatCompletionSummary(metadata, { includeSlug: true });
     if (summary) {
       console.log(`\n${chalk.green.bold(summary)}`);
+    }
+    if (options?.propagateFailure && metadata.status === "error") {
+      process.exitCode = 1;
     }
     return;
   }
@@ -405,7 +619,7 @@ export async function attachSession(
     if (!latest) {
       break;
     }
-    if (latest.status === "completed" || latest.status === "error") {
+    if (latest.status === "completed" || latest.status === "partial" || latest.status === "error") {
       await printNew();
       flushRemainder();
       if (!options?.suppressMetadata) {
@@ -413,10 +627,11 @@ export async function attachSession(
           console.log("\nResult:");
           console.log(`Session failed: ${latest.errorMessage}`);
         }
-        if (latest.status === "completed" && latest.usage) {
+        if ((latest.status === "completed" || latest.status === "partial") && latest.usage) {
           const summary = formatCompletionSummary(latest, { includeSlug: true });
           if (summary) {
-            console.log(`\n${chalk.green.bold(summary)}`);
+            const color = latest.status === "partial" ? chalk.yellow.bold : chalk.green.bold;
+            console.log(`\n${color(summary)}`);
           } else {
             const usage = latest.usage;
             console.log(
@@ -424,6 +639,49 @@ export async function attachSession(
             );
           }
         }
+      }
+      if (options?.propagateFailure && latest.status === "error") {
+        process.exitCode = 1;
+      }
+      break;
+    }
+    const controllerPid = latest.lifecycle?.workerPid ?? latest.browser?.runtime?.controllerPid;
+    if (latest.lifecycle?.detached && controllerPid && !isProcessAlive(controllerPid)) {
+      const settled = await sessionStore.readSession(sessionId);
+      if (!settled) {
+        break;
+      }
+      if (settled.status === "completed" || settled.status === "partial") {
+        continue;
+      }
+      await printNew();
+      flushRemainder();
+      const message =
+        settled.status === "error"
+          ? (settled.errorMessage ?? "Detached worker failed.")
+          : "Detached worker exited before the session reached a terminal state.";
+      const failure = {
+        category: "internal",
+        message,
+      } as const;
+      if (settled.model) {
+        await sessionStore.updateModelRun(settled.id, settled.model, {
+          status: "error",
+          completedAt: new Date().toISOString(),
+          response: { status: "incomplete", incompleteReason: "incomplete-capture" },
+          error: failure,
+        });
+      }
+      await sessionStore.updateSession(settled.id, {
+        status: "error",
+        completedAt: new Date().toISOString(),
+        errorMessage: message,
+        response: { status: "incomplete", incompleteReason: "incomplete-capture" },
+        error: failure,
+      });
+      console.log(chalk.yellow(`${message} Reattach via: ${settled.lifecycle?.reattachCommand}`));
+      if (options?.propagateFailure) {
+        process.exitCode = 1;
       }
       break;
     }
@@ -483,6 +741,22 @@ export function formatUserErrorMetadata(metadata?: SessionUserErrorMetadata): st
   return parts.length > 0 ? parts.join(" | ") : null;
 }
 
+export function formatBrowserEvidence(metadata: SessionMetadata): string[] | null {
+  const browser = metadata.browser;
+  if (!browser?.modelSelection && (!browser?.warnings || browser.warnings.length === 0)) {
+    return null;
+  }
+  const lines: string[] = [];
+  const evidence = browser.modelSelection;
+  if (evidence) {
+    lines.push(`model ${formatBrowserModelSelectionEvidence(evidence, metadata.model)}`);
+  }
+  for (const warning of browser.warnings ?? []) {
+    lines.push(`warning ${warning.code}: ${warning.message}`);
+  }
+  return lines.length > 0 ? lines : null;
+}
+
 export function buildReattachLine(metadata: SessionMetadata): string | null {
   if (!metadata.id) {
     return null;
@@ -506,6 +780,14 @@ export function trimBeforeFirstAnswer(logText: string): string {
   const index = logText.indexOf(marker);
   if (index === -1) {
     return logText;
+  }
+  const laterIndex = logText.lastIndexOf(marker);
+  const reattachIndex = logText.indexOf("[reattach]", index + marker.length);
+  if (laterIndex > index && reattachIndex > index && reattachIndex < laterIndex) {
+    const firstCapture = logText.slice(index + marker.length, reattachIndex);
+    if (isDeepResearchToolCallPlaceholder(firstCapture)) {
+      return logText.slice(laterIndex);
+    }
   }
   return logText.slice(index);
 }
@@ -578,6 +860,17 @@ interface StatusTreeRow {
   detachedParentLabel?: string;
 }
 
+function formatLineageParentLabel(
+  lineage: ReturnType<typeof resolveSessionLineage>,
+): string | undefined {
+  if (!lineage?.parentSessionId) {
+    return undefined;
+  }
+  return lineage.parentResponseId
+    ? `${lineage.parentSessionId} (${abbreviateResponseId(lineage.parentResponseId)})`
+    : lineage.parentSessionId;
+}
+
 function buildStatusTreeRows(
   entries: SessionMetadata[],
   responseOwners: ReadonlyMap<string, string>,
@@ -628,7 +921,7 @@ function buildStatusTreeRows(
     const lineage = lineageById.get(entry.id);
     const hiddenParent =
       lineage?.parentSessionId && !entryById.has(lineage.parentSessionId)
-        ? `${lineage.parentSessionId} (${abbreviateResponseId(lineage.parentResponseId)})`
+        ? formatLineageParentLabel(lineage)
         : undefined;
     const children = childMap.get(entry.id) ?? [];
     rows.push({ entry, displaySlug: entry.id, detachedParentLabel: hiddenParent });
@@ -657,15 +950,19 @@ async function buildSessionChainLine(metadata: SessionMetadata): Promise<string 
     return `root -> ${metadata.id}`;
   }
   if (lineageWithoutLookup.parentSessionId) {
-    return `${lineageWithoutLookup.parentSessionId} (${abbreviateResponseId(lineageWithoutLookup.parentResponseId)}) -> ${
-      metadata.id
-    }`;
+    return `${formatLineageParentLabel(lineageWithoutLookup)} -> ${metadata.id}`;
+  }
+  if (!lineageWithoutLookup.parentResponseId) {
+    return `root -> ${metadata.id}`;
   }
   const sessions = await sessionStore.listSessions().catch(() => []);
   const responseOwners = buildResponseOwnerIndex(sessions);
   const lineage = resolveSessionLineage(metadata, responseOwners) ?? lineageWithoutLookup;
   if (lineage.parentSessionId) {
-    return `${lineage.parentSessionId} (${abbreviateResponseId(lineage.parentResponseId)}) -> ${metadata.id}`;
+    return `${formatLineageParentLabel(lineage)} -> ${metadata.id}`;
+  }
+  if (!lineage.parentResponseId) {
+    return `root -> ${metadata.id}`;
   }
   return `${abbreviateResponseId(lineage.parentResponseId)} -> ${metadata.id}`;
 }
@@ -758,7 +1055,9 @@ export function formatCompletionSummary(
     return null;
   }
   const modeLabel =
-    metadata.mode === "browser" ? `${metadata.model ?? "n/a"}[browser]` : (metadata.model ?? "n/a");
+    (metadata.mode ?? metadata.options?.mode) === "browser"
+      ? `${resolveSessionBrowserModelDisplayName(metadata)}[browser]`
+      : (metadata.model ?? "n/a");
   const usage = metadata.usage;
   const cost = resolveSessionCost(metadata);
   const tokensDisplay = [

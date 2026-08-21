@@ -2,14 +2,18 @@ import { describe, expect, test } from "vitest";
 import { InvalidArgumentError } from "commander";
 import {
   collectPaths,
+  collectTextValues,
   parseFloatOption,
   parseIntOption,
   parseSearchOption,
+  parseThinkingTimeOption,
   resolvePreviewMode,
   resolveApiModel,
   inferModelFromLabel,
+  isGpt56BrowserLabel,
   normalizeModelOption,
   parseHeartbeatOption,
+  parseTimeoutOption,
   mergePathLikeOptions,
   dedupePathInputs,
 } from "../../src/cli/options.ts";
@@ -22,6 +26,17 @@ describe("collectPaths", () => {
 
   test("returns previous list when value is undefined", () => {
     expect(collectPaths(undefined, ["keep"])).toEqual(["keep"]);
+  });
+});
+
+describe("collectTextValues", () => {
+  test("preserves repeated text values without comma splitting", () => {
+    const result = collectTextValues("second pass, keep comma", ["first pass"]);
+    expect(result).toEqual(["first pass", "second pass, keep comma"]);
+  });
+
+  test("ignores empty values", () => {
+    expect(collectTextValues("   ", ["keep"])).toEqual(["keep"]);
   });
 });
 
@@ -137,6 +152,25 @@ describe("parseHeartbeatOption", () => {
   });
 });
 
+describe("parseTimeoutOption", () => {
+  test("keeps bare numbers as seconds", () => {
+    expect(parseTimeoutOption("10")).toBe(10);
+    expect(parseTimeoutOption("1.5")).toBe(1.5);
+  });
+
+  test("accepts duration units", () => {
+    expect(parseTimeoutOption("10m")).toBe(600);
+    expect(parseTimeoutOption("2h")).toBe(7200);
+    expect(parseTimeoutOption("90s")).toBe(90);
+  });
+
+  test("accepts auto and rejects invalid values", () => {
+    expect(parseTimeoutOption("auto")).toBe("auto");
+    expect(() => parseTimeoutOption("nope")).toThrow(InvalidArgumentError);
+    expect(() => parseTimeoutOption("0")).toThrow(InvalidArgumentError);
+  });
+});
+
 describe("parseSearchOption", () => {
   test("accepts on/off variants", () => {
     expect(parseSearchOption("on")).toBe(true);
@@ -150,6 +184,29 @@ describe("parseSearchOption", () => {
   });
 });
 
+describe("parseThinkingTimeOption", () => {
+  test.each([
+    ["light", "light"],
+    ["instant", "light"],
+    ["low", "light"],
+    ["standard", "standard"],
+    ["medium", "standard"],
+    ["extended", "extended"],
+    ["high", "extended"],
+    ["heavy", "heavy"],
+    ["extra-high", "extra-high"],
+    ["extra high", "extra-high"],
+    ["extrahigh", "extra-high"],
+    ["xhigh", "extra-high"],
+  ] as const)("normalizes %s to %s", (input, expected) => {
+    expect(parseThinkingTimeOption(input)).toBe(expected);
+  });
+
+  test("throws for unknown thinking-time aliases", () => {
+    expect(() => parseThinkingTimeOption("maximum")).toThrow(InvalidArgumentError);
+  });
+});
+
 describe("normalizeModelOption", () => {
   test("trims whitespace safely", () => {
     expect(normalizeModelOption("  gpt-5.4-pro  ")).toBe("gpt-5.4-pro");
@@ -160,6 +217,8 @@ describe("normalizeModelOption", () => {
 
 describe("resolveApiModel", () => {
   test("accepts canonical names regardless of case", () => {
+    expect(resolveApiModel("gpt-5.5-pro")).toBe("gpt-5.5-pro");
+    expect(resolveApiModel("GPT-5.5")).toBe("gpt-5.5");
     expect(resolveApiModel("gpt-5.4-pro")).toBe("gpt-5.4-pro");
     expect(resolveApiModel("GPT-5.4")).toBe("gpt-5.4");
     expect(resolveApiModel("gpt-5.2-pro")).toBe("gpt-5.2-pro");
@@ -167,12 +226,14 @@ describe("resolveApiModel", () => {
     expect(resolveApiModel("gpt-5-pro")).toBe("gpt-5-pro");
     expect(resolveApiModel("GPT-5.1")).toBe("gpt-5.1");
     expect(resolveApiModel("GPT-5.1-CODEX")).toBe("gpt-5.1-codex");
-    expect(resolveApiModel("claude-4.5-sonnet")).toBe("claude-4.5-sonnet");
+    expect(resolveApiModel("claude-4.6-sonnet")).toBe("claude-4.6-sonnet");
     expect(resolveApiModel("Claude Opus 4.1")).toBe("claude-4.1-opus");
-    expect(resolveApiModel("sonnet")).toBe("claude-4.5-sonnet");
+    expect(resolveApiModel("sonnet")).toBe("claude-4.6-sonnet");
     expect(resolveApiModel("opus")).toBe("claude-4.1-opus");
-    expect(resolveApiModel("CLAUDE")).toBe("claude-4.5-sonnet");
+    expect(resolveApiModel("CLAUDE")).toBe("claude-4.6-sonnet");
     expect(resolveApiModel("Gemini")).toBe("gemini-3-pro");
+    expect(resolveApiModel("Gemini 3.5 Flash")).toBe("gemini-3.5-flash");
+    expect(resolveApiModel("Gemini 3.1 Flash-Lite")).toBe("gemini-3.1-flash-lite");
     expect(resolveApiModel("gemini-3.1-pro")).toBe("gemini-3.1-pro");
     expect(resolveApiModel("Gemini 3.1 Pro")).toBe("gemini-3.1-pro");
     expect(resolveApiModel("grok")).toBe("grok-4.1");
@@ -194,6 +255,21 @@ describe("resolveApiModel", () => {
     );
   });
 
+  test("keeps GPT-5.6 API ids available for engine-aware validation", () => {
+    expect(resolveApiModel("gpt-5.6")).toBe("gpt-5.6");
+    expect(resolveApiModel("gpt-5.6-sol")).toBe("gpt-5.6-sol");
+    expect(resolveApiModel("openai/gpt-5.6")).toBe("openai/gpt-5.6");
+  });
+
+  test("rejects fake GPT-5.6 Pro model slugs with API-mode guidance", () => {
+    expect(() => resolveApiModel("gpt-5.6-pro")).toThrow(
+      "Use --model gpt-5.6-sol --reasoning-mode pro",
+    );
+    expect(() => resolveApiModel("gpt-5.6-sol-pro")).toThrow(
+      "Use --model gpt-5.6-sol --reasoning-mode pro",
+    );
+  });
+
   test("passes through unknown names (OpenRouter/custom)", () => {
     expect(resolveApiModel("instant")).toBe("instant");
     expect(resolveApiModel("openai/gpt-5.4")).toBe("openai/gpt-5.4");
@@ -204,6 +280,9 @@ describe("resolveApiModel", () => {
 
 describe("inferModelFromLabel", () => {
   test("returns canonical names when label already matches", () => {
+    expect(inferModelFromLabel("gpt-5.6")).toBe("gpt-5.6");
+    expect(inferModelFromLabel("gpt-5.5-pro")).toBe("gpt-5.5-pro");
+    expect(inferModelFromLabel("gpt-5.5")).toBe("gpt-5.5");
     expect(inferModelFromLabel("gpt-5.4-pro")).toBe("gpt-5.4-pro");
     expect(inferModelFromLabel("gpt-5.4")).toBe("gpt-5.4");
     expect(inferModelFromLabel("gpt-5.2-pro")).toBe("gpt-5.2-pro");
@@ -211,11 +290,40 @@ describe("inferModelFromLabel", () => {
     expect(inferModelFromLabel("gpt-5.1")).toBe("gpt-5.1");
     expect(inferModelFromLabel("gpt-5.1-codex")).toBe("gpt-5.1-codex");
     expect(inferModelFromLabel("gemini-3.1-pro")).toBe("gemini-3.1-pro");
+    expect(inferModelFromLabel("gemini-3.5-flash")).toBe("gemini-3.5-flash");
+    expect(inferModelFromLabel("gemini-3.1-flash-lite")).toBe("gemini-3.1-flash-lite");
+  });
+
+  test("infers the browser GPT-5.6 Sol family", () => {
+    expect(inferModelFromLabel("GPT-5.6 Sol")).toBe("gpt-5.6-sol");
+    expect(inferModelFromLabel("ChatGPT 5_6")).toBe("gpt-5.6");
+  });
+
+  test("does not reserve unrelated slashless API model ids containing 5.6", () => {
+    expect(isGpt56BrowserLabel("vendor-5.6-large")).toBe(false);
+    expect(isGpt56BrowserLabel("model_5_6_custom")).toBe(false);
+  });
+
+  test("rejects unknown bare GPT-5.6 browser variants", () => {
+    expect(() => inferModelFromLabel("gpt-5.6-pro")).toThrow("Unknown GPT-5.6 browser variant");
+    expect(() => inferModelFromLabel("GPT-5.6 Luna")).toThrow("Unknown GPT-5.6 browser variant");
   });
 
   test("preserves provider-qualified ids instead of remapping them to built-ins", () => {
+    expect(inferModelFromLabel("openai/gpt-5.5")).toBe("openai/gpt-5.5");
     expect(inferModelFromLabel("openai/gpt-5.4")).toBe("openai/gpt-5.4");
     expect(inferModelFromLabel("anthropic/claude-sonnet-4.5")).toBe("anthropic/claude-sonnet-4.5");
+  });
+
+  test("infers 5.5 variants", () => {
+    expect(inferModelFromLabel("ChatGPT 5.5")).toBe("gpt-5.5");
+    expect(inferModelFromLabel("ChatGPT 5.5 Instant")).toBe("gpt-5.5-instant");
+    expect(inferModelFromLabel("5.5 FAST")).toBe("gpt-5.5-instant");
+    expect(inferModelFromLabel("GPT-5.5 Pro")).toBe("gpt-5.5-pro");
+    expect(inferModelFromLabel("Pro Extended")).toBe("gpt-5.5-pro");
+    // New ChatGPT UI (2026-05): bare "Pro" label maps to default (gpt-5.5-pro)
+    expect(inferModelFromLabel("Pro")).toBe("gpt-5.5-pro");
+    expect(inferModelFromLabel("Thinking Heavy")).toBe("gpt-5.5");
   });
 
   test("infers 5.4 variants", () => {
@@ -238,6 +346,8 @@ describe("inferModelFromLabel", () => {
 
   test("preserves Gemini 3.1 labels", () => {
     expect(inferModelFromLabel("Gemini 3.1 Pro")).toBe("gemini-3.1-pro");
+    expect(inferModelFromLabel("Gemini 3.5 Flash")).toBe("gemini-3.5-flash");
+    expect(inferModelFromLabel("Gemini 3.1 Flash-Lite")).toBe("gemini-3.1-flash-lite");
   });
 
   test("infers Codex labels", () => {
@@ -246,13 +356,13 @@ describe("inferModelFromLabel", () => {
   });
 
   test("falls back to pro when the label references pro", () => {
-    expect(inferModelFromLabel("ChatGPT Pro")).toBe("gpt-5.4-pro");
+    expect(inferModelFromLabel("ChatGPT Pro")).toBe("gpt-5.5-pro");
     expect(inferModelFromLabel("GPT-5.2 Pro")).toBe("gpt-5.2-pro");
     expect(inferModelFromLabel("GPT-5 Pro (Classic)")).toBe("gpt-5-pro");
   });
 
   test("infers Claude family labels", () => {
-    expect(inferModelFromLabel("Claude Sonnet 4.5")).toBe("claude-4.5-sonnet");
+    expect(inferModelFromLabel("Claude Sonnet 4.6")).toBe("claude-4.6-sonnet");
     expect(inferModelFromLabel("Claude Opus 4.1")).toBe("claude-4.1-opus");
   });
 
@@ -262,8 +372,8 @@ describe("inferModelFromLabel", () => {
     expect(inferModelFromLabel("Grok-4-1")).toBe("grok-4.1");
   });
 
-  test("falls back to gpt-5.4-pro when label empty and to gpt-5.2 for other ambiguous strings", () => {
-    expect(inferModelFromLabel("")).toBe("gpt-5.4-pro");
+  test("falls back to gpt-5.5-pro when label empty and to gpt-5.2 for other ambiguous strings", () => {
+    expect(inferModelFromLabel("")).toBe("gpt-5.5-pro");
     expect(inferModelFromLabel("something else")).toBe("gpt-5.2");
   });
 });

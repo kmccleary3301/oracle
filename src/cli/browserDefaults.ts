@@ -1,7 +1,14 @@
-import { normalizeChatgptUrl, CHATGPT_URL } from "../browserMode.js";
+import { CHATGPT_URL } from "../browser/constants.js";
+import { normalizeChatgptUrl } from "../browser/utils.js";
 import type { UserConfig } from "../config.js";
-import type { ThinkingTimeLevel } from "../oracle.js";
-import type { BrowserModelStrategy, ThinkingFallbackMode } from "../browser/types.js";
+import { normalizeThinkingTimeLevel } from "../oracle/thinkingTime.js";
+import type { ThinkingTimeLevel } from "../oracle/types.js";
+import type {
+  BrowserArchiveMode,
+  BrowserModelStrategy,
+  BrowserResearchMode,
+  ThinkingFallbackMode,
+} from "../browser/types.js";
 
 export interface BrowserDefaultsOptions {
   chatgptUrl?: string;
@@ -9,12 +16,19 @@ export interface BrowserDefaultsOptions {
   browserChromeProfile?: string;
   browserChromePath?: string;
   browserCookiePath?: string;
+  browserAttachRunning?: boolean;
   browserTimeout?: string | number;
   browserInputTimeout?: string | number;
+  browserAttachmentTimeout?: string | number;
   browserRecheckDelay?: string | number;
   browserRecheckTimeout?: string | number;
   browserReuseWait?: string | number;
   browserProfileLockTimeout?: string | number;
+  browserMaxConcurrentTabs?: string | number;
+  browserResourceMonitorInterval?: string | number;
+  browserResourceRssSoftLimit?: string | number;
+  browserResourceRssHardLimit?: string | number;
+  browserResourceRssResumeLimit?: string | number;
   browserAutoReattachDelay?: string | number;
   browserAutoReattachInterval?: string | number;
   browserAutoReattachTimeout?: string | number;
@@ -26,6 +40,8 @@ export interface BrowserDefaultsOptions {
   browserModelStrategy?: BrowserModelStrategy;
   browserThinkingTime?: ThinkingTimeLevel;
   browserThinkingFallback?: ThinkingFallbackMode;
+  browserResearch?: BrowserResearchMode;
+  browserArchive?: BrowserArchiveMode;
   browserManualLogin?: boolean;
   browserManualLoginProfileDir?: string | null;
   remoteChrome?: string;
@@ -45,6 +61,11 @@ export function applyBrowserDefaultsFromConfig(
     const source = getSource(key);
     return source === undefined || source === "default";
   };
+  const attachRunningRequested =
+    options.browserAttachRunning === true ||
+    (isUnset("browserAttachRunning") && browser.attachRunning === true);
+  const currentModelRequestedByCli =
+    options.browserModelStrategy === "current" && getSource("browserModelStrategy") === "cli";
 
   const configuredChatgptUrl = browser.chatgptUrl ?? browser.url;
   const cliChatgptSet = options.chatgptUrl !== undefined || options.browserUrl !== undefined;
@@ -52,14 +73,25 @@ export function applyBrowserDefaultsFromConfig(
     options.chatgptUrl = normalizeChatgptUrl(configuredChatgptUrl ?? "", CHATGPT_URL);
   }
 
-  if (isUnset("browserChromeProfile") && browser.chromeProfile !== undefined) {
+  if (
+    !attachRunningRequested &&
+    isUnset("browserChromeProfile") &&
+    browser.chromeProfile !== undefined
+  ) {
     options.browserChromeProfile = browser.chromeProfile ?? undefined;
   }
   if (isUnset("browserChromePath") && browser.chromePath !== undefined) {
     options.browserChromePath = browser.chromePath ?? undefined;
   }
-  if (isUnset("browserCookiePath") && browser.chromeCookiePath !== undefined) {
+  if (
+    !attachRunningRequested &&
+    isUnset("browserCookiePath") &&
+    browser.chromeCookiePath !== undefined
+  ) {
     options.browserCookiePath = browser.chromeCookiePath ?? undefined;
+  }
+  if (isUnset("browserAttachRunning") && browser.attachRunning !== undefined) {
+    options.browserAttachRunning = browser.attachRunning;
   }
   if (
     isUnset("remoteChrome") &&
@@ -74,11 +106,14 @@ export function applyBrowserDefaultsFromConfig(
   if (isUnset("browserTimeout") && typeof browser.timeoutMs === "number") {
     options.browserTimeout = String(browser.timeoutMs);
   }
-  if (isUnset("browserPort") && typeof browser.debugPort === "number") {
+  if (!attachRunningRequested && isUnset("browserPort") && typeof browser.debugPort === "number") {
     options.browserPort = browser.debugPort;
   }
   if (isUnset("browserInputTimeout") && typeof browser.inputTimeoutMs === "number") {
     options.browserInputTimeout = String(browser.inputTimeoutMs);
+  }
+  if (isUnset("browserAttachmentTimeout") && typeof browser.attachmentTimeoutMs === "number") {
+    options.browserAttachmentTimeout = String(browser.attachmentTimeoutMs);
   }
   if (isUnset("browserRecheckDelay") && typeof browser.assistantRecheckDelayMs === "number") {
     options.browserRecheckDelay = String(browser.assistantRecheckDelayMs);
@@ -91,6 +126,33 @@ export function applyBrowserDefaultsFromConfig(
   }
   if (isUnset("browserProfileLockTimeout") && typeof browser.profileLockTimeoutMs === "number") {
     options.browserProfileLockTimeout = String(browser.profileLockTimeoutMs);
+  }
+  if (isUnset("browserMaxConcurrentTabs") && typeof browser.maxConcurrentTabs === "number") {
+    options.browserMaxConcurrentTabs = String(browser.maxConcurrentTabs);
+  }
+  if (
+    isUnset("browserResourceMonitorInterval") &&
+    typeof browser.resourceMonitorIntervalMs === "number"
+  ) {
+    options.browserResourceMonitorInterval = String(browser.resourceMonitorIntervalMs);
+  }
+  if (
+    isUnset("browserResourceRssSoftLimit") &&
+    typeof browser.resourceRssSoftLimitBytes === "number"
+  ) {
+    options.browserResourceRssSoftLimit = String(browser.resourceRssSoftLimitBytes);
+  }
+  if (
+    isUnset("browserResourceRssHardLimit") &&
+    typeof browser.resourceRssHardLimitBytes === "number"
+  ) {
+    options.browserResourceRssHardLimit = String(browser.resourceRssHardLimitBytes);
+  }
+  if (
+    isUnset("browserResourceRssResumeLimit") &&
+    typeof browser.resourceRssResumeLimitBytes === "number"
+  ) {
+    options.browserResourceRssResumeLimit = String(browser.resourceRssResumeLimitBytes);
   }
   if (isUnset("browserAutoReattachDelay") && typeof browser.autoReattachDelayMs === "number") {
     options.browserAutoReattachDelay = String(browser.autoReattachDelayMs);
@@ -110,25 +172,47 @@ export function applyBrowserDefaultsFromConfig(
   if (isUnset("browserHeadless") && browser.headless !== undefined) {
     options.browserHeadless = browser.headless;
   }
-  if (isUnset("browserHideWindow") && browser.hideWindow !== undefined) {
+  if (!attachRunningRequested && isUnset("browserHideWindow") && browser.hideWindow !== undefined) {
     options.browserHideWindow = browser.hideWindow;
   }
-  if (isUnset("browserKeepBrowser") && browser.keepBrowser !== undefined) {
+  if (
+    !attachRunningRequested &&
+    isUnset("browserKeepBrowser") &&
+    browser.keepBrowser !== undefined
+  ) {
     options.browserKeepBrowser = browser.keepBrowser;
   }
   if (isUnset("browserModelStrategy") && browser.modelStrategy !== undefined) {
     options.browserModelStrategy = browser.modelStrategy;
   }
-  if (isUnset("browserThinkingTime") && browser.thinkingTime !== undefined) {
-    options.browserThinkingTime = browser.thinkingTime;
+  if (
+    !currentModelRequestedByCli &&
+    isUnset("browserThinkingTime") &&
+    browser.thinkingTime !== undefined
+  ) {
+    options.browserThinkingTime = normalizeThinkingTimeLevel(browser.thinkingTime) ?? undefined;
+  }
+  if (isUnset("browserResearch") && browser.researchMode !== undefined) {
+    options.browserResearch = browser.researchMode;
+  }
+  if (isUnset("browserArchive") && browser.archiveConversations !== undefined) {
+    options.browserArchive = browser.archiveConversations;
   }
   if (isUnset("browserThinkingFallback") && browser.thinkingFallback !== undefined) {
     options.browserThinkingFallback = browser.thinkingFallback;
   }
-  if (isUnset("browserManualLogin") && browser.manualLogin !== undefined) {
+  if (
+    !attachRunningRequested &&
+    isUnset("browserManualLogin") &&
+    browser.manualLogin !== undefined
+  ) {
     options.browserManualLogin = browser.manualLogin;
   }
-  if (isUnset("browserManualLoginProfileDir") && browser.manualLoginProfileDir !== undefined) {
+  if (
+    !attachRunningRequested &&
+    isUnset("browserManualLoginProfileDir") &&
+    browser.manualLoginProfileDir !== undefined
+  ) {
     options.browserManualLoginProfileDir = browser.manualLoginProfileDir;
   }
 }

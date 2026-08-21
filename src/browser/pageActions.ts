@@ -4,6 +4,9 @@ export {
   ensureNotBlocked,
   ensureLoggedIn,
   ensurePromptReady,
+  ensureChatMode,
+  ensureRequestedChatGptMode,
+  waitForResumedConversationHydration,
   installJavaScriptDialogAutoDismissal,
 } from "./actions/navigation.js";
 export { ensureModelSelection } from "./actions/modelSelection.js";
@@ -13,6 +16,7 @@ export {
   uploadAttachmentFile,
   waitForAttachmentCompletion,
   waitForUserTurnAttachments,
+  buildUserTurnAttachmentExpressionForTest,
 } from "./actions/attachments.js";
 export {
   waitForAssistantResponse,
@@ -20,6 +24,7 @@ export {
   captureAssistantMarkdown,
   captureConversationTurnMarkdowns,
   buildAssistantExtractorForTest,
+  buildAssistantSnapshotExpressionForTest,
   buildConversationDebugExpressionForTest,
   buildMarkdownFallbackExtractorForTest,
   buildCopyExpressionForTest,

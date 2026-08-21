@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" role="img" aria-label="Oracle — askoracle.sh">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0a0815"/>
+      <stop offset="0.55" stop-color="#1a0f3d"/>
+      <stop offset="1" stop-color="#0e0420"/>
+    </linearGradient>
+    <radialGradient id="orb" cx="35%" cy="32%" r="65%">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.16" stop-color="#e9defc"/>
+      <stop offset="0.52" stop-color="#7c3aed"/>
+      <stop offset="0.88" stop-color="#3b1374"/>
+      <stop offset="1" stop-color="#1a0936"/>
+    </radialGradient>
+    <radialGradient id="haze" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#a78bfa" stop-opacity="0.55"/>
+      <stop offset="0.6" stop-color="#7c3aed" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#7c3aed" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="text-grad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.45" stop-color="#c4b5fd"/>
+      <stop offset="1" stop-color="#7dd3fc"/>
+    </linearGradient>
+    <filter id="orb-shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="22" />
+    </filter>
+  </defs>
+
+  <rect width="1200" height="630" fill="url(#bg)"/>
+
+  <!-- ambient haze behind orb -->
+  <circle cx="900" cy="305" r="320" fill="url(#haze)"/>
+
+  <!-- orbital rings -->
+  <g stroke="#7c3aed" stroke-opacity="0.22" fill="none" stroke-width="1.4">
+    <ellipse cx="900" cy="305" rx="280" ry="80" transform="rotate(-18 900 305)"/>
+    <ellipse cx="900" cy="305" rx="320" ry="115" transform="rotate(8 900 305)"/>
+    <ellipse cx="900" cy="305" rx="240" ry="60" transform="rotate(28 900 305)"/>
+  </g>
+
+  <!-- orb -->
+  <circle cx="900" cy="305" r="200" fill="#1a0936" filter="url(#orb-shadow)" opacity="0.6"/>
+  <circle cx="900" cy="305" r="180" fill="url(#orb)"/>
+  <circle cx="900" cy="305" r="46" fill="#0a0510"/>
+  <circle cx="956" cy="262" r="22" fill="#ffffff" opacity="0.85"/>
+  <circle cx="978" cy="248" r="9" fill="#ffffff" opacity="0.95"/>
+
+  <!-- decorative star flecks -->
+  <g fill="#c4b5fd" opacity="0.7">
+    <circle cx="120" cy="540" r="2"/>
+    <circle cx="180" cy="92" r="1.6"/>
+    <circle cx="240" cy="500" r="1.4"/>
+    <circle cx="80" cy="380" r="1.6"/>
+    <circle cx="540" cy="540" r="2.2"/>
+    <circle cx="40" cy="120" r="1.2"/>
+    <circle cx="600" cy="80" r="1.4"/>
+    <circle cx="700" cy="540" r="1.4"/>
+    <circle cx="1140" cy="80" r="2"/>
+    <circle cx="1100" cy="560" r="1.6"/>
+  </g>
+
+  <!-- text block -->
+  <g font-family="Inter, ui-sans-serif, -apple-system, system-ui, sans-serif">
+    <text x="80" y="166" font-size="22" font-weight="600" fill="#a78bfa" letter-spacing="6">ASK · ORACLE · DEV</text>
+
+    <text x="80" y="284" font-size="98" font-weight="700" fill="url(#text-grad)" letter-spacing="-2">oracle</text>
+
+    <text x="80" y="350" font-size="34" font-weight="600" fill="#ece9fb">Whisper your prompt</text>
+    <text x="80" y="394" font-size="34" font-weight="600" fill="#ece9fb">to a mythical pro agent.</text>
+
+    <text x="80" y="470" font-size="22" font-weight="500" fill="#9d8fd1">GPT-5.5 Pro · Gemini 3 Pro · Claude Opus · Deep Research</text>
+
+    <g font-family="JetBrains Mono, SF Mono, ui-monospace, monospace" font-size="20" fill="#cdc1f0">
+      <rect x="78" y="510" width="540" height="64" rx="10" fill="#0c0820" stroke="#2a1d56"/>
+      <text x="100" y="552"><tspan fill="#7c5cd6">$</tspan> brew install steipete/tap/oracle</text>
+    </g>
+  </g>
+</svg>

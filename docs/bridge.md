@@ -7,6 +7,24 @@ Oracle’s bridge workflow lets you keep an authenticated ChatGPT session on a W
 - **Host (Windows)**: runs `oracle bridge host` and holds the signed-in ChatGPT session.
 - **Client (Linux)**: stores the host connection once and routes browser runs (and MCP browser runs) through the host.
 
+## Generated artifact transfer
+
+Bridge runs now keep the Windows browser host and Linux client separated while still returning ChatGPT-generated files, such as ZIP, CSV, PDF, wheels, and source distributions, to a cloud-readable path. The host advertises artifact-transfer support from the token-protected `GET /health` response. The Linux client uses that capability signal in `oracle bridge client --test` and `oracle bridge doctor`; older hosts remain usable for text responses, but generated files require manual copy from the Windows browser until both sides are upgraded.
+
+The transfer protocol is pull-based and keeps secrets local to the host:
+
+1. The browser host saves the ChatGPT file to its local session artifacts directory as before.
+2. The host emits only a redacted artifact descriptor over the existing NDJSON run stream: artifact id, safe filename, MIME type, byte size, SHA-256, validation status, and coarse source kind. It does not expose cookies, bearer tokens, signed ChatGPT download URLs, or Windows filesystem paths.
+3. The Linux client fetches `GET /runs/<runId>/artifacts/<artifactId>` with the same bridge bearer token, writes to `~/.oracle/sessions/<sessionId>/artifacts/`, verifies size and SHA-256, validates ZIP structure when applicable, and only then publishes the final path in session metadata.
+4. If transfer fails, Oracle keeps the text response and records a warning with manual fallback instructions. Open the ChatGPT browser on the Windows host, use the visible download button/link in the current assistant response, and copy the file to a cloud-readable path yourself.
+
+Operational notes:
+
+- Run the same patched Oracle version on both Windows host and Linux client before relying on automatic file transfer. Mixed versions remain backward compatible for text-only runs.
+- `oracle bridge doctor` reports `Artifact transfer: bridge v1` when the host supports the protocol, including the advertised maximum artifact size.
+- The default bridge transfer size limit is 512 MiB. Larger files stay on the browser host and require manual copy.
+- Session inspection prints artifact path, size, SHA-256 prefix, validation status, and transfer status so agents can verify whether the returned path is local to the Linux client.
+
 ## 1) Windows: start the host service (recommended)
 
 Run this on the Windows machine that’s signed into ChatGPT:
@@ -100,6 +118,27 @@ Notes:
 
 - The snippet includes `ORACLE_ENGINE="browser"` so MCP consult calls use browser mode even if `OPENAI_API_KEY` is set.
 - By default the snippets leave `ORACLE_REMOTE_TOKEN` as `<YOUR_TOKEN>` to avoid printing secrets; rerun with `--print-token` if you explicitly want it included.
+
+### macOS local browser: Let Them Fight
+
+If Claude Code and the signed-in Chrome profile are on the same Mac, skip the remote bridge and generate a local config:
+
+```bash
+oracle bridge claude-config --local-browser > .mcp.json
+```
+
+This points Claude Code at `oracle-mcp`, sets `ORACLE_ENGINE="browser"`, and reuses the shared manual-login profile at `~/.oracle/browser-profile`. From Claude Code, call `consult` with `preset:"chatgpt-pro-heavy"` for the “Let Them Fight” workflow: Claude asks Oracle, Oracle asks ChatGPT Pro Extended in browser mode, and the answer comes back through MCP. Use `dryRun:true` first when you only want to validate the resolved request.
+
+For long Pro runs, keep the Oracle session id visible in the agent transcript and inspect `oracle status` / `oracle session <id>` before retrying. Browser consults may wait on ChatGPT for several minutes; the dry-run/browser control plan is the operator-facing signal for whether Oracle will attach to an existing browser, use remote Chrome, or launch a visible window.
+
+Override local paths when needed:
+
+```bash
+oracle bridge claude-config \
+  --local-browser \
+  --oracle-home-dir ~/.oracle \
+  --browser-profile-dir ~/.oracle/browser-profile > .mcp.json
+```
 
 ## 4) Troubleshooting
 

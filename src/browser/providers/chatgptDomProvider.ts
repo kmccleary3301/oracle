@@ -1,7 +1,11 @@
 import type { BrowserLogger, ChromeClient } from "../types.js";
 import type { ProviderDomAdapter, ProviderDomFlowContext } from "../providerDomFlow.js";
 import { ensurePromptReady } from "../actions/navigation.js";
-import { submitPreparedPrompt, submitPrompt } from "../actions/promptComposer.js";
+import {
+  submitPreparedPrompt,
+  submitPrompt,
+  type AttachmentReadyExpectation,
+} from "../actions/promptComposer.js";
 import { waitForAssistantResponse } from "../actions/assistantResponse.js";
 
 interface ChatgptDomProviderState {
@@ -11,9 +15,13 @@ interface ChatgptDomProviderState {
   logger: BrowserLogger;
   timeoutMs: number;
   inputTimeoutMs?: number;
+  attachmentTimeoutMs?: number;
   baselineTurns?: number | null;
-  attachmentNames?: string[];
+  attachmentNames?: AttachmentReadyExpectation[];
   committedTurns?: number | null;
+  /** Runs after prompt/upload preparation and immediately before Send. */
+  beforeSend?: () => Promise<void> | void;
+  onPromptSubmitted?: () => Promise<void> | void;
   promptAlreadyInserted?: boolean;
 }
 
@@ -45,6 +53,9 @@ async function submitPromptViaAdapter(ctx: ProviderDomFlowContext): Promise<void
       attachmentNames: state.attachmentNames ?? [],
       baselineTurns: state.baselineTurns ?? undefined,
       inputTimeoutMs: state.inputTimeoutMs ?? undefined,
+      attachmentTimeoutMs: state.attachmentTimeoutMs ?? undefined,
+      beforeSend: state.beforeSend,
+      onPromptSubmitted: state.onPromptSubmitted,
     },
     ctx.prompt,
     state.logger,

@@ -4,10 +4,13 @@ import {
   PROMPT_PRIMARY_SELECTOR,
   PROMPT_FALLBACK_SELECTOR,
   SEND_BUTTON_SELECTORS,
-  CONVERSATION_TURN_SELECTOR,
   STOP_BUTTON_SELECTOR,
   ASSISTANT_ROLE_SELECTOR,
 } from "../constants.js";
+import {
+  buildConversationTurnCountExpression,
+  buildConversationTurnListExpression,
+} from "../conversationTurns.js";
 import { delay } from "../utils.js";
 import { logDomFailure } from "../domDebug.js";
 import { buildClickDispatcher } from "./domEvents.js";
@@ -21,6 +24,13 @@ const ENTER_KEY_EVENT = {
   nativeVirtualKeyCode: 13,
 } as const;
 const ENTER_KEY_TEXT = "\r";
+
+export interface AttachmentReadyExpectation {
+  name: string;
+  generatedBundle?: boolean;
+}
+
+type AttachmentReadyInput = string | AttachmentReadyExpectation;
 
 function buildComposerReadValueFunction(): string {
   return `const readValue = (node) => {
@@ -69,8 +79,12 @@ interface InsertPromptDeps {
 }
 
 interface SubmitPreparedPromptDeps extends InsertPromptDeps {
-  attachmentNames?: string[];
+  attachmentNames?: AttachmentReadyInput[];
   baselineTurns?: number | null;
+  attachmentTimeoutMs?: number | null;
+  /** Runs after composer preparation and immediately before the send interaction. */
+  beforeSend?: () => Promise<void> | void;
+  onPromptSubmitted?: () => Promise<void> | void;
 }
 
 export async function submitPrompt(
@@ -636,7 +650,14 @@ export async function submitPreparedPrompt(
   logger: BrowserLogger,
 ): Promise<number | null> {
   const { runtime, input } = deps;
-  const clicked = await attemptSendButton(runtime, logger, deps?.attachmentNames);
+  await deps.beforeSend?.();
+  const clicked = await attemptSendButton(
+    runtime,
+    input,
+    logger,
+    deps.attachmentNames,
+    deps.attachmentTimeoutMs,
+  );
   if (!clicked) {
     if ((deps.attachmentNames?.length ?? 0) > 0) {
       throw new Error("Send button did not become enabled after attachment upload.");
@@ -655,6 +676,7 @@ export async function submitPreparedPrompt(
   } else {
     logger("Clicked send button");
   }
+  await deps.onPromptSubmitted?.();
 
   const commitTimeoutMs = Math.max(60_000, deps.inputTimeoutMs ?? 0);
   // Learned: the send button can succeed but the turn doesn't appear immediately; verify commit via turns/stop button.
@@ -673,44 +695,69 @@ export async function clearPromptComposer(Runtime: ChromeClient["Runtime"], logg
   const inputSelectorsLiteral = JSON.stringify(INPUT_SELECTORS);
   const result = await Runtime.evaluate({
     expression: `(() => {
+      const SELECTORS = ${inputSelectorsLiteral};
       const fallback = document.querySelector(${fallbackSelectorLiteral});
       const editor = document.querySelector(${primarySelectorLiteral});
-      const inputSelectors = ${inputSelectorsLiteral};
-      let cleared = false;
-      if (fallback) {
-        fallback.value = '';
-        fallback.dispatchEvent(new InputEvent('input', { bubbles: true, data: '', inputType: 'deleteByCut' }));
-        fallback.dispatchEvent(new Event('change', { bubbles: true }));
-        cleared = true;
-      }
-      if (editor) {
-        editor.textContent = '';
-        editor.dispatchEvent(new InputEvent('input', { bubbles: true, data: '', inputType: 'deleteByCut' }));
-        cleared = true;
-      }
-      const nodes = inputSelectors
-        .map((selector) => document.querySelector(selector))
-        .filter((node) => Boolean(node));
-      for (const node of nodes) {
-        if (!node) continue;
-        if (node instanceof HTMLTextAreaElement) {
-          node.value = '';
+      const readValue = (node) => {
+        if (!node) return '';
+        if (node instanceof HTMLTextAreaElement || node instanceof HTMLInputElement) return node.value ?? '';
+        return node.innerText ?? node.textContent ?? '';
+      };
+      const dispatchClearEvents = (node) => {
+        try {
+          node.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, data: null, inputType: 'deleteContentBackward' }));
+        } catch {}
+        try {
           node.dispatchEvent(new InputEvent('input', { bubbles: true, data: '', inputType: 'deleteByCut' }));
-          node.dispatchEvent(new Event('change', { bubbles: true }));
-          cleared = true;
-          continue;
+        } catch {
+          node.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        node.dispatchEvent(new Event('change', { bubbles: true }));
+      };
+      const clearEditable = (node) => {
+        if (!node) return false;
+        try {
+          node.focus?.();
+        } catch {}
+        if (node instanceof HTMLTextAreaElement || node instanceof HTMLInputElement) {
+          node.value = '';
+          dispatchClearEvents(node);
+          return true;
         }
         if (node.isContentEditable || node.getAttribute('contenteditable') === 'true') {
+          try {
+            const selection = node.ownerDocument?.getSelection?.();
+            const range = node.ownerDocument?.createRange?.();
+            if (selection && range) {
+              range.selectNodeContents(node);
+              selection.removeAllRanges();
+              selection.addRange(range);
+              node.ownerDocument?.execCommand?.('delete', false);
+            }
+          } catch {}
           node.textContent = '';
-          node.dispatchEvent(new InputEvent('input', { bubbles: true, data: '', inputType: 'deleteByCut' }));
-          cleared = true;
+          dispatchClearEvents(node);
+          return true;
         }
+        return false;
+      };
+      let cleared = false;
+      const nodes = SELECTORS
+        .map((selector) => document.querySelector(selector))
+        .filter((node) => Boolean(node));
+      for (const node of Array.from(new Set([fallback, editor, ...nodes])).filter(Boolean)) {
+        cleared = clearEditable(node) || cleared;
       }
-      return { cleared };
+      const remaining = Array.from(new Set([fallback, editor, ...nodes]))
+        .filter(Boolean)
+        .map((node) => readValue(node).trim())
+        .filter(Boolean);
+      return { cleared, remaining };
     })()`,
     returnByValue: true,
   });
-  if (!result.result?.value?.cleared) {
+  const value = result.result?.value as { cleared?: boolean; remaining?: string[] } | undefined;
+  if (!value?.cleared || (value.remaining?.length ?? 0) > 0) {
     await logDomFailure(Runtime, logger, "clear-composer");
     throw new Error("Failed to clear prompt composer");
   }
@@ -744,87 +791,435 @@ async function waitForDomReady(
   logger?.(`Page did not reach ready/composer state within ${timeoutMs}ms; continuing cautiously.`);
 }
 
-function buildAttachmentReadyExpression(attachmentNames: string[]): string {
-  const namesLiteral = JSON.stringify(attachmentNames.map((name) => name.toLowerCase()));
+function buildAttachmentReadyExpression(attachmentNames: AttachmentReadyInput[]): string {
+  const attachmentExpectations = attachmentNames.map((attachment) => {
+    const name = typeof attachment === "string" ? attachment : attachment.name;
+    const normalized = name.toLowerCase().replace(/\s+/g, " ").trim();
+    return {
+      name: normalized,
+      stem: normalized.replace(/\.[a-z0-9]{1,10}$/i, ""),
+      extension: normalized.match(/(\.[a-z0-9]{1,10})$/i)?.[1] ?? "",
+      generatedBundle: typeof attachment === "object" && attachment.generatedBundle === true,
+    };
+  });
+  const namesLiteral = JSON.stringify(attachmentExpectations);
   return `(() => {
-    const names = ${namesLiteral};
-    const composer =
-      document.querySelector('[data-testid*="composer"]') ||
-      document.querySelector('form') ||
-      document.body ||
-      document;
-    const match = (node, name) => (node?.textContent || '').toLowerCase().includes(name);
-
+    const expected = ${namesLiteral};
+    const sendSelectors = ${JSON.stringify(SEND_BUTTON_SELECTORS)};
+    const normalize = (value) => String(value || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+    const hasNameBoundary = (text, name) => {
+      if (!name) return false;
+      let from = 0;
+      while (from < text.length) {
+        const index = text.indexOf(name, from);
+        if (index === -1) return false;
+        const previous = text[index - 1] || '';
+        const next = text[index + name.length] || '';
+        const previousOk = !previous || !/[a-z0-9._-]/.test(previous);
+        const nextOk = !next || !/[a-z0-9._-]/.test(next);
+        if (previousOk && nextOk) return true;
+        from = index + name.length;
+      }
+      return false;
+    };
+    const hasStemFileBoundary = (text, stem) => {
+      if (!stem) return false;
+      let from = 0;
+      while (from < text.length) {
+        const index = text.indexOf(stem, from);
+        if (index === -1) return false;
+        const previous = text[index - 1] || '';
+        const next = text[index + stem.length] || '';
+        const previousOk = !previous || !/[a-z0-9._-]/.test(previous);
+        const nextOk = !next || !/[a-z0-9._-]/.test(next);
+        if (previousOk && nextOk) return true;
+        from = index + stem.length;
+      }
+      return false;
+    };
+    const hasBareStemBoundary = (text, stem) => {
+      if (!stem) return false;
+      let from = 0;
+      while (from < text.length) {
+        const index = text.indexOf(stem, from);
+        if (index === -1) return false;
+        const previous = text[index - 1] || '';
+        const next = text[index + stem.length] || '';
+        const previousOk = !previous || !/[a-z0-9._-]/.test(previous);
+        const nextOk = !next || !/[a-z0-9._(-]/.test(next);
+        if (previousOk && nextOk) return true;
+        from = index + stem.length;
+      }
+      return false;
+    };
+    const hasExtensionBoundary = (text, extension) => {
+      if (!extension) return false;
+      let from = 0;
+      while (from < text.length) {
+        const index = text.indexOf(extension, from);
+        if (index === -1) return false;
+        const next = text[index + extension.length] || '';
+        if (!next || !/[a-z0-9]/.test(next)) return true;
+        from = index + extension.length;
+      }
+      return false;
+    };
+    const matchesExpected = (value, item) => {
+      const text = normalize(value);
+      if (!text) return false;
+      if (hasNameBoundary(text, item.name)) return true;
+      if (item.generatedBundle && hasBareStemBoundary(text, item.stem)) return true;
+      if (
+        item.stem &&
+        item.stem.length >= 4 &&
+        item.extension &&
+        text.includes(item.stem + '(') &&
+        hasExtensionBoundary(text, item.extension)
+      ) {
+        return true;
+      }
+      if (text.includes('…') || text.includes('...')) {
+        const marker = text.includes('…') ? '…' : '...';
+        const [prefixRaw, suffixRaw] = text.split(marker);
+        const prefix = normalize(prefixRaw);
+        const suffix = normalize(suffixRaw);
+        const prefixParts = prefix.split(' ').filter(Boolean);
+        const suffixParts = suffix.split(' ').filter(Boolean);
+        const prefixCandidates = prefixParts.map((_, index) => prefixParts.slice(index).join(' '));
+        const suffixCandidates = suffixParts.map((_, index) =>
+          suffixParts.slice(0, suffixParts.length - index).join(' '),
+        );
+        if (prefixCandidates.length === 0 || suffixCandidates.length === 0) return false;
+        const targets = [item.name, item.stem && item.stem.length >= 4 ? item.stem : ''].filter(Boolean);
+        return targets.some((target) => {
+          return prefixCandidates.some((prefixPart) =>
+            suffixCandidates.some((suffixPart) => {
+              const strongEnough =
+                suffixPart.length >= 2 &&
+                (prefixPart.length >= 3 || (prefixPart.length >= 2 && suffixPart.length >= 4));
+              return strongEnough && target.startsWith(prefixPart) && target.endsWith(suffixPart);
+            }),
+          );
+        });
+      }
+      return false;
+    };
     // Restrict to attachment affordances; never scan generic div/span nodes (prompt text can contain the file name).
     const attachmentSelectors = [
+      // Current ChatGPT file tiles expose the filename through a role-group aria label.
+      '[role="group"][aria-label]',
       '[data-testid*="chip"]',
       '[data-testid*="attachment"]',
       '[data-testid*="upload"]',
-      '[aria-label="Remove file"]',
-      'button[aria-label="Remove file"]',
+      '[data-testid*="file"]',
+      '[aria-label*="Remove file"]',
+      'button[aria-label*="Remove file"]',
+      '[aria-label*="remove file"]',
+      'button[aria-label*="remove file"]',
+      '[aria-label*="Remove attachment"]',
+      'button[aria-label*="Remove attachment"]',
+      '[aria-label*="remove attachment"]',
+      'button[aria-label*="remove attachment"]',
     ];
-
-    const chipsReady = names.every((name) =>
-      Array.from(composer.querySelectorAll(attachmentSelectors.join(','))).some((node) => match(node, name)),
+    const sendButton = sendSelectors
+      .map((selector) => document.querySelector(selector))
+      .find(Boolean);
+    const isUsableComposerRoot = (node) => {
+      if (!(node instanceof HTMLElement)) return false;
+      if (String(node.tagName || '').toLowerCase() === 'button') return false;
+      const testId = String(node.getAttribute?.('data-testid') || '').toLowerCase();
+      if (!testId.includes('composer')) return false;
+      return !(
+        testId.includes('footer') ||
+        testId.includes('action') ||
+        testId.includes('plus') ||
+        testId.includes('send')
+      );
+    };
+    const closestComposerRoot = (node) => {
+      let current = node instanceof HTMLElement ? node : null;
+      while (current) {
+        if (isUsableComposerRoot(current)) return current;
+        current = current.parentElement;
+      }
+      return null;
+    };
+    const firstComposerRoot = () =>
+      Array.from(document.querySelectorAll('[data-testid*="composer"]')).find(isUsableComposerRoot) || null;
+    const composer =
+      closestComposerRoot(sendButton) ||
+      sendButton?.closest?.('form') ||
+      firstComposerRoot() ||
+      document.querySelector('form') ||
+      document.body ||
+      document;
+    // Walk node + ancestors (up to grandparent) + descendants to gather every textual hint.
+    // ChatGPT's current chip DOM nests the filename inside truncated child spans, so checking
+    // only the node's own textContent/aria/title misses the match.
+    const collectOwnLabelHaystack = (node) => {
+      if (!node) return '';
+      const pieces = [];
+      const pushAttrs = (el) => {
+        if (!el || typeof el.getAttribute !== 'function') return;
+        for (const attr of ['aria-label', 'title', 'data-testid', 'data-tooltip', 'data-tooltip-content']) {
+          const v = el.getAttribute(attr);
+          if (v) pieces.push(v);
+        }
+      };
+      const pushText = (el) => {
+        if (!el) return;
+        const text = (el.innerText ?? el.textContent ?? '').trim();
+        if (text) pieces.push(text);
+      };
+      pushAttrs(node);
+      pushText(node);
+      return pieces.join(' ').toLowerCase();
+    };
+    const collectLabelHaystack = (node) => {
+      if (!node) return '';
+      const pieces = [collectOwnLabelHaystack(node)];
+      const push = (el) => {
+        const text = collectOwnLabelHaystack(el);
+        if (text) pieces.push(text);
+      };
+      const parent = node.parentElement;
+      push(parent);
+      const grandparent = parent?.parentElement;
+      push(grandparent);
+      return pieces.join(' ').toLowerCase();
+    };
+    const attachmentRoots = Array.from(new Set([composer])).filter(Boolean);
+    const collectChipNodes = () => {
+      const seen = new Set();
+      const collected = [];
+      for (const root of attachmentRoots) {
+        for (const node of Array.from(root.querySelectorAll(attachmentSelectors.join(',')))) {
+          if (!(node instanceof HTMLElement)) continue;
+          // Skip elements clearly inside the editable input (composer textarea may contain
+          // filename text in the user's prompt — avoid mistaking that for a chip).
+          if (node.closest('textarea,[contenteditable="true"]')) continue;
+          if (seen.has(node)) continue;
+          seen.add(node);
+          collected.push(node);
+        }
+      }
+      return collected;
+    };
+    const chipNodes = collectChipNodes();
+    const chipLabels = chipNodes.map((node) => collectLabelHaystack(node));
+    const chipOwnLabels = chipNodes.map((node) => collectOwnLabelHaystack(node));
+    const hasEllipsisSuffix = (label) => {
+      const marker = label.includes('…') ? '…' : label.includes('...') ? '...' : '';
+      if (!marker) return false;
+      return normalize(label.split(marker)[1] || '').length > 0;
+    };
+    const chipOwnLabelsWithVisibleNames = chipOwnLabels.filter((label) =>
+      /\\.[a-z][a-z0-9]{0,9}(?:\\b|$)/i.test(label) ||
+      hasEllipsisSuffix(label),
     );
-    const inputsReady = names.every((name) =>
-      Array.from(composer.querySelectorAll('input[type="file"]')).some((el) =>
-        Array.from((el instanceof HTMLInputElement ? el.files : []) || []).some((file) =>
-          file?.name?.toLowerCase?.().includes(name),
-        ),
+    const visibleExtensionLabelsMatchExpected = chipOwnLabelsWithVisibleNames.every((label) =>
+      expected.some((item) => matchesExpected(label, item)),
+    );
+    const visibleStemOnlyMismatch = chipOwnLabels.some((label) =>
+      expected.some(
+        (item) =>
+          !item.generatedBundle &&
+          item.stem &&
+          hasStemFileBoundary(label, item.stem) &&
+          !matchesExpected(label, item),
       ),
     );
 
-    return chipsReady || inputsReady;
+    const chipsReady = (() => {
+      const used = new Set();
+      return expected.every((item) => {
+        const index = chipLabels.findIndex((label, candidateIndex) =>
+          !used.has(candidateIndex) && matchesExpected(label, item),
+        );
+        if (index === -1) return false;
+        used.add(index);
+        return true;
+      });
+    })();
+    const inputsReady = expected.every((item) =>
+      attachmentRoots.some((root) =>
+        Array.from(root.querySelectorAll('input[type="file"]')).some((el) =>
+          Array.from((el instanceof HTMLInputElement ? el.files : []) || []).some((file) =>
+            matchesExpected(file?.name, item),
+          ),
+        ),
+      ),
+    );
+    // Count-based fallback: if we cannot match names individually (ChatGPT may strip
+    // the filename out of attribute-readable text into a deeply nested span), but we
+    // do see at least as many distinct "Remove" affordances as attachments we
+    // uploaded, trust the upload without double-counting nested chip/remove nodes.
+    const removeAffordances = [];
+    const removeSeen = new Set();
+    for (const root of attachmentRoots) {
+      for (const node of Array.from(root.querySelectorAll(
+        '[aria-label*="Remove" i], [aria-label*="remove" i], button[aria-label*="Remove" i], button[aria-label*="remove" i]',
+      ))) {
+        if (!(node instanceof HTMLElement)) continue;
+        if (node.closest('textarea,[contenteditable="true"]')) continue;
+        const aria = (node.getAttribute?.('aria-label') ?? '').toLowerCase();
+        const fileSpecific = aria.includes('remove file') || aria.includes('remove attachment');
+        const attachmentOwner = node.closest(
+          '[data-testid*="chip"], [data-testid*="attachment"], [data-testid*="upload"], [data-testid*="file"]',
+        );
+        if (!fileSpecific && !attachmentOwner) continue;
+        if (removeSeen.has(node)) continue;
+        removeSeen.add(node);
+        removeAffordances.push(node);
+      }
+    }
+    const countReady =
+      !visibleStemOnlyMismatch &&
+      visibleExtensionLabelsMatchExpected &&
+      removeAffordances.length >= expected.length;
+
+    return chipsReady || inputsReady || countReady;
   })()`;
 }
 
-export function buildAttachmentReadyExpressionForTest(attachmentNames: string[]) {
+export function buildAttachmentReadyExpressionForTest(attachmentNames: AttachmentReadyInput[]) {
   return buildAttachmentReadyExpression(attachmentNames);
 }
 
 async function attemptSendButton(
   Runtime: ChromeClient["Runtime"],
+  Input: ChromeClient["Input"],
   _logger?: BrowserLogger,
-  attachmentNames?: string[],
+  attachmentNames?: AttachmentReadyInput[],
+  attachmentTimeoutMs?: number | null,
 ): Promise<boolean> {
+  const needAttachment = Array.isArray(attachmentNames) && attachmentNames.length > 0;
   const script = `(() => {
     ${buildClickDispatcher()}
     const selectors = ${JSON.stringify(SEND_BUTTON_SELECTORS)};
-    let button = null;
+    const isVisible = (node) => {
+      if (!(node instanceof HTMLElement)) return false;
+      const rect = node.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      const style = window.getComputedStyle(node);
+      return style.display !== 'none' && style.visibility !== 'hidden';
+    };
+    const isEnabled = (node) => {
+      const ariaDisabled = node.getAttribute('aria-disabled');
+      const dataDisabled = node.getAttribute('data-disabled');
+      const style = window.getComputedStyle(node);
+      return !(
+        node.hasAttribute('disabled') ||
+        ariaDisabled === 'true' ||
+        dataDisabled === 'true' ||
+        style.pointerEvents === 'none' ||
+        style.display === 'none'
+      );
+    };
+    const candidates = [];
     for (const selector of selectors) {
-      button = document.querySelector(selector);
-      if (button) break;
+      candidates.push(...Array.from(document.querySelectorAll(selector)));
     }
-    if (!button) return 'missing';
-    const ariaDisabled = button.getAttribute('aria-disabled');
-    const dataDisabled = button.getAttribute('data-disabled');
-    const style = window.getComputedStyle(button);
-    const disabled =
-      button.hasAttribute('disabled') ||
-      ariaDisabled === 'true' ||
-      dataDisabled === 'true' ||
-      style.pointerEvents === 'none' ||
-      style.display === 'none';
-    // Learned: some send buttons render but are inert; only click when truly enabled.
-    if (disabled) return 'disabled';
-    // Use unified pointer/mouse sequence to satisfy React handlers.
+    const button = candidates.find((node) => isVisible(node) && isEnabled(node)) || null;
+    if (!button) return { status: 'missing' };
+    button.scrollIntoView({ block: 'center', inline: 'center' });
+    const rect = button.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      return { status: 'point', x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    }
+    // Last-resort fallback for unusual DOMs where the button is visible but has no useful rect.
     dispatchClickSequence(button);
-    return 'clicked';
+    return { status: 'clicked' };
   })()`;
 
-  const deadline = Date.now() + ((attachmentNames?.length ?? 0) > 0 ? 30_000 : 8_000);
+  // Give attachment-bearing submissions more headroom. ChatGPT's chip render can
+  // settle slowly for multi-file uploads, but plain text sends should keep the
+  // shorter historical deadline.
+  const timeoutMs = sendButtonTimeoutMs(attachmentNames, attachmentTimeoutMs);
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    if (needAttachment) {
+      const ready = await Runtime.evaluate({
+        expression: buildAttachmentReadyExpression(attachmentNames),
+        returnByValue: true,
+      });
+      if (!ready?.result?.value) {
+        await delay(150);
+        continue;
+      }
+    }
     const { result } = await Runtime.evaluate({ expression: script, returnByValue: true });
-    if (result.value === "clicked") {
+    const value = result.value as
+      | { status?: "clicked" | "missing" | "point"; x?: number; y?: number }
+      | string
+      | undefined;
+    const status = typeof value === "string" ? value : value?.status;
+    if (
+      status === "point" &&
+      typeof value === "object" &&
+      typeof value.x === "number" &&
+      typeof value.y === "number"
+    ) {
+      await clickTrustedPoint(Runtime, Input, value.x, value.y);
       return true;
     }
-    if (result.value === "missing") {
+    if (status === "clicked") {
+      return true;
+    }
+    if (status === "missing") {
       break;
     }
     await delay(100);
   }
+  if (Array.isArray(attachmentNames) && attachmentNames.length > 0) {
+    throw new BrowserAutomationError(
+      `Attachments never reached a clickable send button after ${Math.ceil(
+        timeoutMs / 1000,
+      )}s; tune --browser-attachment-timeout.`,
+      {
+        stage: "submit-prompt",
+        code: "attachment-send-not-ready",
+        attachmentNames,
+        timeoutMs,
+      },
+    );
+  }
   return false;
+}
+
+async function clickTrustedPoint(
+  Runtime: ChromeClient["Runtime"],
+  Input: ChromeClient["Input"],
+  x: number,
+  y: number,
+): Promise<void> {
+  if (Input && typeof Input.dispatchMouseEvent === "function") {
+    await Input.dispatchMouseEvent({ type: "mouseMoved", x, y });
+    await Input.dispatchMouseEvent({ type: "mousePressed", x, y, button: "left", clickCount: 1 });
+    await Input.dispatchMouseEvent({ type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+    return;
+  }
+  await Runtime.evaluate({
+    expression: `(() => {
+      const el = document.elementFromPoint(${JSON.stringify(x)}, ${JSON.stringify(y)});
+      if (!(el instanceof HTMLElement)) return false;
+      el.click();
+      return true;
+    })()`,
+    returnByValue: true,
+  });
+}
+
+function sendButtonTimeoutMs(
+  attachmentNames?: AttachmentReadyInput[],
+  attachmentTimeoutMs?: number | null,
+): number {
+  if (!Array.isArray(attachmentNames) || attachmentNames.length === 0) {
+    return 20_000;
+  }
+  return typeof attachmentTimeoutMs === "number" && Number.isFinite(attachmentTimeoutMs)
+    ? Math.max(1_000, attachmentTimeoutMs)
+    : 45_000;
 }
 
 async function verifyPromptCommitted(
@@ -842,7 +1237,6 @@ async function verifyPromptCommitted(
   const inputSelectorsLiteral = JSON.stringify(INPUT_SELECTORS);
   const stopSelectorLiteral = JSON.stringify(STOP_BUTTON_SELECTOR);
   const assistantSelectorLiteral = JSON.stringify(ASSISTANT_ROLE_SELECTOR);
-  const turnSelectorLiteral = JSON.stringify(CONVERSATION_TURN_SELECTOR);
   let baseline: number | null =
     typeof baselineTurns === "number" && Number.isFinite(baselineTurns) && baselineTurns >= 0
       ? Math.floor(baselineTurns)
@@ -850,7 +1244,7 @@ async function verifyPromptCommitted(
   if (baseline === null) {
     try {
       const { result } = await Runtime.evaluate({
-        expression: `document.querySelectorAll(${turnSelectorLiteral}).length`,
+        expression: buildConversationTurnCountExpression(),
         returnByValue: true,
       });
       const raw = typeof result?.value === "number" ? result.value : Number(result?.value);
@@ -877,8 +1271,7 @@ async function verifyPromptCommitted(
 	    };
 	    const normalizedPrompt = normalize(${encodedPrompt});
 	    const normalizedPromptPrefix = normalizedPrompt.slice(0, 120);
-	    const CONVERSATION_SELECTOR = ${JSON.stringify(CONVERSATION_TURN_SELECTOR)};
-	    const articles = Array.from(document.querySelectorAll(CONVERSATION_SELECTOR));
+	    const articles = ${buildConversationTurnListExpression()};
 	    const normalizedTurns = articles.map((node) => normalize(node?.innerText));
 	    const readValue = (node) => {
 	      if (!node) return '';
@@ -944,21 +1337,13 @@ async function verifyPromptCommitted(
     };
   })()`;
 
+  let lastProbe: CommitProbeState | undefined;
   while (Date.now() < deadline) {
     const { result } = await Runtime.evaluate({ expression: script, returnByValue: true });
-    const info = result.value as {
-      baseline?: number;
-      userMatched?: boolean;
-      prefixMatched?: boolean;
-      lastMatched?: boolean;
-      hasNewTurn?: boolean;
-      stopVisible?: boolean;
-      assistantVisible?: boolean;
-      composerCleared?: boolean;
-      inConversation?: boolean;
-      hasPastedTextAttachment?: boolean;
-      turnsCount?: number;
-    };
+    const info = result.value as CommitProbeState | undefined;
+    if (info && typeof info === "object") {
+      lastProbe = info;
+    }
     const turnsCount = (result.value as { turnsCount?: number } | undefined)?.turnsCount;
     const matchesPrompt = Boolean(info?.lastMatched || info?.userMatched || info?.prefixMatched);
     const baselineUnknown =
@@ -986,14 +1371,13 @@ async function verifyPromptCommitted(
     }
     await delay(100);
   }
+  const finalProbe = await Runtime.evaluate({ expression: script, returnByValue: true })
+    .then((res) => res?.result?.value as CommitProbeState | undefined)
+    .catch(() => undefined);
+  const probe = finalProbe && typeof finalProbe === "object" ? finalProbe : lastProbe;
   if (logger) {
     logger(
-      `Prompt commit check failed; latest state: ${await Runtime.evaluate({
-        expression: script,
-        returnByValue: true,
-      })
-        .then((res) => JSON.stringify(res?.result?.value))
-        .catch(() => "unavailable")}`,
+      `Prompt commit check failed; latest state: ${probe ? JSON.stringify(probe) : "unavailable"}`,
     );
     await logDomFailure(Runtime, logger, "prompt-commit");
   }
@@ -1008,11 +1392,59 @@ async function verifyPromptCommitted(
       },
     );
   }
-  throw new Error("Prompt did not appear in conversation before timeout (send may have failed)");
+  throw new BrowserAutomationError(
+    "Prompt did not appear in conversation before timeout (send may have failed)",
+    {
+      stage: "submit-prompt",
+      code: "prompt-commit-timeout",
+      promptLength: prompt.trim().length,
+      timeoutMs,
+      commitProbe: probe ? summarizeCommitProbe(probe) : undefined,
+    },
+  );
+}
+
+interface CommitProbeState {
+  baseline?: number;
+  userMatched?: boolean;
+  prefixMatched?: boolean;
+  lastMatched?: boolean;
+  hasNewTurn?: boolean;
+  stopVisible?: boolean;
+  assistantVisible?: boolean;
+  composerCleared?: boolean;
+  inConversation?: boolean;
+  hasPastedTextAttachment?: boolean;
+  turnsCount?: number;
+  href?: string;
+  editorValue?: string;
+  fallbackValue?: string;
+  lastTurn?: string;
+}
+
+// Keep booleans/counts but replace free text with lengths so session metadata stays lean.
+function summarizeCommitProbe(probe: CommitProbeState): Record<string, unknown> {
+  return {
+    baseline: probe.baseline,
+    turnsCount: probe.turnsCount,
+    userMatched: probe.userMatched,
+    prefixMatched: probe.prefixMatched,
+    lastMatched: probe.lastMatched,
+    hasNewTurn: probe.hasNewTurn,
+    stopVisible: probe.stopVisible,
+    assistantVisible: probe.assistantVisible,
+    composerCleared: probe.composerCleared,
+    inConversation: probe.inConversation,
+    hasPastedTextAttachment: probe.hasPastedTextAttachment,
+    editorLength: typeof probe.editorValue === "string" ? probe.editorValue.length : undefined,
+    lastTurnLength: typeof probe.lastTurn === "string" ? probe.lastTurn.length : undefined,
+  };
 }
 
 // biome-ignore lint/style/useNamingConvention: test-only export used in vitest suite
 export const __test__ = {
+  attemptSendButton,
+  sendButtonTimeoutMs,
   buildComposerReadValueFunction,
   verifyPromptCommitted,
 };

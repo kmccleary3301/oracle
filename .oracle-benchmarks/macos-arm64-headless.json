@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "platform": "darwin",
+  "architecture": "arm64",
+  "workload": "isolated-headless-about-blank",
+  "sampleCount": 3,
+  "sampleIntervalMs": 250,
+  "rssBytes": {
+    "min": 918470656,
+    "max": 918814720,
+    "mean": 918590805.3333334
+  },
+  "samples": [
+    {
+      "sampledAt": "2026-08-10T21:33:45.508Z",
+      "sampledAtMs": 1786397625508,
+      "rootPid": 33299,
+      "rootFound": true,
+      "targetCount": 3,
+      "targetTypes": {
+        "browser_ui": 2,
+        "page": 1
+      },
+      "processCount": 7,
+      "processTypeCounts": {
+        "browser": 1,
+        "gpu": 1,
+        "network": 1,
+        "utility": 1,
+        "renderer": 3
+      },
+      "rssBytes": 918470656,
+      "workingSetBytes": 918470656,
+      "cpuPercent": 60.4,
+      "cpuTimeMs": 1190
+    },
+    {
+      "sampledAt": "2026-08-10T21:33:45.871Z",
+      "sampledAtMs": 1786397625871,
+      "rootPid": 33299,
+      "rootFound": true,
+      "targetCount": 3,
+      "targetTypes": {
+        "browser_ui": 2,
+        "page": 1
+      },
+      "processCount": 7,
+      "processTypeCounts": {
+        "browser": 1,
+        "gpu": 1,
+        "network": 1,
+        "utility": 1,
+        "renderer": 3
+      },
+      "rssBytes": 918487040,
+      "workingSetBytes": 918487040,
+      "cpuPercent": 13.600000000000001,
+      "cpuTimeMs": 1210
+    },
+    {
+      "sampledAt": "2026-08-10T21:33:46.236Z",
+      "sampledAtMs": 1786397626236,
+      "rootPid": 33299,
+      "rootFound": true,
+      "targetCount": 3,
+      "targetTypes": {
+        "browser_ui": 2,
+        "page": 1
+      },
+      "processCount": 7,
+      "processTypeCounts": {
+        "browser": 1,
+        "gpu": 1,
+        "network": 1,
+        "utility": 1,
+        "renderer": 3
+      },
+      "rssBytes": 918814720,
+      "workingSetBytes": 918814720,
+      "cpuPercent": 2.5,
+      "cpuTimeMs": 1210
+    }
+  ],
+  "cleanup": {
+    "sampledAt": "2026-08-10T21:33:46.345Z",
+    "sampledAtMs": 1786397626345,
+    "rootPid": 33299,
+    "rootFound": false,
+    "targetCount": 0,
+    "targetTypes": {},
+    "processCount": 0,
+    "processTypeCounts": {},
+    "rssBytes": 0,
+    "workingSetBytes": 0,
+    "cpuPercent": 0,
+    "cpuTimeMs": 0
+  }
+}

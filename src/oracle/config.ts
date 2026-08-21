@@ -1,26 +1,98 @@
-import { countTokens as countTokensGpt5 } from "gpt-tokenizer/model/gpt-5";
-import { countTokens as countTokensGpt5Pro } from "gpt-tokenizer/model/gpt-5-pro";
+import { createRequire } from "node:module";
 import type { ModelConfig, ModelName, KnownModelName, ProModelName, TokenizerFn } from "./types.js";
-import { countTokens as countTokensAnthropicRaw } from "@anthropic-ai/tokenizer";
 import { stringifyTokenizerInput } from "./tokenStringifier.js";
 
-export const DEFAULT_MODEL: ModelName = "gpt-5.4-pro";
+const require = createRequire(import.meta.url);
+let countTokensGpt5Impl: TokenizerFn | undefined;
+let countTokensGpt5ProImpl: TokenizerFn | undefined;
+let countTokensAnthropicImpl: ((input: string) => number) | undefined;
+
+export const DEFAULT_MODEL: ModelName = "gpt-5.5-pro";
 export const PRO_MODELS = new Set<ProModelName>([
+  "gpt-5.5-pro",
   "gpt-5.4-pro",
   "gpt-5.1-pro",
   "gpt-5-pro",
   "gpt-5.2-pro",
-  "claude-4.5-sonnet",
+  "claude-4.6-sonnet",
   "claude-4.1-opus",
 ]);
 
-const countTokensAnthropic: TokenizerFn = (input: unknown): number =>
-  countTokensAnthropicRaw(stringifyTokenizerInput(input));
+const countTokensGpt5: TokenizerFn = (
+  input: unknown,
+  options?: Record<string, unknown>,
+): number => {
+  countTokensGpt5Impl ??= require("gpt-tokenizer/model/gpt-5").countTokens as TokenizerFn;
+  return countTokensGpt5Impl(input, options);
+};
+
+const countTokensGpt5Pro: TokenizerFn = (
+  input: unknown,
+  options?: Record<string, unknown>,
+): number => {
+  countTokensGpt5ProImpl ??= require("gpt-tokenizer/model/gpt-5-pro").countTokens as TokenizerFn;
+  return countTokensGpt5ProImpl(input, options);
+};
+
+const countTokensAnthropic: TokenizerFn = (input: unknown): number => {
+  countTokensAnthropicImpl ??= require("@anthropic-ai/tokenizer").countTokens as (
+    input: string,
+  ) => number;
+  return countTokensAnthropicImpl(stringifyTokenizerInput(input));
+};
+
+// GPT-5.6 applies higher rates to requests above 272K input tokens. Keep the
+// supported limit at the base-rate boundary until cost estimation supports tiers.
+const GPT_5_6_BASE_RATE_INPUT_LIMIT = 272_000;
 
 export const MODEL_CONFIGS: Record<KnownModelName, ModelConfig> = {
+  "gpt-5.6": {
+    model: "gpt-5.6",
+    provider: "openai",
+    tokenizer: countTokensGpt5 as TokenizerFn,
+    inputLimit: GPT_5_6_BASE_RATE_INPUT_LIMIT,
+    pricing: {
+      inputPerToken: 5 / 1_000_000,
+      outputPerToken: 30 / 1_000_000,
+    },
+    reasoning: { effort: "xhigh" },
+  },
+  "gpt-5.6-sol": {
+    model: "gpt-5.6-sol",
+    provider: "openai",
+    tokenizer: countTokensGpt5 as TokenizerFn,
+    inputLimit: GPT_5_6_BASE_RATE_INPUT_LIMIT,
+    pricing: {
+      inputPerToken: 5 / 1_000_000,
+      outputPerToken: 30 / 1_000_000,
+    },
+    reasoning: { effort: "xhigh" },
+  },
+  "gpt-5.5-pro": {
+    model: "gpt-5.5-pro",
+    provider: "openai",
+    tokenizer: countTokensGpt5Pro as TokenizerFn,
+    inputLimit: 1_050_000,
+    pricing: {
+      inputPerToken: 30 / 1_000_000,
+      outputPerToken: 180 / 1_000_000,
+    },
+    reasoning: { effort: "xhigh" },
+  },
+  "gpt-5.5": {
+    model: "gpt-5.5",
+    provider: "openai",
+    tokenizer: countTokensGpt5 as TokenizerFn,
+    inputLimit: 1_050_000,
+    pricing: {
+      inputPerToken: 5 / 1_000_000,
+      outputPerToken: 30 / 1_000_000,
+    },
+    reasoning: { effort: "xhigh" },
+  },
   "gpt-5.1-pro": {
     model: "gpt-5.1-pro",
-    apiModel: "gpt-5.4-pro",
+    apiModel: "gpt-5.5-pro",
     provider: "openai",
     tokenizer: countTokensGpt5Pro as TokenizerFn,
     inputLimit: 196000,
@@ -110,7 +182,7 @@ export const MODEL_CONFIGS: Record<KnownModelName, ModelConfig> = {
   },
   "gpt-5.2-pro": {
     model: "gpt-5.2-pro",
-    apiModel: "gpt-5.4-pro",
+    apiModel: "gpt-5.5-pro",
     provider: "openai",
     tokenizer: countTokensGpt5Pro as TokenizerFn,
     inputLimit: 196000,
@@ -133,6 +205,32 @@ export const MODEL_CONFIGS: Record<KnownModelName, ModelConfig> = {
     supportsBackground: false,
     supportsSearch: true,
   },
+  "gemini-3.5-flash": {
+    model: "gemini-3.5-flash",
+    provider: "google",
+    tokenizer: countTokensGpt5Pro as TokenizerFn,
+    inputLimit: 1_048_576,
+    pricing: {
+      inputPerToken: 1.5 / 1_000_000,
+      outputPerToken: 9 / 1_000_000,
+    },
+    reasoning: null,
+    supportsBackground: false,
+    supportsSearch: true,
+  },
+  "gemini-3.1-flash-lite": {
+    model: "gemini-3.1-flash-lite",
+    provider: "google",
+    tokenizer: countTokensGpt5Pro as TokenizerFn,
+    inputLimit: 1_048_576,
+    pricing: {
+      inputPerToken: 0.25 / 1_000_000,
+      outputPerToken: 1.5 / 1_000_000,
+    },
+    reasoning: null,
+    supportsBackground: false,
+    supportsSearch: true,
+  },
   "gemini-3-pro": {
     model: "gemini-3-pro",
     provider: "google",
@@ -146,9 +244,9 @@ export const MODEL_CONFIGS: Record<KnownModelName, ModelConfig> = {
     supportsBackground: false,
     supportsSearch: true,
   },
-  "claude-4.5-sonnet": {
-    model: "claude-4.5-sonnet",
-    apiModel: "claude-sonnet-4-5",
+  "claude-4.6-sonnet": {
+    model: "claude-4.6-sonnet",
+    apiModel: "claude-sonnet-4-6",
     provider: "anthropic",
     tokenizer: countTokensAnthropic,
     inputLimit: 200000,
@@ -193,7 +291,7 @@ export const MODEL_CONFIGS: Record<KnownModelName, ModelConfig> = {
 
 export const DEFAULT_SYSTEM_PROMPT = [
   "You are Oracle, a focused one-shot problem solver.",
-  "Emphasize direct answers and cite any files referenced.",
+  "Emphasize direct answers and cite referenced files as path:line or path:line-line when line numbers are available.",
 ].join(" ");
 
 export const TOKENIZER_OPTIONS = { allowedSpecial: "all" } as const;

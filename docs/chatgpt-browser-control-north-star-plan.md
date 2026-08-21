@@ -1,6 +1,7 @@
 # ChatGPT Browser Control North Star Plan
 
 Draft date: 2026-04-22
+Ledger update: 2026-08-10
 
 Workspace: `/home/skra/projects/ql_homepage/docs_tmp/oracle`
 
@@ -8,10 +9,10 @@ Primary target: make Oracle a robust CLI, API, and MCP control layer for logged-
 
 Reference inputs:
 
-- User north star: reliable browser-driven ChatGPT sessions, turn-based work, attachments, project organization, deletion, and image generation/editing from CLI/API/MCP.
+- User north star: reliable browser-driven Chat sessions and Chat turns, current Work-mode assessment, attachments, project organization, deletion, and image generation/editing from CLI/API/MCP.
 - Official product reference: https://openai.com/index/introducing-chatgpt-images-2-0/
 - Sample completed Images 2.0 conversation: https://chatgpt.com/c/69e9073a-9660-83ea-b480-751914edbc95
-- Existing Oracle browser-mode docs: `docs/browser-mode.md`, `docs/debug/remote-chrome.md`, `AGENTS.md`
+- Current truth and reliability baseline: [`docs/current-chatgpt-web-parity-reliability-plan.md`](current-chatgpt-web-parity-reliability-plan.md)
 
 ## North Star
 
@@ -30,18 +31,30 @@ Oracle should become a dependable automation surface over the ChatGPT web app fo
 
 This plan treats the ChatGPT web app as an unstable external UI. Reliability comes from typed state machines, multiple selector strategies, screenshots/DOM snapshots on failure, conservative destructive operations, and a repeatable live-probe loop.
 
+## Current ChatGPT terminology
+
+In this document, **Chat** means the ordinary conversation surface and a
+**Chat turn** means one submitted user/assistant exchange. **Work** means the
+current ChatGPT product mode that replaced the older “Agent mode” naming for
+long multi-step tasks and deliverables. “Workflow” and “browser work” are
+generic automation terms and do not imply support for the Work mode.
+
 ## Explicit Non-Goals
 
 - Do not replace the existing OpenAI API engine paths.
-- Do not require API keys for the browser-backed ChatGPT workflows.
-- Do not rely on true headless Chrome for ChatGPT browser mode. Current evidence and existing Oracle docs indicate headless is blocked in practice. The supported mode is a persistent headful browser that can be minimized, hidden, or offscreen.
+- Do not require true headless Chrome for ChatGPT browser mode. Interactive login and Cloudflare challenge handling are blocked in headless mode; current browser docs describe unattended reuse only after profile setup. The supported baseline for broad workflows remains a persistent headful browser that can be minimized, hidden, or offscreen.
 - Do not make destructive project or conversation operations implicit.
 - Do not click ChatGPT's "Answer now" control during Pro reasoning. That changes the requested behavior.
 - Do not claim support for a ChatGPT UI feature until there is a fixture, a live smoke, and a documented fallback or failure mode.
 
-## Current Baseline
+## Historical baseline observations (April 2026)
 
-Local setup already verified:
+These setup and smoke observations are retained as dated evidence. Current
+support status is determined by the ledger and the [current reliability
+plan](current-chatgpt-web-parity-reliability-plan.md), not by this historical
+snapshot alone.
+
+Historical setup observations:
 
 - Oracle is cloned under `docs_tmp/oracle`.
 - CLI and MCP build successfully.
@@ -54,12 +67,12 @@ Local setup already verified:
 
 Important current constraints:
 
-- Browser mode must use a headful Chrome instance because ChatGPT can block true headless automation.
-- Pro-class models can take many minutes and are already known-good for the current setup. Avoid live Pro validation unless the change directly touches Pro selection, Pro waiting, or "Answer now" behavior.
+- Broad workflows should use a persistent headful Chrome baseline; interactive headless login and Cloudflare handling are blocked. Unattended headless reuse is documented separately and remains only partial without a conformance matrix.
+- Pro-class models were observed taking many minutes and completing in the historical setup. Current Pro conformance is unverified; avoid live Pro validation unless the change directly touches Pro selection, Pro waiting, or "Answer now" behavior.
 - Fast browser smokes should use a minimal prompt such as: `Say 'yes' to this question. Do nothing else.`
-- The current response capture is text-first and does not yet model generated image outputs as artifacts.
-- Existing image generation support is Gemini-oriented, not ChatGPT Images 2.0-oriented.
-- Current MCP is centered on `consult` and `sessions`; it does not expose a full ChatGPT session/project/image API.
+- Historical response capture was text-first; sampled image extraction/download and partial generation/edit support are now recorded in the ledger.
+- ChatGPT image generation/edit support is no longer Gemini-only, but remains partial for current parity.
+- Focused MCP tools now exist alongside stable `consult` and `sessions`; a complete ChatGPT session/project/image/Work API is not established.
 
 ## Sample Image Conversation Findings
 
@@ -83,47 +96,64 @@ Immediate extractor implication:
 - Prefer downloading through browser-context fetch or the signed URL, then inspect the resulting image bytes for dimensions and type.
 - Separate "logical output image" from "rendered DOM image node".
 
-## Weighted Completion Scorecard
+## Current capability and conformance ledger
 
-Total: 1000 points.
+This ledger supersedes the historical weighted scorecard. It is a capability
+inventory, not a parity score. Statuses are:
 
-The project should not be considered production-ready until all must-pass gates are green and the score is at least 950/1000. Anything below 850/1000 is prototype-grade, even if demos work.
+- **supported** — the named, bounded behavior has direct evidence in this plan.
+- **partial** — some positive paths are evidenced, but scope, failure, or
+  environment coverage is incomplete.
+- **unsupported** — no implementation or evidence is present for the named
+  behavior.
+- **blocked** — a known product, account, environment, or safety constraint
+  prevents the behavior.
+- **unverified** — implementation or a historical claim exists, but the
+  required current evidence is absent.
 
-| Area                                         | Weight | Score | Status                                                                                                                        |
-| -------------------------------------------- | -----: | ----: | ----------------------------------------------------------------------------------------------------------------------------- |
-| Persistent browser/session foundation        |     90 |    90 | Complete for current WSL boot; literal reboot verification remains an environmental follow-up                                 |
-| DOM provider and state-machine architecture  |    100 |   100 | Complete                                                                                                                      |
-| Conversation lifecycle and turn-based work   |    115 |   115 | Complete                                                                                                                      |
-| Model, mode, and thinking selection          |     85 |    85 | Image generate/edit expose thinking-time controls; direct browser model-label selection is available where applicable         |
-| Attachments, large text, and bundled inputs  |    105 |   105 | Live text, multi-file, image/SVG, >10-image no-send probe, zip bundle, directory/glob, MCP, and large-paste interaction green |
-| ChatGPT Images 2.0 generation/edit/download  |    170 |   170 | Fresh generation, recovered reference-image edits, multi-output extraction, and artifact download are live-proven             |
-| Projects, sidebar organization, and deletion |     85 |    85 | List/get/create/move/rename and guarded conversation deletion are live-proven                                                 |
-| CLI, MCP, and API product surface            |    100 |   100 | Complete                                                                                                                      |
-| Reliability, observability, and recovery     |     95 |    95 | Complete                                                                                                                      |
-| Test harness, docs, and release discipline   |     55 |    55 | Complete                                                                                                                      |
+Evidence references point to this document unless they link to the current
+reliability plan. They do not imply a broader account, plan, browser, locale,
+or rollout matrix than the referenced observation covers.
 
-Current measured implementation score: 1000/1000.
+| Capability                                                                        | Status      | Evidence and boundary                                                                                                                                                                                                                                     |
+| --------------------------------------------------------------------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Persistent browser/session foundation                                             | partial     | Bridge-restart persistence and a fast logged-in prompt are recorded in **Historical baseline observations**; literal WSL reboot and Ubuntu/Linux profile persistence remain unverified (**Progress Log**, Slice 12).                                      |
+| Text Chat consult                                                                 | supported   | A fast logged-in browser prompt and MCP consult are recorded in **Historical baseline observations**; this is not a claim about every ChatGPT plan, workspace, or UI rollout.                                                                             |
+| Chat conversation create/resume/follow-up                                         | partial     | CLI/MCP create, URL return, and follow-up observations are recorded in **Progress Log**, Slice 3; cross-process ownership, idempotency, and broad recovery remain gaps in the [current reliability plan](current-chatgpt-web-parity-reliability-plan.md). |
+| Chat model/effort selection                                                       | partial     | Current generic model labels and image thinking-time controls are recorded in **Progress Log**, Slice 11; account- and rollout-specific picker coverage is not established.                                                                               |
+| Attachments, large text, and bundles                                              | partial     | Text, multi-file, image/SVG probes, ZIP/MCP paths, and large-paste observations are recorded in **Progress Log**, Slices 5–10; large-file limits, stress behavior, and all failure/recovery paths remain incomplete.                                      |
+| Images read-only extraction/download                                              | supported   | The sanitized sample conversation produced 7 unique images from 24 DOM nodes and downloaded PNG artifacts (**Sample Image Conversation Findings**; **Progress Log**, Slice 1). This is scoped sample evidence, not broad parity.                          |
+| Images generation/editing                                                         | partial     | Fresh generation and reference-image edit observations are recorded in **Progress Log**, Slice 11; multi-output cardinality, attachment acceptance, and long-running recovery remain model/UI dependent.                                                  |
+| Projects and conversation deletion                                                | partial     | Project create/list/get/move/rename and guarded throwaway deletion are recorded in **Progress Log**, Slice 11; source-level ownership/recovery gaps and broader project features remain open.                                                             |
+| Deep Research                                                                     | partial     | The current reliability taxonomy records submission/result support with incomplete plan, source, and interruption semantics; no stronger evidence is claimed here.                                                                                        |
+| Work (current replacement for Agent mode)                                         | unsupported | Work is a distinct current ChatGPT mode for long multi-step tasks; it is missing as a first-class Oracle capability (**current reliability plan**, capability taxonomy).                                                                                  |
+| Search, apps/connectors, branching, scheduled tasks, and temporary chat semantics | unsupported | No current parity evidence is recorded for these surfaces; generic DOM capture is not equivalent support (**current reliability plan**, capability taxonomy).                                                                                             |
+| Resource telemetry and process-tree enforcement                                   | unsupported | The [current reliability plan](current-chatgpt-web-parity-reliability-plan.md) records these as source gaps; CDP diagnostics are not OS-level RSS or ownership enforcement.                                                                               |
+| Coordinator durability and generation ownership                                   | unverified  | The current reliability plan specifies the Node `node:sqlite`/WAL design, but this plan records no implementation evidence for that architecture.                                                                                                         |
+| True headless ChatGPT operation                                                   | partial     | Current browser docs describe unattended headless operation after profile setup, while interactive login and Cloudflare challenge handling remain blocked; no broad headless conformance matrix is claimed.                                               |
+| Interactive headless login or Cloudflare challenge                                | blocked     | Headless mode cannot complete these interactive flows; use the persistent headful baseline (**Historical baseline observations**; `docs/browser-mode.md`).                                                                                                |
 
-Important qualification: the implementation score is 100% for the reachable code and browser-session work. A literal WSL reboot persistence check is still an environmental follow-up because rebooting this WSL instance would interrupt the active workspace.
+There is intentionally no aggregate score. A capability may be supported in a
+bounded fixture or smoke and still be partial for operational parity.
 
-## Must-Pass Gates
+## Current evidence gates
 
-These gates override the weighted score. A high score cannot compensate for a failed gate.
+These gates replace the old all-green checklist. A gate is current only when
+its evidence is named and its boundary is explicit.
 
-- [x] Login persists across browser bridge restart; WSL autostart is configured and still needs a literal reboot confirmation outside this active session.
-- [x] Existing text-only browser consult still works.
-- [x] Existing API-backed Oracle workflows still pass tests.
-- [x] Oracle can create a new ChatGPT conversation and return its URL.
-- [x] Oracle can resume an existing conversation by URL and append a turn.
-- [x] Oracle can attach at least one local image file to a ChatGPT prompt.
-- [x] Oracle can attach at least one zip of images to a ChatGPT prompt.
-- [x] Oracle can read a completed Images 2.0 conversation and extract every unique generated image.
-- [x] Oracle can request a new Images 2.0 generation and download every produced image.
-- [x] Oracle can handle multi-image output without duplicates.
-- [x] Oracle can run a Pro-class request without clicking "Answer now".
-- [x] Destructive operations support dry-run and exact target validation.
-- [x] MCP tools return structured JSON for text, attachments, and image artifacts.
-- [x] Live smoke failures produce enough artifacts to debug without rerunning blindly.
+| Gate                                               | Status     | Evidence reference                                                                                                                         |
+| -------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Existing text-only browser consult                 | supported  | **Historical baseline observations**                                                                                                       |
+| Create/resume/append a Chat conversation           | partial    | **Progress Log**, Slice 3; current reliability plan ownership gaps                                                                         |
+| Text/image/ZIP attachment delivery                 | partial    | **Progress Log**, Slices 5–10; negative attachment evidence remains part of the record                                                     |
+| Sample Images extraction and download              | supported  | **Progress Log**, Slice 1                                                                                                                  |
+| Fresh image generation and reference-image editing | partial    | **Progress Log**, Slice 11                                                                                                                 |
+| Project mutation and guarded throwaway deletion    | partial    | **Progress Log**, Slice 11                                                                                                                 |
+| Pro turn without “Answer now”                      | unverified | Historical checklist retained below; current conformance evidence is not recorded                                                          |
+| WSL reboot and Ubuntu persistence                  | unverified | **Progress Log**, Slice 12                                                                                                                 |
+| Destructive-operation evidence and recovery        | partial    | Throwaway proof is recorded; broad ownership/recovery remains open in the current reliability plan                                         |
+| Structured CLI/MCP artifact output                 | partial    | Existing surfaces are recorded in **Historical baseline observations** and **Progress Log**; no broad schema/conformance matrix is claimed |
+| Failure artifacts and recovery                     | partial    | Existing snapshots/logs are recorded; resource governor and ownership gaps remain open in the current reliability plan                     |
 
 ## Reliability Principles
 
@@ -387,6 +417,7 @@ If Oracle's serve/API mode is extended, mirror MCP schemas closely.
 API requirements:
 
 - Stable JSON schemas with version fields.
+
 - Idempotency keys for turn submission and destructive operations.
 - Async job records for long Pro/image workflows.
 - Job polling endpoint with event log.
@@ -396,9 +427,15 @@ API requirements:
 
 ## Implementation Phases
 
+The phase headings and any point ratios below are retained as planning
+weights only. They are not completion evidence, do not contribute to a current
+score, and must not override the capability ledger.
+Checkboxes in these phases are retained implementation notes. A checked item
+records a historical observation and does not change the current ledger status.
+
 ### Phase 0: Baseline Freeze and Safety Harness
 
-Weight contribution: supports every category.
+Scope: supports every category.
 
 Checklist:
 
@@ -419,10 +456,7 @@ Exit criteria:
 
 ### Phase 1: ChatGPT DOM Provider Split
 
-Score targets:
-
-- DOM provider and state-machine architecture: 35/100
-- Reliability, observability, and recovery: 10/95
+Scope: DOM provider and reliability.
 
 Checklist:
 
@@ -442,10 +476,7 @@ Exit criteria:
 
 ### Phase 2: Conversation Lifecycle and Turn API
 
-Score targets:
-
-- Conversation lifecycle and turn-based work: 60/115
-- CLI, MCP, and API product surface: 20/100
+Scope: Chat lifecycle and product surface.
 
 Checklist:
 
@@ -469,11 +500,7 @@ Exit criteria:
 
 ### Phase 3: Images 2.0 Read-Only Extraction
 
-Score targets:
-
-- ChatGPT Images 2.0 generation/edit/download: 45/170
-- DOM provider and state-machine architecture: 20/100
-- Testing/docs/release discipline: 10/55
+Scope: image extraction architecture and test coverage.
 
 Checklist:
 
@@ -498,11 +525,7 @@ Exit criteria:
 
 ### Phase 4: Images 2.0 Generation
 
-Score targets:
-
-- ChatGPT Images 2.0 generation/edit/download: 75/170
-- Model, mode, and thinking selection: 35/85
-- Reliability, observability, and recovery: 20/95
+Scope: image generation, model selection, and reliability.
 
 Checklist:
 
@@ -527,10 +550,7 @@ Exit criteria:
 
 ### Phase 5: Image Editing and Attachment-Heavy Workflows
 
-Score targets:
-
-- ChatGPT Images 2.0 generation/edit/download: 35/170
-- Attachments, large text, and bundled inputs: 55/105
+Scope: image editing and attachments.
 
 Checklist:
 
@@ -553,10 +573,7 @@ Exit criteria:
 
 ### Phase 6: Large Text and Paste-Attachment Handling
 
-Score targets:
-
-- Attachments, large text, and bundled inputs: 30/105
-- Conversation lifecycle and turn-based work: 15/115
+Scope: attachments and Chat turns.
 
 Checklist:
 
@@ -576,10 +593,7 @@ Exit criteria:
 
 ### Phase 7: Projects and Sidebar Organization
 
-Score targets:
-
-- Projects, sidebar organization, and deletion: 85/85
-- CLI, MCP, and API product surface: 100/100
+Scope: projects and product surface.
 
 Checklist:
 
@@ -600,10 +614,7 @@ Exit criteria:
 
 ### Phase 8: Conversation Deletion and Destructive Operations
 
-Score targets:
-
-- Projects, sidebar organization, and deletion: 30/85
-- Reliability, observability, and recovery: 15/95
+Scope: destructive safety and reliability.
 
 Checklist:
 
@@ -622,11 +633,7 @@ Exit criteria:
 
 ### Phase 9: Reliability Hardening
 
-Score targets:
-
-- Persistent browser/session foundation: 90/90
-- Reliability, observability, and recovery: 50/95
-- DOM provider and state-machine architecture: 25/100
+Scope: browser foundation, reliability, and provider.
 
 Checklist:
 
@@ -650,11 +657,7 @@ Exit criteria:
 
 ### Phase 10: Product Surface Consolidation
 
-Score targets:
-
-- CLI, MCP, and API product surface: 60/100
-- Conversation lifecycle and turn-based work: 40/115
-- Model, mode, and thinking selection: 50/85
+Scope: product surface, Chat turns, and model selection.
 
 Checklist:
 
@@ -672,9 +675,7 @@ Exit criteria:
 
 ### Phase 11: Final Verification and Release Readiness
 
-Score targets:
-
-- Test harness, docs, and release discipline: 45/55
+Scope: documentation and release discipline.
 
 Checklist:
 
@@ -1012,44 +1013,47 @@ Questions to answer through probing:
 - Are generated image file IDs stable across page refresh?
 - Are signed image URLs long-lived enough for deferred downloads, or must downloads happen immediately?
 
-## Completion Accounting
+## Historical milestone record (stale for current conformance)
 
-Update this table as implementation proceeds.
+The following point-unlock table was an implementation-progress record from
+April 2026. It is retained as historical fact, but its numeric values and
+checkmarks are not a current capability claim and must not be added to the
+ledger above.
 
-| Milestone                     | Points Unlocked | Required Evidence                                                                                                                                                                                                                                                                                                         |
-| ----------------------------- | --------------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Baseline and fixture harness  |           60/60 | Build, lint/typecheck, sample read-only smoke, sanitized sample fixture, browser status smoke                                                                                                                                                                                                                             |
-| Provider split                |           55/75 | Typed ChatGPT image artifact, page snapshot, conversation snapshot, project list, and status modules                                                                                                                                                                                                                      |
-| Session create/resume/turn    |         100/115 | First-class create, get, and turn append live smokes passed through CLI/MCP                                                                                                                                                                                                                                               |
-| Model/mode/thinking selection |           80/85 | Picker mapping updated for current generic Instant/Thinking/Pro labels; direct CLI/MCP calls now accept browser model labels; image generate/edit commands and MCP tools support image thinking-time selection                                                                                                            |
-| Attachment expansion          |         105/105 | Text, multi-file, image/SVG, >10-image no-send probe, generated zip bundle, directory/glob, MCP, and large-paste-plus-file workflows live-proven; broader stress/regression coverage remains a reliability gate                                                                                                           |
-| Image extraction              |           65/65 | Sample conversation exact unique image count and downloads                                                                                                                                                                                                                                                                |
-| Image generation              |           70/70 | Fresh Images 2.0 generation in the Image Gen project produced one generated image and downloaded the PNG artifact                                                                                                                                                                                                         |
-| Image editing                 |           35/35 | Reference-image edit sessions recovered after long-running completion and downloaded generated PNG artifacts                                                                                                                                                                                                              |
-| Projects                      |           55/55 | Project list/get/create/move/rename implemented; create/move/rename live-smoked with exact-target verification                                                                                                                                                                                                            |
-| Deletion/destructive safety   |           30/30 | Dry-run delete planning and guarded confirmed delete both live-smoked against a throwaway generated-image conversation                                                                                                                                                                                                    |
-| CLI/MCP/API polish            |           80/80 | Image extract/generate/edit, browser status, conversation create/get/turn, project list/get/create/rename/move, and delete/delete-plan CLI/MCP surfaces implemented                                                                                                                                                       |
-| Reliability hardening         |           85/85 | Stable image-set wait, conversation/project hydration waits, final URL persistence, file-id dedupe, bounded direct-chat input budget, WSL path fallback, expected-name attachment preflight guard, attachment send-button hardening, snapshot answer reconciliation, no-send attachment probes, and status navigation fix |
-| Docs/release                  |           40/40 | Progress ledger updated with live attachment matrix evidence and known gaps                                                                                                                                                                                                                                               |
+| Historical milestone              | Historical observation                                                                                        | Evidence reference            |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------- | ----------------------------- |
+| Baseline and fixture harness      | Build/lint/typecheck, sample read-only smoke, sanitized fixture, and browser status were recorded             | **Progress Log**, Slice 1     |
+| Provider and session surfaces     | Typed image artifacts, snapshots, project reads, create/resume/turn surfaces were recorded                    | **Progress Log**, Slices 1–4  |
+| Model, attachment, and image work | Generic model labels, attachment probes, image extraction, generation, and editing observations were recorded | **Progress Log**, Slices 5–11 |
+| Projects and destructive safety   | Project mutations and guarded throwaway operations were recorded                                              | **Progress Log**, Slice 11    |
+| Reliability and docs              | Several wait, upload, dedupe, navigation, and artifact fixes were recorded                                    | **Progress Log**, Slices 8–12 |
 
-The point unlock table intentionally overlaps with the scorecard categories. The scorecard tracks product capability; the milestone table tracks implementation progress.
+Those observations remain useful evidence for the bounded rows in the current
+ledger, but they do not establish broad parity, resource safety, or current
+rollout support.
 
-## Definition of Done
+## Conformance exit criteria
 
-The implementation reaches the north star when:
+This plan is ready to call a capability supported only when:
 
-- Scorecard is at least 950/1000.
-- Every must-pass gate is checked.
-- Existing Oracle text/API behavior remains compatible.
-- CLI, MCP, and API surfaces return structured artifacts for generated images.
-- Image generation and image editing work with local file attachments.
-- Sessions can be created, resumed, and continued reliably.
-- Projects can organize conversations with verification.
-- Destructive operations are dry-run-first and exact-target-only.
-- Live failure artifacts make UI regressions diagnosable in one pass.
-- The docs explain the headful persistent-browser constraint clearly.
+- its ledger row names a bounded behavior and a dated evidence reference;
+- positive, negative, and relevant manual-action/resource cases are covered for
+  the named account, plan, browser, locale, and workspace matrix;
+- state transitions, cancellation, retries, and destructive actions are
+  evidenced without silently treating an acknowledgement loss as success;
+- failures preserve redacted diagnostics without conversation, account, or
+  private file content in shared probe artifacts;
+- the [current reliability plan](current-chatgpt-web-parity-reliability-plan.md)
+  has no unresolved source blocker that invalidates the row.
 
-## Immediate Next Actions
+Until those conditions are met, the row remains partial or unverified; no
+aggregate score or all-green label is used.
+
+## Historical immediate-next-actions record (stale)
+
+The checkmarks below record the April 2026 implementation sequence. They are
+historical observations, not current conformance status; consult the ledger
+and current evidence gates above.
 
 Recommended first implementation slice:
 
@@ -1063,7 +1067,11 @@ Recommended first implementation slice:
 
 This order is deliberate: downloading from an already-completed image conversation removes generation latency from the first hard problem, while still proving the new artifact model and DOM extraction strategy.
 
-## Progress Log
+## Progress Log (historical evidence; not current status)
+
+Entries below preserve dated observations, including negative evidence and
+claims later superseded by subsequent slices. They must not be read as
+current all-green or parity assertions; the ledger above reconciles them.
 
 ### 2026-04-22 Slice 1
 

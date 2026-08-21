@@ -1,8 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { loadUserConfig } from "../../config.js";
-import { buildBrowserConfig } from "../../cli/browserConfig.js";
-import { DEFAULT_MODEL } from "../../oracle.js";
+import { resolveTrustedBrowserConfig } from "../../browser/trustedBrowserConfig.js";
 import type { BrowserModelStrategy } from "../../browser/types.js";
 import {
   createChatgptSession,
@@ -14,7 +12,6 @@ import {
 import { extractChatgptSandboxArtifactsFromConfiguredBrowser } from "../../browser/chatgpt/sandboxArtifacts.js";
 import { resolveBrowserAttachments } from "../../browser/attachmentResolver.js";
 import { startMcpJob } from "../jobs.js";
-import { resolveDaemonClientWithOptionalAutostart } from "../../daemon/resolve.js";
 
 const browserStatusInputShape = {
   conversationUrl: z.string().url().optional(),
@@ -227,34 +224,14 @@ export function registerChatgptSessionTools(server: McpServer): void {
     },
     async (input: unknown) => {
       const parsed = createSessionInputSchema.parse(input);
-      const daemonJob = await maybeStartDaemonJob("chatgpt_create_session", parsed);
-      if (daemonJob) {
-        const structuredContent = { ...daemonJob };
-        return {
-          structuredContent,
-          content: [
-            {
-              type: "text" as const,
-              text: `Started daemon-backed ChatGPT create-session job ${daemonJob.jobId}. Poll oracle_job_status with this jobId.`,
-            },
-          ],
-        };
-      }
-      const job = startMcpJob("chatgpt_create_session", () => runCreateSession(parsed));
-      const structuredContent = {
-        jobId: job.id,
-        kind: job.kind,
-        status: job.status,
-        startedAt: job.startedAt,
-        updatedAt: job.updatedAt,
-        pollTool: "oracle_job_status" as const,
-      };
+      const daemonJob = await startMcpJob("chatgpt_create_session", parsed);
+      const structuredContent = { ...daemonJob };
       return {
         structuredContent,
         content: [
           {
             type: "text" as const,
-            text: `Started ChatGPT create-session job ${job.id}. Poll oracle_job_status with this jobId.`,
+            text: `Started durable ChatGPT create-session job ${daemonJob.jobId}. Poll oracle_job_status with this jobId.`,
           },
         ],
       };
@@ -438,34 +415,14 @@ export function registerChatgptSessionTools(server: McpServer): void {
     },
     async (input: unknown) => {
       const parsed = sendTurnInputSchema.parse(input);
-      const daemonJob = await maybeStartDaemonJob("chatgpt_send_turn", parsed);
-      if (daemonJob) {
-        const structuredContent = { ...daemonJob };
-        return {
-          structuredContent,
-          content: [
-            {
-              type: "text" as const,
-              text: `Started daemon-backed ChatGPT send-turn job ${daemonJob.jobId}. Poll oracle_job_status with this jobId.`,
-            },
-          ],
-        };
-      }
-      const job = startMcpJob("chatgpt_send_turn", () => runSendTurn(parsed));
-      const structuredContent = {
-        jobId: job.id,
-        kind: job.kind,
-        status: job.status,
-        startedAt: job.startedAt,
-        updatedAt: job.updatedAt,
-        pollTool: "oracle_job_status" as const,
-      };
+      const daemonJob = await startMcpJob("chatgpt_send_turn", parsed);
+      const structuredContent = { ...daemonJob };
       return {
         structuredContent,
         content: [
           {
             type: "text" as const,
-            text: `Started ChatGPT send-turn job ${job.id}. Poll oracle_job_status with this jobId.`,
+            text: `Started durable ChatGPT send-turn job ${daemonJob.jobId}. Poll oracle_job_status with this jobId.`,
           },
         ],
       };
@@ -542,17 +499,7 @@ async function runSendTurn(parsed: z.infer<typeof sendTurnInputSchema>) {
   return serializeTurnResult(result);
 }
 
-async function resolveMcpBrowserConfig(remoteChrome?: string) {
-  const { config: userConfig } = await loadUserConfig();
-  const cliBrowserConfig = remoteChrome
-    ? await buildBrowserConfig({ model: DEFAULT_MODEL, remoteChrome })
-    : {};
-  return {
-    ...(userConfig.browser ?? {}),
-    ...cliBrowserConfig,
-    remoteChrome: cliBrowserConfig.remoteChrome ?? userConfig.browser?.remoteChrome ?? null,
-  };
-}
+const resolveMcpBrowserConfig = resolveTrustedBrowserConfig;
 
 function serializeTurnResult(result: Awaited<ReturnType<typeof sendChatgptTurn>>) {
   return {
@@ -570,13 +517,4 @@ function serializeTurnResult(result: Awaited<ReturnType<typeof sendChatgptTurn>>
       ({ domRecords: _domRecords, ...image }) => image,
     ),
   };
-}
-
-async function maybeStartDaemonJob(
-  kind: "chatgpt_create_session" | "chatgpt_send_turn",
-  input: unknown,
-) {
-  const daemon = await resolveDaemonClientWithOptionalAutostart();
-  if (!daemon) return null;
-  return await daemon.startJob({ kind, input });
 }

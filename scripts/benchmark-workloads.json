@@ -1,0 +1,128 @@
+{
+  "schemaVersion": 1,
+  "mode": "baseline",
+  "sampleIntervalMs": 1000,
+  "scenarios": [
+    {
+      "id": "plain-chat",
+      "kind": "chat",
+      "operation": "create",
+      "iterations": 1,
+      "concurrency": 1,
+      "inputShape": "short",
+      "faults": []
+    },
+    {
+      "id": "four-sequential-chats",
+      "kind": "chat",
+      "operation": "create",
+      "iterations": 4,
+      "concurrency": 1,
+      "inputShape": "short",
+      "faults": []
+    },
+    {
+      "id": "two-concurrent-accepted-chats",
+      "kind": "chat",
+      "operation": "create",
+      "iterations": 2,
+      "concurrency": 2,
+      "inputShape": "short",
+      "faults": []
+    },
+    {
+      "id": "ten-small-files",
+      "kind": "upload",
+      "operation": "multiple",
+      "iterations": 1,
+      "concurrency": 1,
+      "inputShape": "short",
+      "attachmentCount": 10,
+      "attachmentBytes": 10485760,
+      "faults": []
+    },
+    {
+      "id": "maximum-streamed-file",
+      "kind": "upload",
+      "operation": "large-stream",
+      "iterations": 1,
+      "concurrency": 1,
+      "inputShape": "short",
+      "attachmentCount": 1,
+      "attachmentBytes": 536870912,
+      "faults": []
+    },
+    {
+      "id": "image-generation",
+      "kind": "image",
+      "operation": "generate",
+      "iterations": 1,
+      "concurrency": 1,
+      "inputShape": "short",
+      "faults": []
+    },
+    {
+      "id": "deep-research",
+      "kind": "research",
+      "operation": "start",
+      "iterations": 1,
+      "concurrency": 1,
+      "inputShape": "long",
+      "faults": []
+    },
+    {
+      "id": "work",
+      "kind": "work",
+      "operation": "start",
+      "iterations": 1,
+      "concurrency": 1,
+      "inputShape": "long",
+      "faults": []
+    },
+    {
+      "id": "browser-disconnect",
+      "kind": "chat",
+      "operation": "create",
+      "iterations": 1,
+      "concurrency": 1,
+      "inputShape": "short",
+      "faults": [{ "kind": "browser_disconnect", "phase": "during", "iteration": 0 }]
+    },
+    {
+      "id": "renderer-crash",
+      "kind": "chat",
+      "operation": "create",
+      "iterations": 1,
+      "concurrency": 1,
+      "inputShape": "short",
+      "faults": [{ "kind": "renderer_crash", "phase": "during", "iteration": 0 }]
+    },
+    {
+      "id": "controller-sigkill",
+      "kind": "chat",
+      "operation": "create",
+      "iterations": 1,
+      "concurrency": 1,
+      "inputShape": "short",
+      "faults": [{ "kind": "controller_sigkill", "phase": "during", "iteration": 0 }]
+    },
+    {
+      "id": "gpu-crash",
+      "kind": "image",
+      "operation": "generate",
+      "iterations": 1,
+      "concurrency": 1,
+      "inputShape": "short",
+      "faults": [{ "kind": "gpu_crash", "phase": "during", "iteration": 0 }]
+    },
+    {
+      "id": "cleanup-timeout",
+      "kind": "chat",
+      "operation": "create",
+      "iterations": 1,
+      "concurrency": 1,
+      "inputShape": "short",
+      "faults": [{ "kind": "cleanup_timeout", "phase": "after", "iteration": 0 }]
+    }
+  ]
+}

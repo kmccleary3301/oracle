@@ -19,8 +19,8 @@ export OPENROUTER_TITLE="Oracle CLI"
 
 - `--model` accepts any OpenRouter model id, e.g. `minimax/minimax-m2`, `z-ai/glm-4.6`, `openai/gpt-4o-mini`.
 - `--models` can mix first‑party and OpenRouter ids:  
-  `oracle --engine api --models "gpt-5-pro,minimax/minimax-m2,z-ai/glm-4.6,claude-4.5-sonnet" -p "Summarize..."`.
-- For built-in models (`gpt-5.1-pro`, `claude-4.5-sonnet`, `gemini-3.1-pro`, `gemini-3-pro`), Oracle falls back to OpenRouter automatically when the provider key is missing but `OPENROUTER_API_KEY` is set. It keeps using first‑party endpoints when their keys are present.
+  `oracle --engine api --models "gpt-5-pro,minimax/minimax-m2,z-ai/glm-4.6,claude-4.6-sonnet" -p "Summarize..."`.
+- For built-in models (`gpt-5.1-pro`, `claude-4.6-sonnet`, `gemini-3.1-pro`, `gemini-3-pro`), Oracle falls back to OpenRouter automatically when the provider key is missing but `OPENROUTER_API_KEY` is set. It keeps using first‑party endpoints when their keys are present.
 
 ## Headers
 

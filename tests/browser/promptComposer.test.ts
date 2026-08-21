@@ -2,11 +2,26 @@ import { describe, expect, test, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import {
   __test__ as promptComposer,
+  clearPromptComposer,
   insertPromptText,
+  submitPrompt,
 } from "../../src/browser/actions/promptComposer.js";
 import type { BrowserLogger } from "../../src/browser/types.js";
 
 describe("promptComposer", () => {
+  test("fails composer clearing when stale text remains", async () => {
+    const runtime = {
+      evaluate: vi.fn().mockResolvedValue({
+        result: { value: { cleared: true, remaining: ["old draft"] } },
+      }),
+    };
+    const logger = Object.assign(vi.fn(), { verbose: false });
+
+    await expect(clearPromptComposer(runtime as never, logger as never)).rejects.toThrow(
+      /Failed to clear prompt composer/,
+    );
+  });
+
   test("reconstructs ProseMirror paragraph readback without inflated blank lines", () => {
     const fixture = readFileSync("tests/fixtures/structured-request-body.md", "utf8").replace(
       /\n$/,
@@ -375,7 +390,7 @@ describe("promptComposer", () => {
                 lastMatched: false,
                 hasNewTurn: false,
                 stopVisible: true,
-                assistantVisible: false,
+                assistantVisible: true,
                 composerCleared: true,
                 inConversation: false,
               },
@@ -399,9 +414,7 @@ describe("promptComposer", () => {
     const runtime = {
       evaluate: vi
         .fn()
-        // Baseline read
         .mockResolvedValueOnce({ result: { value: 10 } })
-        // First poll after send: URL is durable and request body is a pasted-text attachment.
         .mockResolvedValueOnce({
           result: {
             value: {
@@ -419,8 +432,6 @@ describe("promptComposer", () => {
             },
           },
         }),
-    } as unknown as {
-      evaluate: (args: { expression: string; returnByValue?: boolean }) => Promise<unknown>;
     };
 
     await expect(
@@ -497,7 +508,125 @@ describe("promptComposer", () => {
     ).resolves.toBe(1);
   });
 
-  test("inserts raw prompt text through CDP without using synthetic paste", async () => {
+  test("attachment sends time out instead of allowing Enter fallback", async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = {
+        evaluate: vi.fn(async ({ expression }: { expression: string }) => {
+          if (expression.includes("dispatchClickSequence")) {
+            return { result: { value: { status: "disabled" } } };
+          }
+          return { result: { value: true } };
+        }),
+      } as unknown as {
+        evaluate: (args: { expression: string; returnByValue?: boolean }) => Promise<unknown>;
+      };
+
+      const promise = promptComposer.attemptSendButton(
+        runtime as never,
+        (() => undefined) as never,
+        undefined,
+        ["oracle-attach-verify.txt"],
+      );
+      const assertion = expect(promise).rejects.toThrow(/after 45s/i);
+      await vi.advanceTimersByTimeAsync(46_000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("only attachment sends get the longer send-button deadline", () => {
+    expect(promptComposer.sendButtonTimeoutMs()).toBe(20_000);
+    expect(promptComposer.sendButtonTimeoutMs([])).toBe(20_000);
+    expect(promptComposer.sendButtonTimeoutMs(["oracle-attach-verify.txt"])).toBe(45_000);
+    expect(promptComposer.sendButtonTimeoutMs(["oracle-attach-verify.txt"], 120_000)).toBe(120_000);
+  });
+
+  test("marks prompt submitted before commit verification finishes", async () => {
+    const onPromptSubmitted = vi.fn();
+    const runtime = {
+      evaluate: vi.fn(async ({ expression }: { expression: string }) => {
+        if (expression.includes("document.readyState")) {
+          return { result: { value: { ready: true, composer: true, fileInput: false } } };
+        }
+        if (expression.includes("focused: true")) {
+          return { result: { value: { focused: true } } };
+        }
+        if (expression.includes("editorText")) {
+          return {
+            result: { value: { editorText: "hello", fallbackValue: "", activeValue: "hello" } },
+          };
+        }
+        if (expression.includes("button.scrollIntoView")) {
+          return { result: { value: { status: "clicked" } } };
+        }
+        return {
+          result: {
+            value: {
+              baseline: 0,
+              turnsCount: 1,
+              userMatched: true,
+              prefixMatched: false,
+              lastMatched: true,
+              hasNewTurn: true,
+              stopVisible: true,
+              assistantVisible: false,
+              composerCleared: true,
+              inConversation: true,
+            },
+          },
+        };
+      }),
+    };
+    const input = { insertText: vi.fn(), dispatchKeyEvent: vi.fn() };
+    const logger = Object.assign(vi.fn(), { verbose: false });
+
+    await submitPrompt(
+      {
+        runtime: runtime as never,
+        input: input as never,
+        baselineTurns: 0,
+        onPromptSubmitted,
+      },
+      "hello",
+      logger as never,
+    );
+
+    expect(onPromptSubmitted).toHaveBeenCalledTimes(1);
+  });
+
+  test("waits for a delayed trusted click without issuing a second send", async () => {
+    vi.useFakeTimers();
+    try {
+      const evaluate = vi.fn().mockResolvedValue({
+        result: { value: { status: "point", x: 10, y: 20 } },
+      });
+      const input = {
+        dispatchMouseEvent: vi.fn(async ({ type }: { type: string }) => {
+          if (type === "mouseReleased") {
+            await new Promise((resolve) => setTimeout(resolve, 1_000));
+          }
+        }),
+      };
+
+      const result = promptComposer.attemptSendButton(
+        { evaluate } as never,
+        input as never,
+        undefined,
+        undefined,
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      await expect(result).resolves.toBe(true);
+      expect(evaluate).toHaveBeenCalledTimes(1);
+      expect(input.dispatchMouseEvent).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("preserves leading and trailing newlines in inserted prompts", async () => {
     vi.useFakeTimers();
     try {
       const runtime = {
@@ -536,9 +665,6 @@ describe("promptComposer", () => {
       const input = {
         insertText: vi.fn().mockResolvedValue(undefined),
         dispatchKeyEvent: vi.fn().mockResolvedValue(undefined),
-      } as unknown as {
-        insertText: ReturnType<typeof vi.fn>;
-        dispatchKeyEvent: ReturnType<typeof vi.fn>;
       };
       const logger = vi.fn() as unknown as BrowserLogger;
       const promise = insertPromptText(
@@ -550,8 +676,10 @@ describe("promptComposer", () => {
         "\nHello\n",
         logger,
       );
+
       await vi.advanceTimersByTimeAsync(500);
       await promise;
+
       expect(input.insertText).toHaveBeenCalledWith({ text: "\nHello\n" });
       expect(input.insertText).toHaveBeenCalledTimes(1);
     } finally {

@@ -65,10 +65,10 @@ describe("api key logging", () => {
     );
 
     const combined = logs.join("\n");
-    expect(combined).toContain("Calling gpt-5.1-pro (API: gpt-5.4-pro)");
-    expect(combined).toContain("Resolved model: gpt-5.1-pro → gpt-5.4-pro");
+    expect(combined).toContain("Calling gpt-5.1-pro (API: gpt-5.5-pro)");
+    expect(combined).toContain("Resolved model: gpt-5.1-pro → gpt-5.5-pro");
     expect(combined).toContain(
-      "Note: `gpt-5.1-pro` is a stable CLI alias; OpenAI API uses `gpt-5.4-pro`",
+      "Note: `gpt-5.1-pro` is a stable CLI alias; OpenAI API uses `gpt-5.5-pro`",
     );
 
     const headerIndex = logs.findIndex((line) => line.includes("Calling gpt-5.1-pro"));
@@ -148,7 +148,7 @@ describe("api key logging", () => {
 
     const combined = logs.join("\n");
     expect(combined).toContain(
-      "Using apiKey option=sk-s****1234 for model gpt-5.1-pro (API: gpt-5.4-pro)",
+      "Using apiKey option=sk-s****1234 for model gpt-5.1-pro (API: gpt-5.5-pro)",
     );
     expect(combined).not.toContain("supersecret");
   });
@@ -195,7 +195,9 @@ describe("api key logging", () => {
             write: () => true,
           },
         ),
-      ).rejects.toThrow(/Missing OPENAI_API_KEY|Missing OPENROUTER_API_KEY|valid model ID/);
+      ).rejects.toThrow(
+        /Missing OPENAI_API_KEY.*retry with --engine browser.*preset:"chatgpt-pro-heavy"|Missing OPENROUTER_API_KEY|valid model ID/s,
+      );
     } finally {
       if (originalOpenai !== undefined) {
         process.env.OPENAI_API_KEY = originalOpenai;

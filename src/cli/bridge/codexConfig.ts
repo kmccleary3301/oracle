@@ -23,8 +23,8 @@ export async function runBridgeCodexConfig(options: BridgeCodexConfigCliOptions)
 
   console.log(snippet);
   if (!options.printToken) {
-    console.log("");
-    console.log(
+    console.error("");
+    console.error(
       chalk.dim("Tip: rerun with --print-token to include ORACLE_REMOTE_TOKEN in the snippet."),
     );
   }

@@ -1,8 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { loadUserConfig } from "../../config.js";
-import { buildBrowserConfig } from "../../cli/browserConfig.js";
-import { DEFAULT_MODEL } from "../../oracle.js";
+import { resolveTrustedBrowserConfig } from "../../browser/trustedBrowserConfig.js";
 import {
   createChatgptProject,
   deleteChatgptConversation,
@@ -396,14 +394,4 @@ export function registerChatgptProjectsTool(server: McpServer): void {
   );
 }
 
-async function resolveMcpBrowserConfig(remoteChrome?: string) {
-  const { config: userConfig } = await loadUserConfig();
-  const cliBrowserConfig = remoteChrome
-    ? await buildBrowserConfig({ model: DEFAULT_MODEL, remoteChrome })
-    : {};
-  return {
-    ...(userConfig.browser ?? {}),
-    ...cliBrowserConfig,
-    remoteChrome: cliBrowserConfig.remoteChrome ?? userConfig.browser?.remoteChrome ?? null,
-  };
-}
+const resolveMcpBrowserConfig = resolveTrustedBrowserConfig;

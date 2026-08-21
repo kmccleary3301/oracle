@@ -1,9 +1,9 @@
 {
   "name": "@steipete/oracle",
-  "version": "0.9.0",
-  "description": "CLI wrapper around OpenAI Responses API and ChatGPT browser automation with GPT-5.5, GPT-5.4 Pro, GPT-5.4, GPT-5.2, GPT-5.1, and GPT-5.1 Codex high reasoning modes.",
+  "version": "0.17.1",
+  "description": "CLI wrapper around OpenAI Responses API and ChatGPT browser automation with GPT-5.6 Sol, GPT-5.6, GPT-5.5 Pro, GPT-5.5, GPT-5.4, GPT-5.2, GPT-5.1, and GPT-5.1 Codex high reasoning modes.",
   "keywords": [],
-  "homepage": "https://github.com/steipete/oracle#readme",
+  "homepage": "https://askoracle.sh",
   "bugs": {
     "url": "https://github.com/steipete/oracle/issues"
   },
@@ -30,6 +30,16 @@
   "main": "dist/bin/oracle-cli.js",
   "scripts": {
     "docs:list": "tsx scripts/docs-list.ts",
+    "docs:check": "node --no-deprecation --import tsx bin/oracle-cli.ts docs check",
+    "benchmark:workload": "tsx scripts/benchmark-workload.ts",
+    "benchmark:browser-resource": "tsx scripts/browser-resource-baseline.ts",
+    "benchmark:resource-soak": "tsx scripts/resource-soak.ts",
+    "capability:drift": "tsx scripts/capability-drift.ts",
+    "capability:promotion-gate": "tsx scripts/capability-promotion-gate.ts",
+    "release:promotion-gate": "tsx scripts/release-promotion-gate.ts",
+    "release:evidence-manifest": "tsx scripts/release-evidence-manifest.ts",
+    "release:rollback-smoke": "node scripts/packaged-rollback-smoke.mjs",
+    "docs:site": "node scripts/build-docs-site.mjs",
     "build": "tsc -p tsconfig.build.json && pnpm run build:vendor",
     "build:vendor": "node -e \"const fs=require('fs'); const path=require('path'); const vendorRoot=path.join('dist','vendor'); fs.rmSync(vendorRoot,{recursive:true,force:true}); const vendors=[['oracle-notifier']]; vendors.forEach(([name])=>{const src=path.join('vendor',name); const dest=path.join(vendorRoot,name); fs.mkdirSync(dest,{recursive:true}); if(fs.existsSync(src)){fs.cpSync(src,dest,{recursive:true,force:true});}});\"",
     "start": "pnpm run build && node ./dist/scripts/run-cli.js",
@@ -44,8 +54,10 @@
     "test": "vitest run",
     "test:mcp": "pnpm run build && pnpm run test:mcp:unit && pnpm run test:mcp:mcporter",
     "test:mcp:unit": "vitest run tests/mcp*.test.ts tests/mcp/**/*.test.ts",
-    "test:mcp:mcporter": "npx -y mcporter list oracle-local --schema --config config/mcporter.json && npx -y mcporter call oracle-local.sessions limit:1 --config config/mcporter.json",
+    "test:mcp:mcporter": "CHROME_DEVTOOLS_URL=http://127.0.0.1:0 pnpm dlx mcporter list oracle-local --schema --config config/mcporter.json && CHROME_DEVTOOLS_URL=http://127.0.0.1:0 pnpm dlx mcporter call oracle-local.sessions limit:1 --config config/mcporter.json",
     "test:browser": "pnpm run build && tsx scripts/test-browser.ts && ./scripts/browser-smoke.sh",
+    "test:packed-cli": "node scripts/packed-cli-smoke.mjs",
+    "test:release-evidence": "vitest run tests/scripts/releasePromotionGate.test.ts tests/scripts/packagedRollbackSmoke.test.ts",
     "test:live": "ORACLE_LIVE_TEST=1 vitest run tests/live --exclude tests/live/openai-live.test.ts",
     "test:live:fast": "ORACLE_LIVE_TEST=1 ORACLE_LIVE_TEST_FAST=1 vitest run tests/live/browser-fast-live.test.ts",
     "test:pro": "ORACLE_LIVE_TEST=1 vitest run tests/live/openai-live.test.ts",
@@ -55,66 +67,56 @@
   },
   "dependencies": {
     "@anthropic-ai/tokenizer": "^0.0.4",
-    "@google/genai": "^1.44.0",
+    "@google/genai": "^2.15.0",
     "@google/generative-ai": "^0.24.1",
-    "@modelcontextprotocol/sdk": "^1.27.1",
-    "@steipete/sweet-cookie": "^0.2.0",
-    "chalk": "^5.6.2",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@steipete/sweet-cookie": "^0.4.1",
+    "chalk": "^6.0.0",
     "chrome-launcher": "^1.2.1",
     "chrome-remote-interface": "^0.34.0",
-    "clipboardy": "^5.3.1",
-    "commander": "^14.0.3",
-    "dotenv": "^17.3.1",
+    "clipboardy": "^5.3.2",
+    "commander": "^15.0.0",
+    "dotenv": "^17.4.2",
     "fast-glob": "^3.3.3",
     "gpt-tokenizer": "^3.4.0",
-    "inquirer": "13.3.0",
+    "inquirer": "14.0.2",
     "json5": "^2.2.3",
     "kleur": "^4.1.5",
-    "markdansi": "0.2.1",
-    "openai": "^6.27.0",
-    "osc-progress": "^0.3.0",
-    "qs": "^6.15.0",
-    "shiki": "^4.0.1",
+    "markdansi": "0.3.3",
+    "openai": "^7.4.0",
+    "osc-progress": "^0.3.2",
+    "qs": "^6.15.3",
+    "shiki": "^4.4.2",
     "toasted-notifier": "^10.1.0",
-    "tokentally": "^0.1.1",
-    "zod": "^4.3.6"
+    "tokentally": "^0.1.3",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@anthropic-ai/tokenizer": "^0.0.4",
-    "@cdktf/node-pty-prebuilt-multiarch": "0.10.2",
-    "@types/chrome-remote-interface": "^0.33.0",
-    "@types/inquirer": "^9.0.9",
-    "@types/node": "^25.3.5",
-    "@vitest/coverage-v8": "4.0.18",
-    "devtools-protocol": "0.0.1595872",
-    "es-toolkit": "^1.45.1",
-    "esbuild": "^0.27.3",
-    "oxfmt": "0.36.0",
-    "oxlint": "^1.51.0",
-    "puppeteer-core": "^24.38.0",
-    "tsx": "^4.21.0",
-    "typescript": "^5.9.3",
-    "vitest": "^4.0.18"
+    "@types/chrome-remote-interface": "^0.34.0",
+    "@types/inquirer": "^9.0.10",
+    "@types/node": "^26.1.2",
+    "@vitest/coverage-v8": "4.1.10",
+    "devtools-protocol": "0.0.1673900",
+    "es-toolkit": "^1.50.0",
+    "esbuild": "^0.28.1",
+    "oxfmt": "0.62.0",
+    "oxlint": "^1.77.0",
+    "puppeteer-core": "^25.5.0",
+    "tsx": "^4.23.7",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
   },
   "devEngines": {
     "runtime": [
       {
         "name": "node",
-        "version": ">=22"
+        "version": ">=24"
       }
     ]
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
-  "packageManager": "pnpm@10.23.0+sha512.21c4e5698002ade97e4efe8b8b4a89a8de3c85a37919f957e7a0f30f38fbc5bbdd05980ffe29179b2fb6e6e691242e098d945d1601772cad0fef5fb6411e2a4b",
-  "pnpm": {
-    "overrides": {
-      "devtools-protocol": "0.0.1595872"
-    },
-    "onlyBuiltDependencies": [
-      "@cdktf/node-pty-prebuilt-multiarch",
-      "esbuild"
-    ]
-  }
+  "packageManager": "pnpm@10.34.5"
 }

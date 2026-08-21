@@ -9,6 +9,7 @@ import type {
   BrowserAttachment,
   BrowserAutomationConfig,
   BrowserRunOptions,
+  BrowserRunResult,
   BrowserLogger,
   ChromeClient,
 } from "../types.js";
@@ -23,6 +24,12 @@ import type {
   ChatgptControlsInspectionResult,
   ChatgptTurnResult,
 } from "./types.js";
+import {
+  computeChatgptConversationRevision,
+  type ChatgptConversationDivergencePolicy,
+  type ChatgptConversationRevision,
+} from "./revision.js";
+
 import type { ThinkingTimeLevel } from "../../oracle/types.js";
 import {
   clearComposerAttachments,
@@ -32,6 +39,8 @@ import {
   uploadAttachmentFile,
   waitForAttachmentCompletion,
 } from "../pageActions.js";
+export { readChatgptCapabilityProbe } from "./probe.js";
+export type { ChatgptCapabilityProbeOptions } from "./probe.js";
 
 export interface ChatgptBrowserStatusOptions {
   conversationUrl?: string;
@@ -76,7 +85,13 @@ export interface ChatgptSendTurnOptions {
   config?: BrowserAutomationConfig;
   timeoutMs?: number;
   includeSnapshot?: boolean;
+  /** Expected conversation head; omitted callers get an automatic preflight head. */
+  expectedRevision?: ChatgptConversationRevision;
+  /** How to handle an externally changed conversation head. */
+  divergencePolicy?: ChatgptConversationDivergencePolicy;
   runtimeHintCb?: BrowserRunOptions["runtimeHintCb"];
+  beforeSend?: BrowserRunOptions["beforeSend"];
+  onPromptSubmitted?: BrowserRunOptions["onPromptSubmitted"];
   returnAfterSubmit?: boolean;
   log?: BrowserLogger;
 }
@@ -88,6 +103,8 @@ export interface ChatgptCreateSessionOptions {
   timeoutMs?: number;
   includeSnapshot?: boolean;
   runtimeHintCb?: BrowserRunOptions["runtimeHintCb"];
+  beforeSend?: BrowserRunOptions["beforeSend"];
+  onPromptSubmitted?: BrowserRunOptions["onPromptSubmitted"];
   returnAfterSubmit?: boolean;
   log?: BrowserLogger;
 }
@@ -107,6 +124,7 @@ export async function readChatgptBrowserStatus(
     remoteChrome.port,
     logger,
     targetUrl,
+    undefined,
     { maxTabs: config.remoteChromeMaxTabs },
   );
   const client = connection.client;
@@ -180,6 +198,7 @@ export async function probeChatgptAttachments(
     remoteChrome.port,
     logger,
     config.chatgptUrl ?? config.url ?? CHATGPT_URL,
+    undefined,
     { maxTabs: config.remoteChromeMaxTabs },
   );
   const client = connection.client;
@@ -264,6 +283,7 @@ export async function inspectThinkingControlsForChatgptConversation(
     remoteChrome.port,
     logger,
     options.conversationUrl,
+    undefined,
     { maxTabs: config.remoteChromeMaxTabs },
   );
   const client = connection.client;
@@ -316,6 +336,7 @@ export async function readChatgptConversationSnapshot(
     remoteChrome.port,
     logger,
     options.conversationUrl,
+    undefined,
     { maxTabs: config.remoteChromeMaxTabs },
   );
   const client = connection.client;
@@ -357,6 +378,7 @@ export async function refreshChatgptConversation(
     remoteChrome.port,
     logger,
     options.conversationUrl,
+    undefined,
     { maxTabs: config.remoteChromeMaxTabs },
   );
   const client = connection.client;
@@ -386,18 +408,30 @@ export async function refreshChatgptConversation(
 }
 
 export async function sendChatgptTurn(options: ChatgptSendTurnOptions): Promise<ChatgptTurnResult> {
-  const baselineSnapshot = options.includeSnapshot
-    ? await readChatgptConversationSnapshot({
-        conversationUrl: options.conversationUrl,
-        config: options.config,
-        timeoutMs: Math.min(options.timeoutMs ?? 30_000, 30_000),
-        log: options.log,
-      }).catch(() => null)
-    : null;
+  const baselineSnapshot = await readChatgptConversationSnapshot({
+    conversationUrl: options.conversationUrl,
+    config: options.config,
+    timeoutMs: Math.min(options.timeoutMs ?? 30_000, 30_000),
+    log: options.log,
+  }).catch((error) => {
+    if (options.expectedRevision) {
+      return null;
+    }
+    throw error;
+  });
+  const expectedRevision =
+    options.expectedRevision ??
+    (baselineSnapshot
+      ? computeChatgptConversationRevision(baselineSnapshot, options.conversationUrl)
+      : undefined);
+  if (!expectedRevision) {
+    throw new Error("Unable to capture the ChatGPT conversation revision before submission.");
+  }
   const config = resolveBrowserConfig({
     ...(options.config ?? {}),
     url: options.conversationUrl,
     chatgptUrl: options.conversationUrl,
+    resumeConversationUrl: options.conversationUrl,
     modelStrategy: options.config?.modelStrategy ?? "current",
     timeoutMs: options.timeoutMs ?? options.config?.timeoutMs,
     inputTimeoutMs: resolveDirectChatInputTimeoutMs(options.timeoutMs, options.config),
@@ -406,7 +440,11 @@ export async function sendChatgptTurn(options: ChatgptSendTurnOptions): Promise<
     prompt: options.prompt,
     attachments: options.attachments ?? [],
     config,
+    expectedRevision,
+    divergencePolicy: options.divergencePolicy ?? "fail",
     runtimeHintCb: options.runtimeHintCb,
+    beforeSend: options.beforeSend,
+    onPromptSubmitted: options.onPromptSubmitted,
     returnAfterSubmit: options.returnAfterSubmit,
     log: options.log,
   });
@@ -433,6 +471,13 @@ export async function sendChatgptTurn(options: ChatgptSendTurnOptions): Promise<
     conversationUrl: result.tabUrl,
     answerText: reconciledAnswer.answerText,
     answerMarkdown: reconciledAnswer.answerMarkdown,
+    answerHtml: result.answerHtml,
+    citations: result.citations,
+    codeBlocks: result.codeBlocks,
+    tables: result.tables,
+    fileRefs: result.fileRefs,
+    imageRefs: result.imageRefs,
+    provenance: result.provenance,
     tookMs: result.tookMs,
     answerChars: reconciledAnswer.answerText.length,
     answerTokens: estimateTokenCount(reconciledAnswer.answerText),
@@ -456,7 +501,7 @@ export async function sendChatgptTurn(options: ChatgptSendTurnOptions): Promise<
       ),
     downloadedSandboxArtifacts: result.downloadedSandboxArtifacts ?? [],
     thinkingTimeSelection: result.thinkingTimeSelection,
-    warnings: result.warnings ?? [],
+    warnings: formatBrowserRunWarnings(result.warnings),
   };
 }
 
@@ -475,6 +520,8 @@ export async function createChatgptSession(
     attachments: options.attachments ?? [],
     config,
     runtimeHintCb: options.runtimeHintCb,
+    beforeSend: options.beforeSend,
+    onPromptSubmitted: options.onPromptSubmitted,
     returnAfterSubmit: options.returnAfterSubmit,
     log: options.log,
   });
@@ -497,6 +544,13 @@ export async function createChatgptSession(
     conversationUrl: result.tabUrl,
     answerText: reconciledAnswer.answerText,
     answerMarkdown: reconciledAnswer.answerMarkdown,
+    answerHtml: result.answerHtml,
+    citations: result.citations,
+    codeBlocks: result.codeBlocks,
+    tables: result.tables,
+    fileRefs: result.fileRefs,
+    imageRefs: result.imageRefs,
+    provenance: result.provenance,
     tookMs: result.tookMs,
     answerChars: reconciledAnswer.answerText.length,
     answerTokens: estimateTokenCount(reconciledAnswer.answerText),
@@ -510,13 +564,20 @@ export async function createChatgptSession(
     newSandboxArtifacts: result.newSandboxArtifacts ?? result.sandboxArtifacts ?? [],
     downloadedSandboxArtifacts: result.downloadedSandboxArtifacts ?? [],
     thinkingTimeSelection: result.thinkingTimeSelection,
-    warnings: result.warnings ?? [],
+    warnings: formatBrowserRunWarnings(result.warnings),
   };
 }
 
 function serializeSubmittedTurnResult(result: {
   answerText: string;
   answerMarkdown: string;
+  answerHtml?: string;
+  citations?: ChatgptTurnResult["citations"];
+  codeBlocks?: ChatgptTurnResult["codeBlocks"];
+  tables?: ChatgptTurnResult["tables"];
+  fileRefs?: ChatgptTurnResult["fileRefs"];
+  imageRefs?: ChatgptTurnResult["imageRefs"];
+  provenance?: ChatgptTurnResult["provenance"];
   tookMs: number;
   answerTokens: number;
   answerChars: number;
@@ -525,7 +586,7 @@ function serializeSubmittedTurnResult(result: {
   chromeTargetId?: string;
   tabUrl?: string;
   thinkingTimeSelection?: ChatgptTurnResult["thinkingTimeSelection"];
-  warnings?: string[];
+  warnings?: BrowserRunResult["warnings"];
 }): ChatgptTurnResult {
   const submittedAt = new Date().toISOString();
   const recommendedRecoveryDelayMs = resolveSubmittedRecoveryDelayMs(result.thinkingTimeSelection);
@@ -553,8 +614,12 @@ function serializeSubmittedTurnResult(result: {
     newSandboxArtifacts: [],
     downloadedSandboxArtifacts: [],
     thinkingTimeSelection: result.thinkingTimeSelection,
-    warnings: result.warnings ?? [],
+    warnings: formatBrowserRunWarnings(result.warnings),
   };
+}
+
+function formatBrowserRunWarnings(warnings: BrowserRunResult["warnings"]): string[] {
+  return (warnings ?? []).map((warning) => warning.message);
 }
 
 function resolveSubmittedRecoveryDelayMs(

@@ -1,0 +1,130 @@
+name: Nightly release evidence
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: "Promotion runs the bounded platform proof; extended runs the optional eight-hour assurance soak."
+        required: true
+        default: promotion
+        type: choice
+        options: [promotion, extended]
+      duration_ms:
+        description: "Extended assurance soak duration in milliseconds."
+        required: true
+        default: "28800000"
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  platform-matrix:
+    name: ${{ matrix.platform }} evidence
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos
+            hosted: macos-latest
+          - platform: linux
+            hosted: ubuntu-latest
+          - platform: windows
+            hosted: windows-latest
+    runs-on: ${{ matrix.hosted }}
+    env:
+      MATRIX_DURATION_MS: "5000"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - uses: pnpm/action-setup@v6
+      - run: pnpm install --frozen-lockfile
+      - name: Run focused fault and chaos proofs
+        run: pnpm exec vitest run tests/benchmark/resourceCycleProof.test.ts tests/browser/resourceGovernor.test.ts tests/browser/resourceTelemetry.test.ts
+      - name: Record browser resource baseline
+        run: pnpm benchmark:browser-resource --output ".release-evidence/resource-${{ matrix.platform }}.json"
+      - name: Run platform lifecycle matrix
+        run: pnpm benchmark:resource-soak --duration-ms "${{ env.MATRIX_DURATION_MS }}" --output ".release-evidence/matrix-${{ matrix.platform }}.json" --deterministic-output ".release-evidence/matrix-fixture-${{ matrix.platform }}.json"
+      - name: Emit sanitized platform manifest
+        run: >-
+          pnpm release:evidence-manifest platform
+          --platform "${{ matrix.platform }}"
+          --resource ".release-evidence/resource-${{ matrix.platform }}.json"
+          --workflow "${{ github.repository }}/.github/workflows/nightly-release-evidence.yml"
+          --soak ".release-evidence/matrix-${{ matrix.platform }}.json"
+          --fault ".release-evidence/matrix-fixture-${{ matrix.platform }}.json"
+          --lane matrix
+          --repository "${{ github.repository }}"
+          --run-id "${{ github.run_id }}"
+          --run-number "${{ github.run_number }}"
+          --source-ref "${{ github.ref }}"
+          --commit "${{ github.sha }}"
+          --output ".release-evidence/platform-${{ matrix.platform }}.json"
+      - name: Stage platform manifest for attestation
+        run: node -e "require('node:fs').copyFileSync('.release-evidence/platform-${{ matrix.platform }}.json', 'platform-${{ matrix.platform }}.json')"
+      - name: Upload platform evidence
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-platform-evidence-${{ matrix.platform }}-${{ github.run_id }}
+          if-no-files-found: error
+          path: .release-evidence/
+          include-hidden-files: true
+      - name: Attest platform manifest with GitHub OIDC
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: platform-${{ matrix.platform }}.json
+
+  soak:
+    name: Optional extended soak assurance
+    if: github.event_name == 'workflow_dispatch' && inputs.lane == 'extended'
+    runs-on: [self-hosted, macOS, ARM64, release-evidence-soak]
+    timeout-minutes: 540
+    env:
+      SOAK_DURATION_MS: ${{ inputs.duration_ms }}
+      REQUIRED_SOAK_DURATION_MS: "28800000"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - uses: pnpm/action-setup@v6
+      - run: pnpm install --frozen-lockfile
+      - name: Run focused resource proofs
+        run: pnpm exec vitest run tests/benchmark/resourceCycleProof.test.ts tests/browser/resourceGovernor.test.ts tests/browser/resourceTelemetry.test.ts
+      - name: Run uninterrupted resource soak
+        run: pnpm benchmark:resource-soak --duration-ms "${{ env.SOAK_DURATION_MS }}" --sample-interval-ms 10000 --output ".release-evidence/soak-macos.json" --deterministic-output ".release-evidence/soak-fixture-macos.json"
+      - name: Emit sanitized soak manifest
+        run: >-
+          pnpm release:evidence-manifest soak
+          --platform macos
+          --workflow "${{ github.repository }}/.github/workflows/nightly-release-evidence.yml"
+          --soak ".release-evidence/soak-macos.json"
+          --lane promotion
+          --required-duration-ms "${{ env.REQUIRED_SOAK_DURATION_MS }}"
+          --repository "${{ github.repository }}"
+          --run-id "${{ github.run_id }}"
+          --run-number "${{ github.run_number }}"
+          --source-ref "${{ github.ref }}"
+          --commit "${{ github.sha }}"
+          --output ".release-evidence/soak-evidence.json"
+      - name: Stage soak manifest for attestation
+        run: node -e "require('node:fs').copyFileSync('.release-evidence/soak-evidence.json', 'soak-evidence.json')"
+      - name: Upload soak evidence
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-soak-evidence-${{ github.run_id }}
+          if-no-files-found: error
+          path: .release-evidence/
+          include-hidden-files: true
+      - name: Attest soak manifest with GitHub OIDC
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: soak-evidence.json

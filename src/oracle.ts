@@ -11,7 +11,7 @@ export { buildPrompt, buildRequestBody, renderPromptMarkdown } from "./oracle/re
 export { appendPromptSuffix, hasPromptText, normalizePromptText } from "./oracle/promptText.js";
 export { estimateRequestTokens } from "./oracle/tokenEstimate.js";
 export { formatUSD, formatNumber, formatElapsed } from "./oracle/format.js";
-export { formatFileSection } from "./oracle/markdown.js";
+export { formatFileSection, formatFileSections } from "./oracle/markdown.js";
 export { getFileTokenStats, printFileTokenStats } from "./oracle/tokenStats.js";
 export {
   OracleResponseError,
@@ -28,3 +28,8 @@ export {
 export { createDefaultClientFactory } from "./oracle/client.js";
 export { runOracle, extractTextOutput } from "./oracle/run.js";
 export { resolveGeminiModelId } from "./oracle/gemini.js";
+export { classifyProviderFailure } from "./oracle/providerFailures.js";
+export type {
+  ProviderFailureClassification,
+  ProviderFailureContext,
+} from "./oracle/providerFailures.js";

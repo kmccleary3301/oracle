@@ -56,12 +56,29 @@ async function callClaude({
 }
 
 async function parseClaudeResponse(raw: Response): Promise<OracleResponse> {
-  const json = (await raw.json()) as {
+  const body = await raw.text();
+  if (!body.trim()) {
+    throw new Error(
+      `Claude request failed (${raw.status} ${raw.statusText || "unknown status"}): empty response`,
+    );
+  }
+  let json: {
     id?: string;
     content?: Array<{ text?: string }>;
     usage?: { input_tokens?: number; output_tokens?: number };
     error?: { message?: string };
   };
+  try {
+    json = JSON.parse(body) as typeof json;
+  } catch (error) {
+    const snippet = body.slice(0, 160).replace(/\s+/g, " ").trim();
+    throw new Error(
+      `Claude request failed (${raw.status} ${raw.statusText || "unknown status"}): invalid JSON response${
+        snippet ? `: ${snippet}` : ""
+      }`,
+      { cause: error },
+    );
+  }
   if (json.error) {
     throw new Error(json.error.message || "Claude request failed");
   }
@@ -138,7 +155,14 @@ export function createClaudeClient(
 }
 
 export function resolveClaudeModelId(modelName: string): string {
-  if (modelName === "claude-4.5-sonnet" || modelName === "claude-sonnet-4-5-20241022") {
+  if (modelName === "claude-4.6-sonnet" || modelName === "claude-sonnet-4-6") {
+    return "claude-sonnet-4-6";
+  }
+  if (
+    modelName === "claude-4.5-sonnet" ||
+    modelName === "claude-sonnet-4-5" ||
+    modelName === "claude-sonnet-4-5-20250929"
+  ) {
     return "claude-sonnet-4-5";
   }
   if (modelName === "claude-4.1-opus" || modelName === "claude-opus-4-1-20240808") {

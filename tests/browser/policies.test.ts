@@ -1,6 +1,5 @@
 import { describe, expect, test } from "vitest";
 import { buildAttachmentPlan, buildCookiePlan } from "../../src/browser/policies.js";
-import { formatFileSection } from "../../src/oracle/markdown.js";
 
 const sections = [
   { displayPath: "a.txt", absolutePath: "/repo/a.txt", content: "hello" },
@@ -19,7 +18,9 @@ describe("buildAttachmentPlan", () => {
     expect(plan.attachments).toHaveLength(0);
     expect(plan.shouldBundle).toBe(false);
     expect(plan.inlineBlock).toContain("### File: a.txt");
-    expect(plan.inlineBlock).toContain(formatFileSection("b.txt", "world").trim());
+    expect(plan.inlineBlock).toContain("Lines: 1-1");
+    expect(plan.inlineBlock).toContain("1 | hello");
+    expect(plan.inlineBlock).toContain("1 | world");
   });
 
   test("bundles when over max attachments", () => {
@@ -66,8 +67,8 @@ describe("buildCookiePlan", () => {
   });
 
   test("copy from Chrome default allowlist", () => {
-    const plan = buildCookiePlan({});
+    const plan = buildCookiePlan({ cookieNames: ["__Secure-next-auth.session-token", "_account"] });
     expect(plan.type).toBe("copy");
-    expect(plan.description).toContain("all from Chrome profile");
+    expect(plan.description).toContain("__Secure-next-auth.session-token, _account");
   });
 });

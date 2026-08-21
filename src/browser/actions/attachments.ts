@@ -1,11 +1,7 @@
 import path from "node:path";
 import type { ChromeClient, BrowserAttachment, BrowserLogger } from "../types.js";
-import {
-  CONVERSATION_TURN_SELECTOR,
-  INPUT_SELECTORS,
-  SEND_BUTTON_SELECTORS,
-  UPLOAD_STATUS_SELECTORS,
-} from "../constants.js";
+import { INPUT_SELECTORS, SEND_BUTTON_SELECTORS, UPLOAD_STATUS_SELECTORS } from "../constants.js";
+import { buildConversationTurnListExpression } from "../conversationTurns.js";
 import { delay } from "../utils.js";
 import { logDomFailure } from "../domDebug.js";
 import {
@@ -1340,6 +1336,15 @@ export async function clearComposerAttachments(
       '[data-testid*="remove-attachment"]',
       '[data-testid*="attachment-remove"]',
     ];
+    const presenceSelectors = [
+      '[data-testid*="attachment"]',
+      '[data-testid*="chip"]',
+      '[data-testid*="upload"]',
+      '[data-testid*="remove-attachment"]',
+      '[data-testid*="attachment-remove"]',
+      '[aria-label*="Remove"]',
+      '[aria-label*="remove"]',
+    ];
     const visible = (el) => {
       if (!(el instanceof HTMLElement)) return false;
       const rect = el.getBoundingClientRect();
@@ -1373,7 +1378,7 @@ export async function clearComposerAttachments(
         button.click();
       } catch {}
     }
-    const chipCount = removeButtons.length;
+    const chipCount = scope ? scope.querySelectorAll(presenceSelectors.join(',')).length : 0;
     const inputs = scope ? Array.from(scope.querySelectorAll('input[type="file"]')) : [];
     let inputCount = 0;
     for (const input of inputs) {
@@ -1421,7 +1426,14 @@ export async function waitForAttachmentCompletion(
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   const expectedNormalized = expectedNames.map((name) => name.toLowerCase());
+  const expectedInputBasenames = expectedNormalized
+    .map((name) => name.split("/").pop()?.split("\\").pop() ?? name)
+    .map((name) => name.toLowerCase().replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  const expectedInputSignature = expectedInputBasenames.slice().sort().join("\0");
   let inputMatchSince: number | null = null;
+  let inputOnlyReadySince: number | null = null;
+  let inputOnlySignature = "";
   let sawInputMatch = false;
   let attachmentMatchSince: number | null = null;
   let lastVerboseLog = 0;
@@ -1743,6 +1755,28 @@ export async function waitForAttachmentCompletion(
         attachmentMatchSince = null;
       }
 
+      const inputOnlySignatureNow = inputNames.slice().sort().join("\0");
+      const inputOnlyNamesSatisfied =
+        expectedInputBasenames.length > 0 && inputOnlySignatureNow === expectedInputSignature;
+      const inputOnlyReady =
+        inputOnlyNamesSatisfied &&
+        value.state === "ready" &&
+        value.uploading === false &&
+        !value.filesAttached &&
+        fileCount === 0;
+      if (inputOnlyReady) {
+        if (inputOnlyReadySince === null || inputOnlySignature !== inputOnlySignatureNow) {
+          inputOnlyReadySince = Date.now();
+          inputOnlySignature = inputOnlySignatureNow;
+        }
+        if (Date.now() - inputOnlyReadySince > 1500) {
+          return;
+        }
+      } else {
+        inputOnlyReadySince = null;
+        inputOnlySignature = "";
+      }
+
       // Fallback: if the file input has the expected names, allow progress once that condition is stable.
       // Some ChatGPT surfaces only render the filename after sending the message.
       const inputMissing = expectedNormalized.filter((expected) => {
@@ -1758,8 +1792,7 @@ export async function waitForAttachmentCompletion(
       // Don't include 'disabled' - a disabled button likely means upload is still in progress.
       const inputStateOk = value.state === "ready" || value.state === "missing";
       const inputSeenNow = inputMissing.length === 0 || fileCountSatisfied;
-      const inputEvidenceOk =
-        Boolean(value.filesAttached) || Boolean(value.uploading) || fileCountSatisfied;
+      const inputEvidenceOk = Boolean(value.filesAttached) || fileCountSatisfied;
       const stableThresholdMs = value.uploading ? 3000 : 1500;
       if (inputSeenNow && inputStateOk && inputEvidenceOk) {
         if (inputMatchSince === null) {
@@ -1791,25 +1824,136 @@ export async function waitForUserTurnAttachments(
   expectedNames: string[],
   timeoutMs: number,
   logger?: BrowserLogger,
+  options?: {
+    minTurnIndex?: number;
+    expectedPrompt?: string;
+    expectedConversationId?: string;
+  },
 ): Promise<boolean> {
   if (!expectedNames || expectedNames.length === 0) {
     return true;
   }
 
   const expectedNormalized = expectedNames.map((name) => name.toLowerCase());
-  const conversationSelectorLiteral = JSON.stringify(CONVERSATION_TURN_SELECTOR);
-  const expression = `(() => {
-    const CONVERSATION_SELECTOR = ${conversationSelectorLiteral};
-    const turns = Array.from(document.querySelectorAll(CONVERSATION_SELECTOR));
-    const userTurns = turns.filter((node) => {
+  const minTurnIndex =
+    typeof options?.minTurnIndex === "number" && Number.isFinite(options.minTurnIndex)
+      ? Math.max(0, Math.floor(options.minTurnIndex))
+      : null;
+  const expectedPromptPrefix = options?.expectedPrompt
+    ? options.expectedPrompt.toLowerCase().replace(/\s+/g, " ").trim().slice(0, 80)
+    : "";
+  const expectedConversationId =
+    typeof options?.expectedConversationId === "string" &&
+    options.expectedConversationId.trim().length > 0
+      ? options.expectedConversationId.trim()
+      : null;
+  const expression = buildUserTurnAttachmentExpression({
+    minTurnIndex,
+    expectedPromptPrefix,
+    expectedConversationId,
+  });
+
+  const deadline = Date.now() + timeoutMs;
+  let sawAttachmentUi = false;
+  while (Date.now() < deadline) {
+    const { result } = await Runtime.evaluate({ expression, returnByValue: true });
+    const value = result?.value as
+      | {
+          ok?: boolean;
+          text?: string;
+          attrs?: string[];
+          fileCount?: number;
+          hasAttachmentUi?: boolean;
+          attachmentUiCount?: number;
+          promptMatches?: boolean;
+          turnIndex?: number;
+          conversationMismatch?: boolean;
+        }
+      | undefined;
+    if (!value?.ok) {
+      if (value?.conversationMismatch && logger?.verbose) {
+        logger("User-turn attachment verification ignored mismatched conversation.");
+      }
+      await delay(200);
+      continue;
+    }
+    if (value.hasAttachmentUi) {
+      sawAttachmentUi = true;
+    }
+    const haystack = [value.text ?? "", ...(value.attrs ?? [])].join("\n");
+    const fileCount = typeof value.fileCount === "number" ? value.fileCount : 0;
+    const attachmentUiCount =
+      typeof value.attachmentUiCount === "number" ? value.attachmentUiCount : 0;
+    const promptMatches = expectedPromptPrefix ? value.promptMatches !== false : true;
+    const fileCountSatisfied =
+      fileCount >= expectedNormalized.length && expectedNormalized.length > 0;
+    const attachmentUiSatisfied =
+      attachmentUiCount >= expectedNormalized.length && expectedNormalized.length > 0;
+    const missing = expectedNormalized.filter((expected) => {
+      const baseName = expected.split("/").pop()?.split("\\").pop() ?? expected;
+      const normalizedExpected = baseName.toLowerCase().replace(/\s+/g, " ").trim();
+      const expectedNoExt = normalizedExpected.replace(/\.[a-z0-9]{1,10}$/i, "");
+      if (haystack.includes(normalizedExpected)) return false;
+      if (expectedNoExt.length >= 6 && haystack.includes(expectedNoExt)) return false;
+      return true;
+    });
+    if (promptMatches && (missing.length === 0 || fileCountSatisfied || attachmentUiSatisfied)) {
+      return true;
+    }
+    await delay(250);
+  }
+
+  if (!sawAttachmentUi) {
+    logger?.("Sent user message did not expose attachment UI; skipping attachment verification.");
+    return false;
+  }
+
+  logger?.("Sent user message did not show expected attachment names in time.");
+  await logDomFailure(Runtime, logger ?? (() => {}), "attachment-missing-user-turn");
+  throw new Error("Attachment was not present on the sent user message.");
+}
+
+function buildUserTurnAttachmentExpression(options: {
+  minTurnIndex: number | null;
+  expectedPromptPrefix: string;
+  expectedConversationId: string | null;
+}): string {
+  const minTurnLiteral = options.minTurnIndex === null ? "null" : String(options.minTurnIndex);
+  const expectedPromptLiteral = JSON.stringify(options.expectedPromptPrefix);
+  const expectedConversationLiteral = options.expectedConversationId
+    ? JSON.stringify(options.expectedConversationId)
+    : "null";
+  return `(() => {
+    const MIN_TURN_INDEX = ${minTurnLiteral};
+    const EXPECTED_PROMPT_PREFIX = ${expectedPromptLiteral};
+    const EXPECTED_CONVERSATION_ID = ${expectedConversationLiteral};
+    const currentHref = typeof location === 'object' && location.href ? location.href : '';
+    const currentConversationId = currentHref.match(/\\/c\\/([a-zA-Z0-9-]+)/)?.[1] ?? null;
+    if (
+      EXPECTED_CONVERSATION_ID &&
+      currentConversationId &&
+      currentConversationId !== EXPECTED_CONVERSATION_ID
+    ) {
+      return { ok: false, conversationMismatch: true };
+    }
+    const turns = ${buildConversationTurnListExpression()};
+    const userTurns = turns.map((node, index) => ({ node, index })).filter(({ node }) => {
       const attr = (node.getAttribute('data-message-author-role') || node.getAttribute('data-turn') || node.dataset?.turn || '').toLowerCase();
       if (attr === 'user') return true;
       return Boolean(node.querySelector('[data-message-author-role="user"]'));
     });
-    const lastUser = userTurns[userTurns.length - 1];
+    const eligibleTurns =
+      MIN_TURN_INDEX === null ? userTurns : userTurns.filter(({ index }) => index >= MIN_TURN_INDEX);
+    const lastUser = eligibleTurns[eligibleTurns.length - 1];
     if (!lastUser) return { ok: false };
-    const text = (lastUser.innerText || '').toLowerCase();
-    const attrs = Array.from(lastUser.querySelectorAll('[aria-label],[title]')).map((el) => {
+    const text = (lastUser.node.innerText || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+    const textPrefix = text.slice(0, Math.min(text.length, EXPECTED_PROMPT_PREFIX.length));
+    const promptMatches =
+      !EXPECTED_PROMPT_PREFIX ||
+      (text.length > 0 &&
+        (text.includes(EXPECTED_PROMPT_PREFIX) ||
+          (textPrefix.length > 0 && EXPECTED_PROMPT_PREFIX.includes(textPrefix))));
+    const attrs = Array.from(lastUser.node.querySelectorAll('[aria-label],[title]')).map((el) => {
       const aria = el.getAttribute('aria-label') || '';
       const title = el.getAttribute('title') || '';
       return (aria + ' ' + title).trim().toLowerCase();
@@ -1823,11 +1967,11 @@ export async function waitForUserTurnAttachments(
       '[title*="file"]',
       '[title*="attachment"]',
     ];
-    const attachmentUiCount = lastUser.querySelectorAll(attachmentSelectors.join(',')).length;
+    const attachmentUiCount = lastUser.node.querySelectorAll(attachmentSelectors.join(',')).length;
     const hasAttachmentUi =
       attachmentUiCount > 0 || attrs.some((attr) => attr.includes('file') || attr.includes('attachment'));
     const countRegex = /(?:^|\\b)(\\d+)\\s+(?:files?|attachments?)\\b/;
-    const fileCountNodes = Array.from(lastUser.querySelectorAll('button,span,div,[aria-label],[title]'));
+    const fileCountNodes = Array.from(lastUser.node.querySelectorAll('button,span,div,[aria-label],[title]'));
     let fileCount = 0;
     for (const node of fileCountNodes) {
       if (!(node instanceof HTMLElement)) continue;
@@ -1860,60 +2004,36 @@ export async function waitForUserTurnAttachments(
         }
       }
     }
-    return { ok: true, text, attrs, fileCount, hasAttachmentUi, attachmentUiCount };
+    return {
+      ok: true,
+      text,
+      attrs,
+      fileCount,
+      hasAttachmentUi,
+      attachmentUiCount,
+      promptMatches,
+      turnIndex: lastUser.index,
+    };
   })()`;
+}
 
-  const deadline = Date.now() + timeoutMs;
-  let sawAttachmentUi = false;
-  while (Date.now() < deadline) {
-    const { result } = await Runtime.evaluate({ expression, returnByValue: true });
-    const value = result?.value as
-      | {
-          ok?: boolean;
-          text?: string;
-          attrs?: string[];
-          fileCount?: number;
-          hasAttachmentUi?: boolean;
-          attachmentUiCount?: number;
-        }
-      | undefined;
-    if (!value?.ok) {
-      await delay(200);
-      continue;
-    }
-    if (value.hasAttachmentUi) {
-      sawAttachmentUi = true;
-    }
-    const haystack = [value.text ?? "", ...(value.attrs ?? [])].join("\n");
-    const fileCount = typeof value.fileCount === "number" ? value.fileCount : 0;
-    const attachmentUiCount =
-      typeof value.attachmentUiCount === "number" ? value.attachmentUiCount : 0;
-    const fileCountSatisfied =
-      fileCount >= expectedNormalized.length && expectedNormalized.length > 0;
-    const attachmentUiSatisfied =
-      attachmentUiCount >= expectedNormalized.length && expectedNormalized.length > 0;
-    const missing = expectedNormalized.filter((expected) => {
-      const baseName = expected.split("/").pop()?.split("\\").pop() ?? expected;
-      const normalizedExpected = baseName.toLowerCase().replace(/\s+/g, " ").trim();
-      const expectedNoExt = normalizedExpected.replace(/\.[a-z0-9]{1,10}$/i, "");
-      if (haystack.includes(normalizedExpected)) return false;
-      if (expectedNoExt.length >= 6 && haystack.includes(expectedNoExt)) return false;
-      return true;
-    });
-    if (missing.length === 0 || fileCountSatisfied || attachmentUiSatisfied) {
-      return true;
-    }
-    await delay(250);
-  }
-
-  if (!sawAttachmentUi) {
-    logger?.("Sent user message did not expose attachment UI; skipping attachment verification.");
-    return false;
-  }
-
-  logger?.("Sent user message did not show expected attachment names in time.");
-  await logDomFailure(Runtime, logger ?? (() => {}), "attachment-missing-user-turn");
-  throw new Error("Attachment was not present on the sent user message.");
+export function buildUserTurnAttachmentExpressionForTest(options?: {
+  minTurnIndex?: number | null;
+  expectedPromptPrefix?: string;
+  expectedConversationId?: string | null;
+}): string {
+  return buildUserTurnAttachmentExpression({
+    minTurnIndex:
+      typeof options?.minTurnIndex === "number" && Number.isFinite(options.minTurnIndex)
+        ? Math.max(0, Math.floor(options.minTurnIndex))
+        : null,
+    expectedPromptPrefix: options?.expectedPromptPrefix ?? "",
+    expectedConversationId:
+      typeof options?.expectedConversationId === "string" &&
+      options.expectedConversationId.trim().length > 0
+        ? options.expectedConversationId.trim()
+        : null,
+  });
 }
 
 export async function waitForAttachmentVisible(

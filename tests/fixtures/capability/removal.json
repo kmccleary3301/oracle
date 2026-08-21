@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "status": "ok",
+  "capturedAt": "2026-08-10T12:02:00.000Z",
+  "adapterVersion": "chatgpt-web-v1",
+  "controls": {
+    "modes": ["chat"],
+    "models": ["gpt-5.6"],
+    "effort": ["standard"],
+    "uploads": { "file": false, "image": true, "multiple": false }
+  },
+  "fingerprint": {
+    "algorithm": "sha256",
+    "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "structure": {
+      "readyState": "complete",
+      "landmarkCount": 4,
+      "buttonCount": 12,
+      "inputCount": 2,
+      "linkCount": 8,
+      "dialogCount": 0,
+      "menuCount": 1
+    }
+  }
+}
