@@ -52,6 +52,8 @@ export interface CoordinatorReservationOptions {
   role?: BrowserCoordinatorTargetRole;
   ownerJobId?: string | null;
   url?: string | null;
+  /** Caller freshly launched the Chrome on this endpoint; permits stale-claim adoption. */
+  selfLaunched?: boolean;
 }
 
 export interface CoordinatorAttachmentOptions extends CoordinatorReservationOptions {
@@ -257,7 +259,9 @@ export class CoordinatorRuntime {
   }
   async reserve(options: CoordinatorReservationOptions = {}): Promise<CoordinatorTargetLease> {
     this.#assertOpen();
-    const generation = await this.#ensureGeneration();
+    const generation = await this.#ensureGeneration({
+      selfLaunchedEndpoint: options.selfLaunched === true,
+    });
     const reservationId = `reservation_${this.ownerPid}_${randomUUID()}`;
     const role = options.role ?? "mutation";
     const admission = this.store.admitTarget({
@@ -293,7 +297,9 @@ export class CoordinatorRuntime {
   ): Promise<CoordinatorTargetLease> {
     this.#assertOpen();
     if (!targetId.trim()) throw new Error("Coordinator targetId must not be empty.");
-    const generation = await this.#ensureGeneration();
+    const generation = await this.#ensureGeneration({
+      selfLaunchedEndpoint: options.selfLaunched === true,
+    });
     const role = options.role ?? "mutation";
     const admission = this.store.admitTarget({
       targetId,
@@ -398,13 +404,16 @@ export class CoordinatorRuntime {
     this.store.close();
   }
 
-  async reconcileOwnership(): Promise<CoordinatorReconciliationResult> {
+  async reconcileOwnership(
+    reconciliationHints: { selfLaunchedEndpoint?: boolean } = {},
+  ): Promise<CoordinatorReconciliationResult> {
     return await reconcileCoordinatorOwnership({
       store: this.store,
       now: this.#options.now,
       staleOwnerMs: this.#options.staleOwnerMs,
       processProvider: this.#options.processProvider,
       endpointProbe: this.#options.endpointProbe,
+      selfLaunchedEndpoint: reconciliationHints.selfLaunchedEndpoint,
     });
   }
 
@@ -417,7 +426,9 @@ export class CoordinatorRuntime {
     return true;
   }
 
-  async #ensureGeneration(): Promise<number> {
+  async #ensureGeneration(
+    reconciliationHints: { selfLaunchedEndpoint?: boolean } = {},
+  ): Promise<number> {
     if (this.#generation !== null) return this.#generation;
     if (!(await this.#resolveOwnerStartToken())) {
       throw new BrowserAutomationError(
@@ -430,7 +441,7 @@ export class CoordinatorRuntime {
         },
       );
     }
-    const reconciliation = await this.reconcileOwnership();
+    const reconciliation = await this.reconcileOwnership(reconciliationHints);
     if (!reconciliation.takeoverAllowed && reconciliation.profile?.state === "running") {
       throw new BrowserAutomationError(
         reconciliation.requiresAction

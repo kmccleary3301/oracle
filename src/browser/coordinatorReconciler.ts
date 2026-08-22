@@ -36,6 +36,8 @@ export interface CoordinatorReconcilerOptions {
   endpointProbe?: (endpoint: string) => Promise<{ ok: boolean; error?: string }>;
   ownerObservation?: ProcessSnapshot | null;
   browserObservation?: ProcessSnapshot | null;
+  /** True when the caller freshly launched the Chrome bound to this endpoint and can vouch for it. */
+  selfLaunchedEndpoint?: boolean;
   remote?: boolean;
 }
 
@@ -240,6 +242,29 @@ export async function reconcileCoordinatorOwnership(
   if (ownerGone && browserGone && endpointReachable !== true) {
     return {
       classification: "terminal-owned",
+      takeoverAllowed: true,
+      terminationAllowed: false,
+      requiresAction: false,
+      generation: profile.generation,
+      profile,
+      reasons,
+      ownerValidation,
+      browserValidation,
+      endpointReachable,
+    };
+  }
+  if (
+    ownerGone &&
+    browserGone &&
+    endpointReachable === true &&
+    options.selfLaunchedEndpoint &&
+    !options.remote
+  ) {
+    // The caller launched this exact endpoint moments ago, so an answering port combined
+    // with a stale claim whose owner and browser are observably gone is our own browser,
+    // not foreign evidence. Adopt instead of demanding manual intervention.
+    return {
+      classification: "adoptable-owned",
       takeoverAllowed: true,
       terminationAllowed: false,
       requiresAction: false,
