@@ -13,7 +13,11 @@ import {
   recordCoordinatorResourceObservation,
   reserveCoordinatorTarget,
 } from "./coordinatorRuntime.js";
-import type { CoordinatorRuntimeOptions, CoordinatorTargetLease } from "./coordinatorRuntime.js";
+import type {
+  CoordinatorRuntimeOptions,
+  CoordinatorReservationOptions,
+  CoordinatorTargetLease,
+} from "./coordinatorRuntime.js";
 import type { BrowserCoordinatorTargetRole } from "./coordinatorStore.js";
 import { cleanupStaleProfileState } from "./profileState.js";
 import { delay } from "./utils.js";
@@ -874,7 +878,7 @@ async function connectToNewTarget(
   url: string,
   logger: BrowserLogger,
   messages: TargetConnectMessages & {
-    coordinator?: CoordinatorRuntimeOptions;
+    coordinator?: CoordinatorRuntimeOptions & Pick<CoordinatorReservationOptions, "selfLaunched">;
     role?: BrowserCoordinatorTargetRole;
   },
 ): Promise<{
@@ -1005,7 +1009,7 @@ export async function connectWithNewTab(
     fallbackToDefault?: boolean;
     retries?: number;
     retryDelayMs?: number;
-    coordinator?: CoordinatorRuntimeOptions;
+    coordinator?: CoordinatorRuntimeOptions & Pick<CoordinatorReservationOptions, "selfLaunched">;
     role?: BrowserCoordinatorTargetRole;
   },
 ): Promise<IsolatedTabConnection> {

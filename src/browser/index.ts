@@ -1551,6 +1551,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
             fallbackToDefault: !strictTabIsolation,
             retries: devtoolsRetries,
             retryDelayMs: 500,
+            coordinator: { selfLaunched: !reusedChrome },
           }),
         );
         client = connection.client;

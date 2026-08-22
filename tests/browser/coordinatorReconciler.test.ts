@@ -257,6 +257,45 @@ describe("reconcileCoordinatorOwnership", () => {
     });
   });
 
+  test("adopts a self-launched endpoint when the stale claim has no observable owner or browser", async () => {
+    const store = await runningStore({ browserPid: null });
+    const result = await reconcileCoordinatorOwnership({
+      store,
+      now: () => 30_000,
+      processProvider: provider([]),
+      endpointProbe: async () => ({ ok: true }),
+      selfLaunchedEndpoint: true,
+    });
+
+    expect(result).toMatchObject({
+      classification: "adoptable-owned",
+      takeoverAllowed: true,
+      terminationAllowed: false,
+      requiresAction: false,
+      generation: 1,
+      endpointReachable: true,
+    });
+    expect(result.reasons).toEqual(["heartbeat-stale", "devtools-reachable"]);
+  });
+
+  test("keeps degraded classification for self-launched endpoints in remote mode", async () => {
+    const store = await runningStore({ browserPid: null });
+    const result = await reconcileCoordinatorOwnership({
+      store,
+      now: () => 30_000,
+      processProvider: provider([]),
+      endpointProbe: async () => ({ ok: true }),
+      selfLaunchedEndpoint: true,
+      remote: true,
+    });
+
+    expect(result).toMatchObject({
+      classification: "degraded",
+      takeoverAllowed: false,
+      requiresAction: true,
+    });
+  });
+
   test("recognizes a stopped profile as terminal without a process action", async () => {
     const store = await runningStore({ browserPid: null, endpoint: null });
     expect(store.releaseProfile({ ownerPid: 101, ownerStartToken: "owner-a", generation: 1 })).toBe(
