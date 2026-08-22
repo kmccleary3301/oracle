@@ -221,6 +221,7 @@ const evaluateIntelligenceModelSelectionExpression = async (
   includeGpt56 = false,
   initialVersion: "5.5" | "5.6" = includeGpt56 ? "5.6" : "5.5",
   preserveButtonLabelOnVersionChange = false,
+  modelRowText = "",
 ): Promise<unknown> => {
   class FakeEventTarget {
     dispatchEvent(_event: unknown): boolean {
@@ -349,7 +350,7 @@ const evaluateIntelligenceModelSelectionExpression = async (
     fiveFour,
   ]);
   const gpt55Trigger = new FakeElement(
-    initialVersion === "5.6" ? "GPT-5.6 Sol" : "GPT-5.5",
+    modelRowText || (initialVersion === "5.6" ? "GPT-5.6 Sol" : "GPT-5.5"),
     {
       role: "menuitem",
       "aria-haspopup": "menu",
@@ -977,6 +978,19 @@ describe("browser model selection matchers", () => {
   it("reports GPT-5.6 Sol instead of a localized Intelligence effort pill", async () => {
     await expect(
       evaluateIntelligenceModelSelectionExpression("GPT-5.6 Sol", "极速", true, true),
+    ).resolves.toEqual({ status: "already-selected", label: "GPT-5.6 Sol" });
+  });
+  it("recognizes the concatenated Model row in the refreshed Intelligence picker", async () => {
+    await expect(
+      evaluateIntelligenceModelSelectionExpression(
+        "GPT-5.6 Sol",
+        "Extra High",
+        true,
+        true,
+        "5.6",
+        false,
+        "ModelGPT-5.6 Sol",
+      ),
     ).resolves.toEqual({ status: "already-selected", label: "GPT-5.6 Sol" });
   });
 

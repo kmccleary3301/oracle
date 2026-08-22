@@ -301,6 +301,19 @@ export async function insertPromptText(
   const fallbackValueTrimmed = fallbackValueRaw?.trim?.() ?? "";
   const activeValueTrimmed = activeValueRaw?.trim?.() ?? "";
   const promptSnippet = normalizedPrompt;
+  const normalizePromptReadback = (value: string): string =>
+    normalizePromptText(value).replace(/\s+/g, " ").trim();
+  const containsPromptIgnoringWhitespace = (...values: string[]): boolean => {
+    if (!promptSnippet) return true;
+    const normalizedSnippet = normalizePromptReadback(promptSnippet);
+    return values.some((value) =>
+      normalizePromptReadback(String(value || "")).includes(normalizedSnippet),
+    );
+  };
+  const containsPromptExactly = (...values: string[]): boolean => {
+    if (!promptSnippet) return true;
+    return values.some((value) => normalizePromptText(String(value || "")) === promptSnippet);
+  };
   const containsPromptSnippet = (...values: string[]): boolean => {
     if (!promptSnippet) return true;
     return values.some((value) => normalizePromptText(String(value || "")).includes(promptSnippet));
@@ -376,13 +389,49 @@ export async function insertPromptText(
     })()`,
     returnByValue: true,
   });
-  const observedEditor = postVerification.result?.value?.editorText ?? "";
-  const observedFallback = postVerification.result?.value?.fallbackValue ?? "";
-  const observedActive = postVerification.result?.value?.activeValue ?? "";
+  let observedEditor = postVerification.result?.value?.editorText ?? "";
+  let observedFallback = postVerification.result?.value?.fallbackValue ?? "";
+  let observedActive = postVerification.result?.value?.activeValue ?? "";
   if (
-    !containsPromptSnippet(observedEditor, observedFallback, observedActive) &&
-    !nativePasteResult.requiresFallback
+    prefersStructuredInsert &&
+    !containsPromptExactly(observedEditor, observedFallback, observedActive) &&
+    containsPromptIgnoringWhitespace(observedEditor, observedFallback, observedActive)
   ) {
+    logger("Prompt composer normalized structured line breaks; retrying with CDP text insertion.");
+    await clearPromptComposer(runtime, logger);
+    await input.insertText({ text: normalizedPrompt });
+    await delay(500);
+    const repairedVerification = await runtime.evaluate({
+      expression: `(() => {
+        const editor = document.querySelector(${primarySelectorLiteral});
+        const fallback = document.querySelector(${fallbackSelectorLiteral});
+        const inputSelectors = ${JSON.stringify(INPUT_SELECTORS)};
+        ${readValueFunction}
+        const isVisible = (node) => {
+          if (!node || typeof node.getBoundingClientRect !== 'function') return false;
+          const rect = node.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        };
+        const candidates = inputSelectors
+          .map((selector) => document.querySelector(selector))
+          .filter((node) => Boolean(node));
+        const active = candidates.find((node) => isVisible(node)) || candidates[0] || null;
+        return {
+          editorText: editor?.innerText ?? '',
+          fallbackValue: fallback?.value ?? '',
+          activeValue: active ? readValue(active) : '',
+        };
+      })()`,
+      returnByValue: true,
+    });
+    observedEditor = repairedVerification.result?.value?.editorText ?? "";
+    observedFallback = repairedVerification.result?.value?.fallbackValue ?? "";
+    observedActive = repairedVerification.result?.value?.activeValue ?? "";
+  }
+  const composerMatchesPrompt = prefersStructuredInsert
+    ? containsPromptExactly(observedEditor, observedFallback, observedActive)
+    : containsPromptSnippet(observedEditor, observedFallback, observedActive);
+  if (!composerMatchesPrompt && !nativePasteResult.requiresFallback) {
     await logDomFailure(runtime, logger, "prompt-insert-mismatch");
     throw new Error("Failed to insert the requested prompt text into the composer.");
   }

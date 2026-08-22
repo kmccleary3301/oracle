@@ -153,6 +153,59 @@ describe("promptComposer", () => {
     }
   });
 
+  test("repairs structured readback when ChatGPT collapses hard line breaks", async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = {
+        evaluate: vi
+          .fn()
+          .mockResolvedValueOnce({
+            result: { value: { ready: true, composer: true, fileInput: true } },
+          })
+          .mockResolvedValueOnce({ result: { value: { focused: true } } })
+          .mockResolvedValueOnce({
+            result: { value: { inserted: true, value: "A\nB" } },
+          })
+          .mockResolvedValueOnce({
+            result: { value: { editorText: "A B", fallbackValue: "", activeValue: "A B" } },
+          })
+          .mockResolvedValueOnce({
+            result: { value: { editorText: "A B", fallbackValue: "", activeValue: "A B" } },
+          })
+          .mockResolvedValueOnce({
+            result: { value: { cleared: true, remaining: [] } },
+          })
+          .mockResolvedValueOnce({
+            result: { value: { editorText: "A\nB", fallbackValue: "", activeValue: "A\nB" } },
+          }),
+      } as unknown as {
+        evaluate: (args: {
+          expression: string;
+          returnByValue?: boolean;
+          awaitPromise?: boolean;
+        }) => Promise<unknown>;
+      };
+      const input = {
+        insertText: vi.fn().mockResolvedValue(undefined),
+        dispatchKeyEvent: vi.fn().mockResolvedValue(undefined),
+      };
+      const logger = vi.fn() as unknown as BrowserLogger;
+      const promise = insertPromptText(
+        { runtime: runtime as never, input: input as never, inputTimeoutMs: 1_000 },
+        "A\nB",
+        logger,
+      );
+      await vi.advanceTimersByTimeAsync(2_000);
+      await promise;
+      expect(input.insertText).toHaveBeenCalledWith({ text: "A\nB" });
+      expect(logger).toHaveBeenCalledWith(
+        "Prompt composer normalized structured line breaks; retrying with CDP text insertion.",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test("promotes pasted-text attachments back into the composer", async () => {
     const largePrompt = `${"A\nB\n".repeat(5_100)}done`;
     const runtime = {

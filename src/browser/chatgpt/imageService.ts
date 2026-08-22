@@ -207,11 +207,14 @@ export function buildImageModeVerificationExpression(): string {
   return `(() => {
     const normalize = (value) => String(value || '').trim().toLowerCase().replace(/[\\u2013\\u2014]/g, '-').replace(/\\s+/g, ' ');
     const labels = (node) => normalize(node?.getAttribute?.('aria-label') || node?.getAttribute?.('data-mode') || node?.innerText || node?.textContent || '');
+    const pathname = String(location.pathname || '').toLowerCase();
+    const imageGeneratorPage =
+      /^\\/images\\/?$/.test(pathname) && /image generator|images 2\\.0/i.test(String(document.title || ''));
     const modeNodes = Array.from(document.querySelectorAll('[data-mode],[data-testid*="mode" i],[aria-label*="image" i],button,[role="option"],[role="menuitem"]'));
     const availableModes = [...new Set(modeNodes.map(labels).filter(Boolean).filter((label) => /image|chat|search|research|work/.test(label)))];
+    if (imageGeneratorPage && !availableModes.includes('images')) availableModes.push('images');
     const selected = modeNodes.find((node) => node.getAttribute?.('aria-current') === 'true' || node.getAttribute?.('aria-selected') === 'true' || node.getAttribute?.('data-state') === 'checked');
-    const selectedMode = labels(selected) || labels(document.querySelector('[data-testid="mode-switcher-dropdown-button"],[data-testid*="mode-switcher" i]')) || null;
-    const pathname = String(location.pathname || '').toLowerCase();
+    const selectedMode = imageGeneratorPage ? 'images' : labels(selected) || labels(document.querySelector('[data-testid="mode-switcher-dropdown-button"],[data-testid*="mode-switcher" i]')) || null;
     const body = String(document.body?.innerText || '');
     const pageIdentity = /\\/(auth|login)\\b/.test(pathname) ? 'auth' : /challenge|verify you are human/i.test(body) ? 'challenge' : /chatgpt\\.com/.test(location.hostname) ? 'chatgpt_app' : 'other';
     return { selectedMode, availableModes, pageIdentity, loginLikely: pageIdentity === 'chatgpt_app' && !/sign in|log in/i.test(body) };

@@ -298,11 +298,18 @@ export async function verifyThinkingTimeSelection(
       [control.label, control.ariaLabel, control.testId].filter(Boolean).join(" "),
     ),
   ].filter(Boolean);
+  const observedLabel = value?.actualThinkingTime ?? "";
+  const observedMatches =
+    Boolean(observedLabel) && thinkingLabelMatchesLevel(observedLabel, normalizedLevel);
+  const matchingLabel = visibleLabels.find((label) =>
+    thinkingLabelMatchesLevel(label, normalizedLevel),
+  );
   return {
     requestedThinkingTime: level,
     normalizedThinkingTime: normalizedLevel,
-    matches: visibleLabels.some((label) => thinkingLabelMatchesLevel(label, normalizedLevel)),
-    actualThinkingTime: value?.actualThinkingTime ?? visibleLabels[0] ?? null,
+    matches: observedMatches || Boolean(matchingLabel),
+    actualThinkingTime:
+      (observedMatches ? observedLabel : matchingLabel) ?? visibleLabels[0] ?? null,
     diagnostics,
   };
 }
@@ -1282,15 +1289,35 @@ function buildThinkingControlsInspectionExpression(level?: ThinkingTimeLevel): s
       '[data-testid*="model-switcher"]',
       '[data-model-picker-thinking-effort-action="true"]',
       'button.__composer-pill',
-      '[role="button"][aria-haspopup="menu"]',
     ].join(',')));
+    const effortLevelLabels = new Set([
+      'instant',
+      'high',
+      'extra high',
+      'low',
+      'medium',
+      'standard',
+      'light',
+      'heavy',
+      'extended',
+    ]);
     const chipCandidates = unique(chipNodes).filter((info) => {
       const text = normalize([info.label, info.ariaLabel, info.testId].filter(Boolean).join(' '));
-      return ['thinking', 'reasoning', 'pro', 'intelligence', 'effort'].some((token) =>
-        text.includes(token),
-      );
+      return effortLevelLabels.has(normalize(info.label)) ||
+        ['thinking', 'reasoning', 'pro', 'intelligence', 'effort'].some((token) =>
+          text.includes(token),
+        );
     });
-    const menuControls = unique(Array.from(document.querySelectorAll(${menuItemLiteral})));
+    const menuContainers = Array.from(document.querySelectorAll(${JSON.stringify(MENU_CONTAINER_SELECTOR)}));
+    const menuNodes = menuContainers.flatMap((container) =>
+      Array.from(container.querySelectorAll(${menuItemLiteral})),
+    );
+    const effortNodes = Array.from(document.querySelectorAll([
+      '[data-model-picker-thinking-effort-row="true"]',
+      '[data-model-picker-thinking-effort-action="true"]',
+      '[data-testid*="thinking-effort"]',
+    ].join(',')));
+    const menuControls = unique([...menuNodes, ...effortNodes]);
     return {
       requestedThinkingTime: requestedLevel || undefined,
       normalizedThinkingTime: requestedLevel || undefined,

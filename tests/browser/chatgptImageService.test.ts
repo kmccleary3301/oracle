@@ -13,6 +13,7 @@ import {
   editChatgptImage,
   generateChatgptImage,
   imageOutputMetadata,
+  verifyChatgptImageMode,
   interruptChatgptImage,
   isExactImageModeEvidence,
   normalizeImageLibraryEntries,
@@ -65,6 +66,38 @@ describe("ChatGPT image lifecycle service", () => {
     });
     expect(unselected.supported).toBe(true);
     expect(unselected.verified).toBe(false);
+  });
+
+  test("verifies the dedicated Images 2.0 generator route as Images mode", async () => {
+    const document = {
+      title: "ChatGPT Images 2.0 | AI Image Generator",
+      body: { innerText: "Create images" },
+      querySelectorAll: () => [],
+      querySelector: () => null,
+    };
+    const Runtime = {
+      evaluate: async ({ expression }: { expression: string }) => ({
+        result: {
+          value: Function(
+            "document",
+            "location",
+            `return ${expression}`,
+          )(document, {
+            pathname: "/images/",
+            hostname: "chatgpt.com",
+          }),
+        },
+      }),
+    };
+
+    await expect(verifyChatgptImageMode(Runtime as never)).resolves.toMatchObject({
+      supported: true,
+      verified: true,
+      selectedMode: "images",
+      availableModes: ["images"],
+      pageIdentity: "chatgpt_app",
+      loginLikely: true,
+    });
   });
 
   test("requires observed Images mode before submitting and succeeds when verified", async () => {

@@ -473,6 +473,37 @@ function buildModelSelectionExpression(
       if (normalized.startsWith('pro')) return 'Pro';
       return label;
     };
+    // The current Intelligence picker exposes the selected model as a plain Model … row
+    // while the composer pill exposes only the effort (Instant, Advanced, ...).
+    // Treat that row as authoritative for model identity; do not mistake the effort pill
+    // for GPT-5.6 Sol.
+    const getIntelligenceModelLabel = () => {
+      const menu = document.querySelector('[data-testid="composer-intelligence-picker-content"]');
+      if (!menu || typeof menu.querySelectorAll !== 'function') return '';
+      const modelRow = Array.from(
+        menu.querySelectorAll('[role="menuitem"], [role="menuitemradio"], [role="option"]'),
+      ).find((node) => {
+        const text = normalizeText(node.textContent ?? '');
+        return text.startsWith('model') && Boolean(versionFromLabel(text));
+      });
+      return (modelRow?.textContent ?? '')
+        .trim()
+        .replace(/^\\s*model\\s*/i, '')
+        .replace(/\\s+/g, ' ')
+        .trim();
+    };
+    const intelligenceModelMatchesTarget = () => {
+      const label = normalizeText(getIntelligenceModelLabel());
+      if (!label) return false;
+      if (desiredVersion && versionFromLabel(label) !== desiredVersion) return false;
+      if (desiredModelVariant && !label.includes(desiredModelVariant)) return false;
+      if (desiredModelVariant === 'sol' && labelHasProWord(label)) return false;
+      if (wantsPro && !labelHasProWord(label)) return false;
+      if (!wantsPro && labelHasProWord(label)) return false;
+      if (wantsInstant && !label.includes('instant')) return false;
+      if (wantsThinking && !label.includes('thinking')) return false;
+      return true;
+    };
     const configuredSelectionMatchesTarget = () => {
       const configuredVersionLabel = normalizeText(getConfiguredVersionLabel());
       const configuredVersion = versionFromLabel(configuredVersionLabel);
@@ -496,6 +527,10 @@ function buildModelSelectionExpression(
         const version = formatModelOptionLabel(getConfiguredVersionLabel());
         if (desiredModelVariant === 'sol' && labelHasProWord(normalizeText(variant))) return version;
         return [variant, version].filter(Boolean).join(' ');
+      }
+      const intelligenceModelLabel = getIntelligenceModelLabel();
+      if (intelligenceModelMatchesTarget()) {
+        return withProPillSignal(intelligenceModelLabel);
       }
       const composerLabel = getComposerModelLabel();
       const normalizedComposerLabel = normalizeText(composerLabel);
@@ -546,6 +581,7 @@ function buildModelSelectionExpression(
     }
     const buttonMatchesTarget = () => {
       if (configuredSelectionMatchesTarget()) return true;
+      if (intelligenceModelMatchesTarget()) return true;
       const normalizedLabel = normalizeText(getButtonLabel());
       if (!normalizedLabel) return false;
       if (wantsThinking && !wantsPro && hasProComposerPill()) return false;
@@ -1283,21 +1319,25 @@ function buildModelVerificationExpression(targetModel: string): string {
         .trim();
     };
     const normalizedTarget = normalizeText(PRIMARY_LABEL);
-    const desiredVersion = normalizedTarget.includes('5 5')
-      ? '5-5'
-      : normalizedTarget.includes('5 4')
-        ? '5-4'
-        : normalizedTarget.includes('5 2')
-        ? '5-2'
-        : normalizedTarget.includes('5 1')
-          ? '5-1'
-          : normalizedTarget.includes('5 0')
-            ? '5-0'
-            : null;
+    const desiredVersion = normalizedTarget.includes('5 6')
+      ? '5-6'
+      : normalizedTarget.includes('5 5')
+        ? '5-5'
+        : normalizedTarget.includes('5 4')
+          ? '5-4'
+          : normalizedTarget.includes('5 2')
+            ? '5-2'
+            : normalizedTarget.includes('5 1')
+              ? '5-1'
+              : normalizedTarget.includes('5 0')
+                ? '5-0'
+                : null;
+    const desiredModelVariant = normalizedTarget.includes(' sol') ? 'sol' : null;
     const wantsPro = normalizedTarget.includes(' pro') || normalizedTarget.endsWith(' pro') || normalizedTarget.includes('pro');
     const wantsThinking = normalizedTarget.includes('thinking');
     const wantsInstant = normalizedTarget.includes('instant');
     const versionAliases = (version) => {
+      if (version === '5-6') return ['5 6', '56', 'gpt56', 'gpt 56'];
       if (version === '5-5') return ['5 5', '55', 'gpt55', 'gpt 55'];
       if (version === '5-4') return ['5 4', '54', 'gpt54', 'gpt 54'];
       if (version === '5-2') return ['5 2', '52', 'gpt52', 'gpt 52'];
@@ -1313,6 +1353,8 @@ function buildModelVerificationExpression(targetModel: string): string {
       }
       const hasPro = combined.includes(' pro') || combined.endsWith(' pro') || combined.includes('proresearch') || combined.includes('research grade');
       const hasThinking = combined.includes('thinking') || combined.includes('reasoning');
+      if (desiredModelVariant && !combined.includes(desiredModelVariant)) return false;
+      if (desiredModelVariant === 'sol' && hasPro) return false;
       const hasInstant = combined.includes('instant');
       if (wantsPro && !hasPro) return false;
       if (!wantsPro && hasPro) return false;
@@ -1327,6 +1369,21 @@ function buildModelVerificationExpression(targetModel: string): string {
     };
     const button = document.querySelector(BUTTON_SELECTOR);
     const buttonLabel = (button?.textContent ?? '').trim();
+    const intelligenceModelLabel = () => {
+      const menu = document.querySelector('[data-testid="composer-intelligence-picker-content"]');
+      if (!menu || typeof menu.querySelectorAll !== 'function') return null;
+      const row = Array.from(
+        menu.querySelectorAll('[role="menuitem"], [role="menuitemradio"], [role="option"]'),
+      ).find((node) => {
+        const text = normalizeText(node.textContent ?? '');
+        return text.startsWith('model') && desiredVersion && versionAliases(desiredVersion).some((alias) => text.includes(alias));
+      });
+      return (row?.textContent ?? '')
+        .trim()
+        .replace(/^\\s*model\\s*/i, '')
+        .replace(/\\s+/g, ' ')
+        .trim() || null;
+    };
     const selectedOption = () => {
       const roots = Array.from(document.querySelectorAll(${menuContainerLiteral}));
       const nodes = roots.flatMap((root) => Array.from(root.querySelectorAll(${menuItemLiteral})));
@@ -1360,9 +1417,13 @@ function buildModelVerificationExpression(targetModel: string): string {
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
     const selected = selectedOption();
-    const selectedLabel = (selected?.textContent ?? '').trim() || null;
+    const intelligenceLabel = intelligenceModelLabel();
+    const selectedLabel = (selected?.textContent ?? '').trim() || intelligenceLabel;
     const selectedTestId = selected?.getAttribute?.('data-testid') || null;
-    const matches = strictMatch(selectedLabel, selectedTestId) || strictMatch(buttonLabel, null);
+    const matches =
+      strictMatch(selectedLabel, selectedTestId) ||
+      strictMatch(intelligenceLabel, null) ||
+      strictMatch(buttonLabel, null);
     const availableOptions = collectAvailableOptions();
     await closeMenu();
     return {

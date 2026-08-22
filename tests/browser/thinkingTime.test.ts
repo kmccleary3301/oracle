@@ -2885,4 +2885,31 @@ describe("browser thinking-time selection expression", () => {
       actualThinkingTime: "Heavy",
     });
   });
+
+  it("prefers a matching effort chip over an unrelated visible control", async () => {
+    const runtime = {
+      evaluate: async () => ({
+        result: {
+          value: {
+            actualThinkingTime: "Chat",
+            diagnostics: {
+              requestedThinkingTime: "extended",
+              normalizedThinkingTime: "extended",
+              chipCandidates: [
+                { label: "Chat", selected: false },
+                { label: "High", selected: false },
+              ],
+              menuControls: [],
+              availableOptions: [],
+            },
+          },
+        },
+      }),
+    } as unknown as Parameters<typeof verifyThinkingTimeSelection>[0];
+
+    await expect(verifyThinkingTimeSelection(runtime, "extended")).resolves.toMatchObject({
+      matches: true,
+      actualThinkingTime: "High",
+    });
+  });
 });
