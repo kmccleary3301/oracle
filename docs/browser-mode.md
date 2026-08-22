@@ -263,6 +263,7 @@ oracle --engine browser \
 - Log into chatgpt.com in that window the first time; Oracle polls until the session is active, then proceeds.
 - Reuse the same profile on subsequent runs (no re-login unless the session expires).
 - Add `--browser-keep-browser` (or config `browser.keepBrowser=true`) when doing the initial login/setup or debugging so the Chrome window stays open after the run. When omitted, Oracle closes Chrome but preserves the profile on disk.
+- On macOS, persistent manual-login profiles launch with the real Chrome Keychain; Oracle never applies `--use-mock-keychain` or `--password-store=basic` to that profile. This is required for session cookies to survive an Oracle restart.
 - Cookie copy is skipped by default in this mode. To automate manual-login runs, set `browser.manualLoginCookieSync=true` in `~/.oracle/config.json` to seed the persistent profile from your existing Chrome cookies; inline cookies apply when cookie sync is enabled.
 - If Chrome is already running with that profile and DevTools remote debugging enabled (see `DevToolsActivePort` in the profile dir), you can reuse it instead of relaunching by pointing Oracle at it with `--remote-chrome <host:port>`.
 - Remote Chrome runs also participate in tab-slot coordination when paired with `--browser-manual-login` and a shared manual-login profile.

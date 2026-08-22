@@ -163,6 +163,29 @@ describe("copied-profile launch flags", () => {
     expect(options.chromeFlags).not.toContain("--password-store=basic");
     expect(options.chromeFlags).toContain("--remote-debugging-address=0.0.0.0");
   });
+  test("preserves the real keychain for persistent login profiles", async () => {
+    const { shouldPreserveKeychainProfileForTest } =
+      await import("../../src/browser/chromeLifecycle.js");
+
+    expect(
+      shouldPreserveKeychainProfileForTest({
+        copyProfileSource: "/signed-in/chrome",
+        manualLogin: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldPreserveKeychainProfileForTest({
+        copyProfileSource: null,
+        manualLogin: true,
+      }),
+    ).toBe(process.platform === "darwin");
+    expect(
+      shouldPreserveKeychainProfileForTest({
+        copyProfileSource: null,
+        manualLogin: false,
+      }),
+    ).toBe(false);
+  });
 });
 
 describe("hidden-window launch flags", () => {

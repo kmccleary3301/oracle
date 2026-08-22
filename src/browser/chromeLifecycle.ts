@@ -52,20 +52,21 @@ export async function launchChrome(
 ): Promise<MonitoredLaunchedChrome> {
   const { connectHost, debugBindAddress, usePatchedLauncher } = resolveWslChromeLaunchRoute();
   const debugPort = config.debugPort ?? parseDebugPortEnv();
+  const preserveKeychainProfile = shouldPreserveKeychainProfile(config);
   const chromeFlags = buildChromeFlags(
     config.headless ?? false,
     debugBindAddress,
     config.hideWindow ?? false,
   );
-  // copy-profile reuses a copied signed-in profile whose cookies are
-  // Keychain-encrypted, so it must launch with the real Keychain (not mocked):
-  // strip the keychain-mocking flags from both chrome-launcher's defaults and
-  // Oracle's set, and ignore the defaults so they aren't re-added.
+  // Copied profiles and persistent manual-login profiles both contain cookies
+  // encrypted by the real macOS Keychain. Never launch either with Chrome's
+  // mock-keychain flags: doing so can make an otherwise valid session appear
+  // logged out on the next restart.
   const usingCopiedProfile = Boolean(config.copyProfileSource);
   if (usingCopiedProfile && config.chromeProfile) {
     chromeFlags.push(`--profile-directory=${config.chromeProfile}`);
   }
-  const launchOptions = resolveChromeLaunchOptions(chromeFlags, usingCopiedProfile);
+  const launchOptions = resolveChromeLaunchOptions(chromeFlags, preserveKeychainProfile);
   const launcher = usePatchedLauncher
     ? await launchWithCustomHost({
         chromeFlags: launchOptions.chromeFlags,
@@ -1308,11 +1309,26 @@ export function buildChromeFlagsForTest(
   return buildChromeFlags(headless, debugBindAddress, hideWindow);
 }
 
+function shouldPreserveKeychainProfile(
+  config: Pick<ResolvedBrowserConfig, "copyProfileSource" | "manualLogin">,
+): boolean {
+  return (
+    Boolean(config.copyProfileSource) ||
+    (process.platform === "darwin" && Boolean(config.manualLogin))
+  );
+}
+
+export function shouldPreserveKeychainProfileForTest(
+  config: Pick<ResolvedBrowserConfig, "copyProfileSource" | "manualLogin">,
+): boolean {
+  return shouldPreserveKeychainProfile(config);
+}
+
 function resolveChromeLaunchOptions(
   chromeFlags: string[],
-  usingCopiedProfile: boolean,
+  preserveKeychainProfile: boolean,
 ): { chromeFlags: string[]; ignoreDefaultFlags: boolean } {
-  if (!usingCopiedProfile) {
+  if (!preserveKeychainProfile) {
     return { chromeFlags, ignoreDefaultFlags: false };
   }
   return {
