@@ -814,6 +814,214 @@ const createDetachedProEffortMenuForTest = (): unknown => {
     new FakeElement("Pro Extended", { role: "menuitemradio", "aria-checked": "true" }),
   ]);
 };
+const evaluateUnifiedProSliderSelectionExpression = async (
+  maximumLabel = "Pro",
+  expressionBuilder: (targetModel: string) => string = buildModelSelectionExpressionForTest,
+  initialSliderValue = 3,
+): Promise<{}> => {
+  class FakeEventTarget {
+    dispatchEvent(_event: unknown): boolean {
+      return true;
+    }
+  }
+
+  class FakeMouseEvent {
+    constructor(
+      readonly type: string,
+      readonly init?: unknown,
+    ) {}
+  }
+  class FakeKeyboardEvent {
+    readonly type: string;
+    readonly key?: string;
+
+    constructor(type: string, init?: { key?: string }) {
+      this.type = type;
+      this.key = init?.key;
+    }
+  }
+
+  class FakeElement extends FakeEventTarget {
+    constructor(
+      public textContent: string,
+      private readonly attributes: Record<string, string> = {},
+      private readonly children: readonly FakeElement[] = [],
+      private readonly onDispatch?: (event: { type?: string; key?: string }) => void,
+    ) {
+      super();
+    }
+
+    getAttribute(name: string): string | null {
+      return this.attributes[name] ?? null;
+    }
+
+    setAttribute(name: string, value: string): void {
+      this.attributes[name] = value;
+    }
+
+    querySelector(selector: string): FakeElement | null {
+      if (selector.includes('[role="slider"]')) {
+        return this.children.find((child) => child.getAttribute("role") === "slider") ?? null;
+      }
+      return null;
+    }
+
+    querySelectorAll(_selector: string): FakeElement[] {
+      return [...this.children];
+    }
+
+    closest(_selector: string): FakeElement | null {
+      return null;
+    }
+
+    matches(selector: string): boolean {
+      return (
+        selector.includes("__composer-pill") &&
+        this.attributes.class?.includes("__composer-pill") === true
+      );
+    }
+
+    getBoundingClientRect(): { width: number; height: number; x: number; y: number } {
+      return { width: 144, height: 36, x: 0, y: 0 };
+    }
+
+    focus(): void {}
+
+    override dispatchEvent(event: unknown): boolean {
+      this.onDispatch?.(event as { type?: string; key?: string });
+      return super.dispatchEvent(event);
+    }
+  }
+
+  let menuOpen = false;
+  let sliderValue = initialSliderValue;
+  const sliderMax = 4;
+  const updateLabels = (value: number) => {
+    const label = value === sliderMax ? maximumLabel : "Extra High";
+    simpleView.textContent = `${label}, ${value + 1} of 5. Use Left and Right arrow keys to adjust power.`;
+    advancedView.textContent = `Model GPT-5.6 Sol Effort ${label}`;
+    effortRow.textContent = `Effort ${label}`;
+  };
+  const sliderInput = new FakeElement(
+    "",
+    {
+      role: "slider",
+      "aria-valuemin": "0",
+      "aria-valuemax": String(sliderMax),
+      "aria-valuenow": String(sliderValue),
+    },
+    [],
+    (event) => {
+      if (event.type !== "keydown") return;
+      if (event.key === "ArrowRight" && sliderValue < sliderMax) sliderValue += 1;
+      sliderInput.setAttribute("aria-valuenow", String(sliderValue));
+      updateLabels(sliderValue);
+    },
+  );
+  const sliderRoot = new FakeElement("", { "data-model-reasoning-effort-slider": "" }, [
+    sliderInput,
+  ]);
+  const simpleView = new FakeElement("");
+  const advancedView = new FakeElement("");
+  const effortRow = new FakeElement("Effort Extra High", {
+    role: "menuitem",
+    "aria-haspopup": "menu",
+  });
+  const modelRow = new FakeElement("Model GPT-5.6 Sol", {
+    role: "menuitem",
+    "aria-haspopup": "menu",
+  });
+  const advancedToggle = new FakeElement("Advanced", {
+    role: "menuitem",
+    "aria-expanded": "false",
+  });
+  const intelligenceMenu = new FakeElement(
+    "",
+    { role: "menu", "data-testid": "composer-intelligence-picker-content" },
+    [advancedToggle, modelRow, effortRow],
+  );
+  const modelButton = new FakeElement(
+    "Extra High",
+    {
+      class: "__composer-pill",
+      "aria-haspopup": "menu",
+      "aria-expanded": "false",
+    },
+    [],
+    (event) => {
+      if (event.type === "click") {
+        menuOpen = !menuOpen;
+        modelButton.setAttribute("aria-expanded", String(menuOpen));
+      }
+    },
+  );
+  updateLabels(sliderValue);
+
+  const documentStub = {
+    querySelector: (selector: string) => {
+      if (selector.includes("composer-intelligence-picker-content")) {
+        return menuOpen ? intelligenceMenu : null;
+      }
+      if (selector.includes("data-model-reasoning-effort-slider")) {
+        return menuOpen ? sliderRoot : null;
+      }
+      if (selector.includes("composer-model-picker-slider-simple-view")) {
+        return menuOpen ? simpleView : null;
+      }
+      if (selector.includes("composer-model-picker-slider-advanced-view")) {
+        return menuOpen ? advancedView : null;
+      }
+      if (
+        selector.includes("model-switcher-dropdown-button") ||
+        selector.includes("__composer-pill")
+      ) {
+        return modelButton;
+      }
+      return null;
+    },
+    querySelectorAll: (selector: string) => {
+      if (selector.includes("button.__composer-pill")) return [modelButton];
+      if (selector.includes('role="menu"') || selector.includes("data-radix")) {
+        return menuOpen ? [intelligenceMenu] : [];
+      }
+      return [];
+    },
+    title: "",
+    body: { innerText: "" },
+    dispatchEvent: () => true,
+  };
+  const expression = expressionBuilder("Pro");
+  const evaluate = new Function(
+    "document",
+    "performance",
+    "setTimeout",
+    "window",
+    "EventTarget",
+    "MouseEvent",
+    "KeyboardEvent",
+    "HTMLElement",
+    `return ${expression};`,
+  ) as (...args: unknown[]) => Promise<unknown>;
+
+  let now = 0;
+  const result = await evaluate(
+    documentStub,
+    { now: () => (now += 100) },
+    (handler: TimerHandler) => {
+      if (typeof handler === "function") handler();
+      return 0;
+    },
+    {
+      location: { href: "https://chatgpt.com/" },
+      getComputedStyle: () => ({ display: "block", visibility: "visible" }),
+    },
+    FakeEventTarget,
+    FakeMouseEvent,
+    FakeKeyboardEvent,
+    FakeElement,
+  );
+  return { result, sliderValue: String(sliderValue), simpleLabel: simpleView.textContent };
+};
 
 const evaluateComposerPillFallbackExpression = (
   targetModel: string,
@@ -1155,6 +1363,42 @@ describe("browser model selection matchers", () => {
   it("recognizes bare Pro as already selected when Pro is the browser target", () => {
     const result = evaluateImmediateModelSelectionExpression("Pro", "Pro");
     expect(result).toEqual({ status: "already-selected", label: "Pro" });
+  });
+  it("moves the refreshed Intelligence slider to Pro for the bare Pro target", async () => {
+    await expect(evaluateUnifiedProSliderSelectionExpression()).resolves.toEqual({
+      result: { status: "switched", label: "Pro" },
+      sliderValue: "4",
+      simpleLabel: "Pro, 5 of 5. Use Left and Right arrow keys to adjust power.",
+    });
+  });
+  it("fails closed when a lower subscription tier exposes no Pro effort", async () => {
+    await expect(evaluateUnifiedProSliderSelectionExpression("Extra High")).resolves.toEqual({
+      result: {
+        status: "option-not-found",
+        hint: {
+          temporaryChat: false,
+          availableOptions: ["Advanced", "Model GPT-5.6 Sol", "Effort Extra High"],
+        },
+      },
+      sliderValue: "4",
+      simpleLabel: "Extra High, 5 of 5. Use Left and Right arrow keys to adjust power.",
+    });
+  });
+  it("verifies Pro from the selected model and effort controls", async () => {
+    await expect(
+      evaluateUnifiedProSliderSelectionExpression(
+        "Pro",
+        buildModelVerificationExpressionForTest,
+        4,
+      ),
+    ).resolves.toMatchObject({
+      result: {
+        requestedModel: "Pro",
+        matches: true,
+        buttonLabel: "Extra High",
+        selectedLabel: "Pro",
+      },
+    });
   });
 
   it("does not accept stale versioned Pro labels for the current Pro target", () => {

@@ -495,6 +495,7 @@ function buildModelSelectionExpression(
     const intelligenceModelMatchesTarget = () => {
       const label = normalizeText(getIntelligenceModelLabel());
       if (!label) return false;
+      if (unifiedProEffortMatchesTarget()) return true;
       if (desiredVersion && versionFromLabel(label) !== desiredVersion) return false;
       if (desiredModelVariant && !label.includes(desiredModelVariant)) return false;
       if (desiredModelVariant === 'sol' && labelHasProWord(label)) return false;
@@ -503,6 +504,67 @@ function buildModelSelectionExpression(
       if (wantsInstant && !label.includes('instant')) return false;
       if (wantsThinking && !label.includes('thinking')) return false;
       return true;
+    };
+    const getIntelligenceEffortLabel = () => {
+      const candidates = [
+        document.querySelector('[data-testid="composer-model-picker-slider-simple-view"]')?.textContent ?? '',
+        document.querySelector('[data-testid="composer-model-picker-slider-advanced-view"]')?.textContent ?? '',
+        document.querySelector('[data-testid="composer-intelligence-picker-content"]')?.textContent ?? '',
+      ];
+      for (const candidate of candidates) {
+        const normalized = normalizeText(candidate);
+        const effortMatch = normalized.match(/\\beffort\\s+(pro|extra high|high|medium|standard|instant|low|light)\\b/);
+        if (effortMatch) return effortMatch[1];
+        const simpleMatch = normalized.match(/^(pro|extra high|high|medium|standard|instant|low|light)(?:\\s|,|$)/);
+        if (simpleMatch) return simpleMatch[1];
+      }
+      return '';
+    };
+    const unifiedProEffortMatchesTarget = () => {
+      if (!wantsPro || !getIntelligenceModelLabel()) return false;
+      if (getIntelligenceEffortLabel() !== 'pro') return false;
+      const model = normalizeText(getIntelligenceModelLabel());
+      if (desiredVersion && versionFromLabel(model) !== desiredVersion) return false;
+      if (desiredModelVariant && !model.includes(desiredModelVariant)) return false;
+      return !model.includes('thinking') && !model.includes('instant');
+    };
+    const selectUnifiedProEffort = async () => {
+      if (!wantsPro) return null;
+      if (unifiedProEffortMatchesTarget()) return { status: 'already-selected', label: 'Pro' };
+      const root = document.querySelector('[data-model-reasoning-effort-slider]');
+      const initialInput = root?.querySelector?.('[role="slider"]');
+      if (!initialInput) return null;
+      const max = Number(initialInput.getAttribute?.('aria-valuemax'));
+      const current = Number(initialInput.getAttribute?.('aria-valuenow'));
+      const steps = Number.isFinite(max) && Number.isFinite(current)
+        ? Math.max(1, max - current)
+        : 8;
+      initialInput.focus?.();
+      for (let index = 0; index < steps; index += 1) {
+        const input = document
+          .querySelector('[data-model-reasoning-effort-slider]')
+          ?.querySelector?.('[role="slider"]') || initialInput;
+        input.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'ArrowRight',
+            code: 'ArrowRight',
+            keyCode: 39,
+            which: 39,
+            bubbles: true,
+          }),
+        );
+        input.dispatchEvent(
+          new KeyboardEvent('keyup', {
+            key: 'ArrowRight',
+            code: 'ArrowRight',
+            keyCode: 39,
+            which: 39,
+            bubbles: true,
+          }),
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      return unifiedProEffortMatchesTarget() ? { status: 'switched', label: 'Pro' } : null;
     };
     const configuredSelectionMatchesTarget = () => {
       const configuredVersionLabel = normalizeText(getConfiguredVersionLabel());
@@ -528,6 +590,7 @@ function buildModelSelectionExpression(
         if (desiredModelVariant === 'sol' && labelHasProWord(normalizeText(variant))) return version;
         return [variant, version].filter(Boolean).join(' ');
       }
+      if (unifiedProEffortMatchesTarget()) return 'Pro';
       const intelligenceModelLabel = getIntelligenceModelLabel();
       if (intelligenceModelMatchesTarget()) {
         return withProPillSignal(intelligenceModelLabel);
@@ -1250,6 +1313,15 @@ function buildModelSelectionExpression(
           });
           return;
         }
+        const unifiedProResult = await selectUnifiedProEffort();
+        if (unifiedProResult) {
+          await closeMenu();
+          resolve({
+            status: clickedTargetOption ? 'switched' : unifiedProResult.status,
+            label: unifiedProResult.label,
+          });
+          return;
+        }
         if (match) {
           if (
             activeSelectionMatchesTarget() ||
@@ -1376,13 +1448,37 @@ function buildModelVerificationExpression(targetModel: string): string {
         menu.querySelectorAll('[role="menuitem"], [role="menuitemradio"], [role="option"]'),
       ).find((node) => {
         const text = normalizeText(node.textContent ?? '');
-        return text.startsWith('model') && desiredVersion && versionAliases(desiredVersion).some((alias) => text.includes(alias));
+        return text.startsWith('model') &&
+          (!desiredVersion || versionAliases(desiredVersion).some((alias) => text.includes(alias)));
       });
       return (row?.textContent ?? '')
         .trim()
         .replace(/^\\s*model\\s*/i, '')
         .replace(/\\s+/g, ' ')
         .trim() || null;
+    };
+    const intelligenceEffortLabel = () => {
+      const candidates = [
+        document.querySelector('[data-testid="composer-model-picker-slider-simple-view"]')?.textContent ?? '',
+        document.querySelector('[data-testid="composer-model-picker-slider-advanced-view"]')?.textContent ?? '',
+        document.querySelector('[data-testid="composer-intelligence-picker-content"]')?.textContent ?? '',
+      ];
+      for (const candidate of candidates) {
+        const normalized = normalizeText(candidate);
+        const effortMatch = normalized.match(/\\beffort\\s+(pro|extra high|high|medium|standard|instant|low|light)\\b/);
+        if (effortMatch) return effortMatch[1];
+        const simpleMatch = normalized.match(/^(pro|extra high|high|medium|standard|instant|low|light)(?:\\s|,|$)/);
+        if (simpleMatch) return simpleMatch[1];
+      }
+      return '';
+    };
+    const intelligenceProEffortMatchesTarget = () => {
+      if (!wantsPro || intelligenceEffortLabel() !== 'pro') return false;
+      const model = normalizeText(intelligenceModelLabel() ?? '');
+      if (!model || model.includes('thinking') || model.includes('instant')) return false;
+      if (desiredVersion && !versionAliases(desiredVersion).some((alias) => model.includes(alias))) return false;
+      if (desiredModelVariant && !model.includes(desiredModelVariant)) return false;
+      return true;
     };
     const selectedOption = () => {
       const roots = Array.from(document.querySelectorAll(${menuContainerLiteral}));
@@ -1418,9 +1514,13 @@ function buildModelVerificationExpression(targetModel: string): string {
     }
     const selected = selectedOption();
     const intelligenceLabel = intelligenceModelLabel();
-    const selectedLabel = (selected?.textContent ?? '').trim() || intelligenceLabel;
+    const intelligenceProEffortMatched = intelligenceProEffortMatchesTarget();
+    const selectedLabel =
+      (selected?.textContent ?? '').trim() ||
+      (intelligenceProEffortMatched ? 'Pro' : intelligenceLabel);
     const selectedTestId = selected?.getAttribute?.('data-testid') || null;
     const matches =
+      intelligenceProEffortMatched ||
       strictMatch(selectedLabel, selectedTestId) ||
       strictMatch(intelligenceLabel, null) ||
       strictMatch(buttonLabel, null);
